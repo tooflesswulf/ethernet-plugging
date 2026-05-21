@@ -59,3 +59,33 @@ http://192.168.0.20
 | Motion > Manual Control | Grip | Closes the fingers with current parameters |
 | Help > Documentation | — | Full WSG 50 docs available here |
  
+**Turn-off** the gripper by turn off the power strip (not the silver box, which is the power supply).
+
+## Robot Notes
+
+### Starting & Shutting Down
+
+**To start:** On the teach pendant screen → **ON** → **START** (some noise is normal) → **Exit**
+
+**To shut down:**
+- **Emergency:** Hit the E-stop button
+- **Normal:** Click the bottom-left corner → **OFF**
+
+After exiting the start panel, you will land on the **Run** panel (indicated in the top-left corner).
+
+### Local vs. Remote Control
+
+By default the robot may be in **Remote** mode. To switch to local control:
+
+- Top-right corner → toggle **Remote → Local**
+- Once in Local mode, the **Program**, **Installation**, and **Move** panels (top-left) will brighten and become accessible.
+
+### Moving the Robot
+
+Navigate to the **Move** panel (top-left, Local mode only). Two options:
+
+| Method | How to |
+|---|---|
+| **Screen controls** | Use the virtual buttons on the left side of the screen |
+| **Freedrive (screen)** | Click **Freedrive** at the bottom → panel appears on the right → press & hold, then move the robot by hand |
+| **Freedrive (physical)** | Press & hold the physical button on the back-top of the teach pendant, then move the robot by hand |
