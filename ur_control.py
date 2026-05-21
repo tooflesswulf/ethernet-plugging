@@ -36,7 +36,7 @@ if __name__ == '__main__':
     _g.finished.wait()
     _g = gripper.move(position=35, speed=50)
     _g.finished.wait()
-    gripper_state = 1
+    gripper_state = 0 # 0=open, 1=closed
     print('Homed, starting control loop...')
 
     servo_frequency = 500  # hz
@@ -74,14 +74,13 @@ if __name__ == '__main__':
         iface.update(dt)
         des_pose = URPose(*iface.target_pose)
 
-        # if gripper._pending_action is None and gripper_state != iface.gripper:
-        if gripper._pending_action is None and iface.gripper == 1:
-            if gripper_state == 1:
-                _g = gripper.grip(force=40, width=20)
-                gripper_state = 0
-            else:
-                _g = gripper.release()
+        if gripper._pending_action is None and gripper_state != iface.gripper_state:
+            if gripper_state == 0:
+                _g = gripper.grip(force=40, width=20, speed=50)
                 gripper_state = 1
+            else:
+                _g = gripper.release(pullback=10, speed=50)
+                gripper_state = 0
             _g.ack.wait()
 
         # Compute next servo command

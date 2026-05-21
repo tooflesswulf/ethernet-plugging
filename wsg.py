@@ -138,20 +138,18 @@ class WSG:
             if is_query or is_setter:
                 if key in self._pending_queries:
                     raise RuntimeError(f'Query already pending: {key}')
+                fin = ack
                 self._pending_queries[key] = {'ack': ack}
-            elif key in ('HOME', 'MOVE', 'GRIP', 'RELEASE'):
-                # Motion commands expect both ACK and FIN
-                if self._pending_action is not None:
-                    raise RuntimeError(f'Action already pending: {self._pending_action[0]}')
-                fin = Promise()
-                fin.then(self._clear_pending_action).catch(self._clear_pending_action)
-                self._pending_action = (key, {'ack': ack, 'fin': fin})
             else:
                 if self._pending_action is not None:
                     raise RuntimeError(f'Action already pending: {self._pending_action[0]}')
-                fin = ack
-                ack.then(self._clear_pending_action).catch(self._clear_pending_action)
-                self._pending_action = (key, {'ack': ack, 'fin': ack})
+                if key in ('HOME', 'MOVE', 'GRIP', 'RELEASE'):
+                    # Motion commands have separate ACK and FIN phases
+                    fin = Promise()
+                else:
+                    fin = ack
+                fin.then(self._clear_pending_action).catch(self._clear_pending_action)
+                self._pending_action = (key, {'ack': ack, 'fin': fin})
             self.tcp_sock.sendall(msg)
 
         if is_query or is_setter:
@@ -196,6 +194,9 @@ class WSG:
 
     def ack_fast_stop(self):
         return self.send(b'FSACK()\n')
+
+    def stop(self):
+        return self.send(b'STOP()\n')
 
     def bye(self):
         self._running = False

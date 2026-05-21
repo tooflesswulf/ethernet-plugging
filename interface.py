@@ -36,10 +36,11 @@ class KeyboardInterface:
             self.targ_pose[2] += self.speed[2] * dt
         if keyboard.KeyCode.from_char('e') in self.pressed:
             self.targ_pose[2] -= self.speed[2] * dt
-        if keyboard.KeyCode.from_char('[') in self.pressed:
-            self.gripper = 0
-        if keyboard.KeyCode.from_char(']') in self.pressed:
-            self.gripper = 1
+
+        if keyboard.Key.space in self.pressed:
+            grip_signal = 1
+        else:
+            grip_signal = 0
 
 
 from dualsense import DualSense
@@ -47,8 +48,8 @@ from robosuite import make
 
 
 class DualSenseInterface:
-    grip_lock = 0
-    gripper = 0
+    last_grip_signal = 0
+    gripper_state = 0
 
     def __init__(self, start_pose, xyzspeed=0.1, rpyspeed=1.0):
         self.env = make("Lift", robots="Panda")
@@ -65,13 +66,11 @@ class DualSenseInterface:
     def update(self, dt):
         act = self.dualsense.input2action()
         delta = act['right_delta']
-        if act['right_gripper'] == -1:
-            self.gripper = 0
-            self.grip_lock = 0
-        elif self.grip_lock == 1:
-            self.gripper = 0
-        else:
-            self.gripper = 1
-            self.grip_lock = 1
+        grip_signal = (1 if act['right_gripper'] == 1 else 0)
+
+        if grip_signal == 1 and self.last_grip_signal == 0:
+            # Toggle gripper state on rising edge of grip signal
+            self.gripper_state = 1 - self.gripper_state
 
         self.targ_pose = self.targ_pose + delta * self.speed * dt
+        self.last_grip_signal = grip_signal
