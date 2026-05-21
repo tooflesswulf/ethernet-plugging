@@ -34,6 +34,8 @@ if __name__ == '__main__':
     _g.ack.wait()
     ctrl.moveL(home_pose, 0.1, 0.1)
     _g.finished.wait()
+    _g = gripper.move(position=35, speed=50)
+    _g.finished.wait()
     gripper_state = 1
     print('Homed, starting control loop...')
 
@@ -43,8 +45,8 @@ if __name__ == '__main__':
     max_orientation_step = 0.02  # rad
     lookahead_time = 0.1
     servo_gain = 500
-    iface = interface.KeyboardInterface(home_pose, xyzspeed=0.003, rpyspeed=0.1)
-    # iface = interface.DualSenseInterface(home_pose, xyzspeed=0.01, rpyspeed=0.1)
+    # iface = interface.KeyboardInterface(home_pose, xyzspeed=0.003, rpyspeed=0.1)
+    iface = interface.DualSenseInterface(home_pose, xyzspeed=0.01, rpyspeed=0.1)
 
     def blend(p_start: URPose, p_end: URPose):
         blended_position = (
@@ -72,13 +74,15 @@ if __name__ == '__main__':
         iface.update(dt)
         des_pose = URPose(*iface.target_pose)
 
-        if gripper._pending_action is None and gripper_state != iface.gripper:
-            if iface.gripper == 0:
-                _g = gripper.grip(force=10, width=20)
+        # if gripper._pending_action is None and gripper_state != iface.gripper:
+        if gripper._pending_action is None and iface.gripper == 1:
+            if gripper_state == 1:
+                _g = gripper.grip(force=40, width=20)
+                gripper_state = 0
             else:
                 _g = gripper.release()
+                gripper_state = 1
             _g.ack.wait()
-            gripper_state = iface.gripper
 
         # Compute next servo command
         command = blend(actual_pose, des_pose)

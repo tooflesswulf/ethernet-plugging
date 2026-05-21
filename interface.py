@@ -47,7 +47,8 @@ from robosuite import make
 
 
 class DualSenseInterface:
-    gripper = 1
+    grip_lock = 0
+    gripper = 0
 
     def __init__(self, start_pose, xyzspeed=0.1, rpyspeed=1.0):
         self.env = make("Lift", robots="Panda")
@@ -64,4 +65,13 @@ class DualSenseInterface:
     def update(self, dt):
         act = self.dualsense.input2action()
         delta = act['right_delta']
+        if act['right_gripper'] == -1:
+            self.gripper = 0
+            self.grip_lock = 0
+        elif self.grip_lock == 1:
+            self.gripper = 0
+        else:
+            self.gripper = 1
+            self.grip_lock = 1
+
         self.targ_pose = self.targ_pose + delta * self.speed * dt
