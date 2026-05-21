@@ -1,5 +1,6 @@
 import numpy as np
 from pynput import keyboard
+from scipy.spatial.transform import Rotation as R
 
 
 class KeyboardInterface:
@@ -72,5 +73,14 @@ class DualSenseInterface:
             # Toggle gripper state on rising edge of grip signal
             self.gripper_state = 1 - self.gripper_state
 
-        self.targ_pose = self.targ_pose + delta * self.speed * dt
+        # Position: simple addition
+        dpos = delta[:3] * self.speed[:3] * dt
+        self.targ_pose[:3] += dpos
+
+        # Orientation: compose delta Euler (ZYX) onto current rotation vector
+        drx, dry, drz = delta[3:] * self.speed[3:] * dt
+        R_cur = R.from_rotvec(self.targ_pose[3:])
+        R_delta = R.from_euler('ZYX', [drz, dry, drx])
+        self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
+
         self.last_grip_signal = grip_signal
