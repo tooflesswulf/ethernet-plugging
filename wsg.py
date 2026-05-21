@@ -2,61 +2,12 @@ import socket
 import atexit
 import threading
 
+from promise import Promise
+
 '''
 Remaining TODO:
 - impl & handle AUTOSEND()
-- Fix FSACK() to not expect FIN FSACK.
 '''
-
-
-class Promise:
-    def __init__(self):
-        self._event = threading.Event()
-        self._value = None
-        self._error = None
-        self._callbacks = []
-        self._errbacks = []
-        self._lock = threading.Lock()
-
-    def resolve(self, value=None):
-        with self._lock:
-            self._value = value
-            self._event.set()
-            callbacks = list(self._callbacks)
-        for cb in callbacks:
-            cb(value)
-
-    def reject(self, error):
-        with self._lock:
-            self._error = error
-            self._event.set()
-            errbacks = list(self._errbacks)
-        for eb in errbacks:
-            eb(error)
-
-    def then(self, callback):
-        with self._lock:
-            if self._event.is_set() and self._error is None:
-                callback(self._value)
-            else:
-                self._callbacks.append(callback)
-        return self
-
-    def catch(self, errback):
-        with self._lock:
-            if self._event.is_set() and self._error is not None:
-                errback(self._error)
-            else:
-                self._errbacks.append(errback)
-        return self
-
-    def wait(self, timeout=None):
-        self._event.wait(timeout)
-        if not self._event.is_set():
-            raise TimeoutError()
-        if self._error is not None:
-            raise self._error
-        return self._value
 
 
 class CommandResult:
