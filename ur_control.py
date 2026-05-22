@@ -27,7 +27,8 @@ if __name__ == '__main__':
     ctrl = rtde_control.RTDEControlInterface(robot_ip)
     recv = rtde_receive.RTDEReceiveInterface(robot_ip)
     gripper = wsg.WSG(ip='192.168.0.20')
-    home_pose = URPose(0.14, 0.5, 0.5, 2.22, 2.22, 0)  # TODO: actual home pose
+    # home_pose = URPose(0.14, 0.5, 0.5, 2.22, 2.22, 0)  # TODO: actual home pose
+    home_pose = URPose(0.14, 0.5, 0.5-.1522, 2.22, 2.22, 0)  # TODO: actual home pose
 
     # Move to home, blocking
     _g = gripper.home()
