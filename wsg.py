@@ -36,6 +36,7 @@ class WSG:
         self.tcp_sock.connect((ip, port))
         self._pending_action = None  # (key, {"ack": Promise, "fin": Promise})
         self._pending_queries = {}   # key -> {"ack": Promise}
+        self._pending_stop = None    # Promise (resolves on ACK STOP)
         self._lock = threading.Lock()
         self._running = True
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -65,12 +66,21 @@ class WSG:
     def _dispatch(self, line: str):
         # ACK <CMD>
         if line.startswith('ACK '):
-            entry = None
-            with self._lock:
-                if self._pending_action and self._pending_action[0] == line[4:].strip():
-                    entry = self._pending_action[1]
-            if entry:
-                entry['ack'].resolve()
+            cmd = line[4:].strip()
+            if cmd == 'STOP':
+                stop_ack = None
+                with self._lock:
+                    stop_ack = self._pending_stop
+                    self._pending_stop = None
+                if stop_ack:
+                    stop_ack.resolve()
+            else:
+                entry = None
+                with self._lock:
+                    if self._pending_action and self._pending_action[0] == cmd:
+                        entry = self._pending_action[1]
+                if entry:
+                    entry['ack'].resolve()
 
         # FIN <CMD>
         elif line.startswith('FIN '):
@@ -85,16 +95,11 @@ class WSG:
         elif line.startswith('ERR'):
             err = RuntimeError(f'WSG error: {line}')
             with self._lock:
-                entries = []
-                if self._pending_action:
-                    entries.append(self._pending_action[1])
-                for e in self._pending_queries.values():
-                    entries.append(e)
-                self._pending_queries.clear()
-            for e in entries:
-                e['ack'].reject(err)
-                if 'fin' in e:
-                    e['fin'].reject(err)
+                action_entry = self._pending_action[1] if self._pending_action else None
+            if action_entry:
+                action_entry['ack'].reject(err)
+                if 'fin' in action_entry:
+                    action_entry['fin'].reject(err)
 
         # <KEY>=<VALUE> (query responses like FORCE=12.5)
         elif '=' in line:
@@ -196,7 +201,11 @@ class WSG:
         return self.send(b'FSACK()\n')
 
     def stop(self):
-        return self.send(b'STOP()\n')
+        ack = Promise()
+        with self._lock:
+            self._pending_stop = ack
+            self.tcp_sock.sendall(b'STOP()\n')
+        return CommandResult(ack)
 
     def bye(self):
         self._running = False
