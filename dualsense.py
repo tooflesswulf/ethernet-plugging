@@ -215,7 +215,7 @@ class DualSense(Device):
             ROBOSUITE_DEFAULT_LOGGER.warning(
                 "Failed to open DualSense device. "
                 "Consider killing other processes that may be using the device, "
-                f"or try other product ids for SONY DualSense in {[hex(id) for id in macros.DUALSENSE_PRODUCT_IDs]}"
+                f"or try other product ids for SONY DualSense in {[hex(id) for id in macros.DUALSENSE_PRODUCT_ID]}"
             )
             raise e
 

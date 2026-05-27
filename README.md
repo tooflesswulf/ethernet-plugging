@@ -1,5 +1,14 @@
 # Readme
 
+
+## Environment setup
+ 
+```
+conda create -n realrobot python=3.10 
+pip install hidapi scipy ur-rtde robosuite opencv-python
+```
+Realsense: https://github.com/realsenseai/librealsense/blob/master/doc/installation.md#install-dependencies
+for hidapi: sudo apt install libhidapi-dev 
 ## Internet Connection Check (Mac)
  
 ### Issue
