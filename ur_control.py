@@ -23,12 +23,12 @@ def slerp(q1, q2, fraction):
 
 
 if __name__ == '__main__':
-    robot_ip = '192.168.0.101'
+    robot_ip = '192.168.0.100' # change from 101 to 100
     ctrl = rtde_control.RTDEControlInterface(robot_ip)
     recv = rtde_receive.RTDEReceiveInterface(robot_ip)
     gripper = wsg.WSG(ip='192.168.0.20')
-    # home_pose = URPose(0.14, 0.5, 0.5, 2.22, 2.22, 0)  # TODO: actual home pose
-    home_pose = URPose(0.14, 0.5, 0.5-.1522, 2.22, 2.22, 0)  # TODO: actual home pose
+    # home_pose = URPose(0.14, 0.5, 0.5-.1522, 2.22, 2.22, 0)  # TODO: actual home pose
+    home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)  # TODO: actual home pose
 
     # Move to home, blocking
     _g = gripper.home()
