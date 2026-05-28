@@ -1,4 +1,4 @@
-import time
+import time, threading
 from collections import namedtuple
 
 import numpy as np
@@ -79,6 +79,248 @@ def blend(
         *blended_orientation.as_rotvec(),
     )
 
+# class Env:
+#     """
+#     Minimal robot environment wrapper for:
+#         - Teleoperation
+#         - Robot policy evaluation
+#         - Data collection
+
+#     Components:
+#         - Single RGB camera
+#         - UR robot arm
+#         - WSG gripper
+#     """
+
+#     def __init__(
+#         self,
+#         robot_ip="192.168.0.100", # could be 101 or 100 depending on your setup
+#         gripper_ip="192.168.0.20",
+#         camera_crop_mode=1, # crop on the right half of the image to focus on the workspace
+#         servo_frequency=500,
+#         max_position_step=(0.008, 0.008, 0.008),
+#         max_orientation_step=0.02,
+#         lookahead_time=0.1,
+#         servo_gain=500,
+#     ):
+#         # ============================================================
+#         # Camera
+#         # ============================================================
+#         self.camera = Camera(crop_mode=camera_crop_mode)
+
+#         # ============================================================
+#         # Robot interfaces
+#         # ============================================================
+#         self.robot_ip = robot_ip
+#         self.gripper_ip = gripper_ip
+
+#         self.ctrl = rtde_control.RTDEControlInterface(robot_ip)
+#         self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
+
+#         self.gripper = wsg.WSG(ip=gripper_ip)
+#         self.pos_query, self.force_query, self.g_pos, self.g_force = None, None, -1, -1
+#         # ============================================================
+#         # Servo parameters
+#         # ============================================================
+#         self.servo_frequency = servo_frequency
+#         self.dt = 1.0 / servo_frequency
+
+#         self.max_position_step = np.array(max_position_step)
+#         self.max_orientation_step = max_orientation_step
+
+#         self.lookahead_time = lookahead_time
+#         self.servo_gain = servo_gain
+
+#         # ============================================================
+#         # Internal states
+#         # ============================================================
+#         self.open_width = 35
+#         self.home_pose =  URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653) 
+#         self.gripper_state = 0  # 0=open, 1=closed
+
+#         print("Initializing environment...")
+#         print(f"Robot IP:   {robot_ip}")
+#         print(f"Gripper IP: {gripper_ip}")
+#         print(f"Servo  URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653) frequency: {servo_frequency} Hz")
+
+#     def reset(self, home_pose):
+#         """
+#         Reset environment:
+#             1. Open/home the gripper
+#             2. Move robot to home pose
+#             3. Set gripper to default width
+
+#         Args:
+#             home_pose: URPose
+#         """
+
+#         print("Resetting environment...")
+
+#         # ============================================================
+#         # Home / open gripper
+#         # ============================================================
+#         g = self.gripper.home()
+#         g.ack.wait()
+
+#         # ============================================================
+#         # Move robot home (blocking)
+#         # ============================================================
+#         self.ctrl.moveL(home_pose, 0.1, 0.1)
+
+#         # Wait for gripper homing to finish
+#         g.finished.wait()
+
+#         # ============================================================
+#         # Move gripper to default open width
+#         # ============================================================
+#         g = self.gripper.move(position=self.open_width, speed=50)
+#         g.finished.wait()
+
+#         self.gripper_state = 0
+#         if self.pos_query is None:
+#             self.pos_query = self.gripper.position()
+#         if self.force_query is None:
+#             self.force_query = self.gripper.force()
+#         if self.pos_query.is_set():
+#             self.g_pos = self.pos_query.value
+#             self.pos_query = None
+#         if self.force_query.is_set():
+#             self.g_force = self.force_query.value
+#             self.force_query = None
+
+#         print("Environment reset complete.")
+
+#         # return initial observation
+#         obs = {
+#             "rgb": self.camera.get_rgb(),
+#             "state": {
+#                 "actual_pose": self.home_pose,
+#                 "gripper_width": self.g_pos,
+#                 "gripper_force": self.g_force,
+#             }
+#         }
+
+#         return obs
+
+#     def flip_gripper(self):
+#         """
+#         Toggle gripper state.
+
+#         Current convention:
+#             0 = open
+#             1 = closed
+#         """
+
+#         # Avoid interrupting an ongoing gripper command
+#         if self.gripper._pending_action is not None:
+#             return
+
+#         # ============================================================
+#         # Close gripper
+#         # ============================================================
+#         if self.gripper_state == 0:
+#             g = self.gripper.grip(
+#                 force=40,
+#                 width=20,
+#                 speed=50,
+#             )
+#             self.gripper_state = 1
+
+#         # ============================================================
+#         # Open gripper
+#         # ============================================================
+#         else:
+#             g = self.gripper.release(
+#                 pullback=10,
+#                 speed=50,
+#             )
+#             self.gripper_state = 0
+
+#         # Wait until command acknowledged
+#         g.ack.wait()
+       
+    
+#     def step(self, actual_pose, des_pose, des_gripper_state):
+#         """
+#         Execute one control step.
+
+#         Args:
+#             actual_pose: URPose
+#                 Current end-effector pose.
+#             des_pose: URPose
+#                 Desired end-effector pose.
+
+#             des_gripper_state: int
+#                 0 = open
+#                 1 = closed
+
+#         Returns:
+#             obs: dict
+#                 {
+#                     "rgb": np.ndarray,
+#                     "state": {
+#                         "actual_pose": URPose,
+#                         "gripper_width": float,
+#                         "gripper_force": float,
+#                     }
+#                 }
+#         """
+
+       
+#         # ============================================================
+#         # Update gripper state if needed
+#         # ============================================================
+#         if des_gripper_state != self.gripper_state:
+#             self.flip_gripper()
+
+#         # ============================================================
+#         # Compute smooth servo command
+#         # ============================================================
+#         command = blend(
+#             p_start=actual_pose,
+#             p_end=des_pose,
+#             max_position_step=self.max_position_step,
+#             max_orientation_step=self.max_orientation_step,
+#         )
+#         # return  command
+#         # print(f"Command: {command}")
+#         # ============================================================
+#         # Send servo command
+#         # ============================================================
+#         self.ctrl.servoL(
+#             command,
+#             0.0,
+#             0.0,
+#             self.dt,
+#             self.lookahead_time,
+#             self.servo_gain,
+#         )
+
+#         self.ctrl.waitPeriod(self.dt)
+
+#         # ============================================================
+#         # Read latest observation
+#         # ============================================================
+#         # latest_pose = URPose(*self.recv.getActualTCPPose())
+#         # gripper_width, gripper_force = self.gripper.position(), self.gripper.force()
+#         obs = {
+#             # "rgb": self.camera.get_rgb(),
+#             "state": {
+#                 # "actual_pose": latest_pose,
+#                 # "gripper_width": gripper_width,
+#                 # "gripper_force": gripper_force,
+#             },
+#         }
+
+#         return obs
+
+#     def close(self):
+#         """
+#         Clean up resources.
+#         """
+#         self.camera.close()
+
+
 class Env:
     """
     Minimal robot environment wrapper for:
@@ -118,7 +360,7 @@ class Env:
         self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
 
         self.gripper = wsg.WSG(ip=gripper_ip)
-
+        self.pos_query, self.force_query, self.g_pos, self.g_force = None, None, -1, -1
         # ============================================================
         # Servo parameters
         # ============================================================
@@ -137,11 +379,39 @@ class Env:
         self.open_width = 35
         self.home_pose =  URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653) 
         self.gripper_state = 0  # 0=open, 1=closed
+        self.des_pose, self.des_gripper_state = None, self.gripper_state
 
         print("Initializing environment...")
         print(f"Robot IP:   {robot_ip}")
         print(f"Gripper IP: {gripper_ip}")
         print(f"Servo  URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653) frequency: {servo_frequency} Hz")
+
+        # ----------------------------
+        # threading
+        # ----------------------------
+        self.stop_flag = False
+        self.lock = threading.Lock()
+        self.control_thread = None
+        self.obs_thread = None
+
+        # ----------------------------
+        # observation buffer
+        # ----------------------------
+        self.latest_obs = None
+
+    def get_gripper_state(self):
+        if self.pos_query is None:
+            self.pos_query = self.gripper.position()
+        if self.force_query is None:
+            self.force_query = self.gripper.force()
+        if self.pos_query.is_set():
+            self.g_pos = self.pos_query.value
+            self.pos_query = None
+        if self.force_query.is_set():
+            self.g_force = self.force_query.value
+            self.force_query = None
+
+        return self.g_pos, self.g_force
 
     def reset(self, home_pose):
         """
@@ -177,6 +447,16 @@ class Env:
         g.finished.wait()
 
         self.gripper_state = 0
+        if self.pos_query is None:
+            self.pos_query = self.gripper.position()
+        if self.force_query is None:
+            self.force_query = self.gripper.force()
+        if self.pos_query.is_set():
+            self.g_pos = self.pos_query.value
+            self.pos_query = None
+        if self.force_query.is_set():
+            self.g_force = self.force_query.value
+            self.force_query = None
 
         print("Environment reset complete.")
 
@@ -184,133 +464,103 @@ class Env:
         obs = {
             "rgb": self.camera.get_rgb(),
             "state": {
-                # "actual_pose": self.home_pose,
-                # "gripper_width": self.open_width,
-                # "gripper_force": 0.0,
+                "actual_pose": self.home_pose,
+                # "gripper_width": self.g_pos,
+                # "gripper_force": self.g_force,
             }
         }
 
         return obs
 
-    def flip_gripper(self):
-        """
-        Toggle gripper state.
+    def _control_loop(self):
 
-        Current convention:
-            0 = open
-            1 = closed
-        """
+        t_prev = time.time()
 
-        # Avoid interrupting an ongoing gripper command
-        if self.gripper._pending_action is not None:
-            return
+        while not self.stop_flag:
 
-        # ============================================================
-        # Close gripper
-        # ============================================================
-        if self.gripper_state == 0:
-            g = self.gripper.grip(
-                force=40,
-                width=20,
-                speed=50,
+            t_start = self.ctrl.initPeriod()
+
+            t_now = time.time()
+            actual_pose = URPose(*self.recv.getActualTCPPose())
+
+            # ----------------------------
+            # read shared command
+            # ----------------------------
+            with self.lock:
+                des_pose = self.des_pose
+                des_gripper_state = self.des_gripper_state
+                gripper_state = self.gripper_state
+
+            if des_pose is None:
+                des_pose = actual_pose
+
+            # ----------------------------
+            # gripper logic (non-blocking preferred)
+            # ----------------------------
+            if gripper_state != des_gripper_state:
+                if gripper_state == 0:
+                    self.gripper.grip(force=40, width=20, speed=50)
+                    self.gripper_state = 1
+                else:
+                    self.gripper.release(pullback=10, speed=50)
+                    self.gripper_state = 0
+
+            # ----------------------------
+            # blend + servo
+            # ----------------------------
+            command = blend(
+                actual_pose,
+                des_pose,
+                self.max_position_step,
+                self.max_orientation_step,
             )
-            self.gripper_state = 1
 
-        # ============================================================
-        # Open gripper
-        # ============================================================
-        else:
-            g = self.gripper.release(
-                pullback=10,
-                speed=50,
+            self.ctrl.servoL(
+                command,
+                0.0,
+                0.0,
+                self.dt,
+                self.lookahead_time,
+                self.servo_gain,
             )
-            self.gripper_state = 0
 
-        # Wait until command acknowledged
-        g.ack.wait()
-       
+            self.ctrl.waitPeriod(t_start)
     
-    def step(self, actual_pose, des_pose, des_gripper_state):
-        """
-        Execute one control step.
+    def _obs_loop(self):
 
-        Args:
-            actual_pose: URPose
-                Current end-effector pose.
-            des_pose: URPose
-                Desired end-effector pose.
+        while not self.stop_flag:
+            self.get_gripper_state()
+            obs = {
+                "rgb": self.camera.get_rgb(),
+                "state": {
+                    "actual_pose": URPose(*self.recv.getActualTCPPose()),
+                    "gripper_width": self.g_pos,
+                    "gripper_force": self.g_force,
+                },
+            }
 
-            des_gripper_state: int
-                0 = open
-                1 = closed
+            self.latest_obs = obs
+    
+    def step(self, des_pose, des_gripper_state):
 
-        Returns:
-            obs: dict
-                {
-                    "rgb": np.ndarray,
-                    "state": {
-                        "actual_pose": URPose,
-                        "gripper_width": float,
-                        "gripper_force": float,
-                    }
-                }
-        """
+        with self.lock:
+            self.des_pose = des_pose
+            self.des_gripper_state = des_gripper_state
 
-       
-        # ============================================================
-        # Update gripper state if needed
-        # ============================================================
-        if des_gripper_state != self.gripper_state:
-            self.flip_gripper()
+        return self.latest_obs
+    
+    def start(self):
+        self.stop_flag = False
 
-        # ============================================================
-        # Compute smooth servo command
-        # ============================================================
-        command = blend(
-            p_start=actual_pose,
-            p_end=des_pose,
-            max_position_step=self.max_position_step,
-            max_orientation_step=self.max_orientation_step,
-        )
-        # return  command
-        # print(f"Command: {command}")
-        # ============================================================
-        # Send servo command
-        # ============================================================
-        self.ctrl.servoL(
-            command,
-            0.0,
-            0.0,
-            self.dt,
-            self.lookahead_time,
-            self.servo_gain,
-        )
+        self.control_thread = threading.Thread(target=self._control_loop)
+        self.obs_thread = threading.Thread(target=self._obs_loop)
 
-        self.ctrl.waitPeriod(self.dt)
-
-        # ============================================================
-        # Read latest observation
-        # ============================================================
-        # latest_pose = URPose(*self.recv.getActualTCPPose())
-        # gripper_width, gripper_force = self.gripper.position(), self.gripper.force()
-        obs = {
-            # "rgb": self.camera.get_rgb(),
-            "state": {
-                # "actual_pose": latest_pose,
-                # "gripper_width": gripper_width,
-                # "gripper_force": gripper_force,
-            },
-        }
-
-        return obs
-
+        self.control_thread.start()
+        self.obs_thread.start()
+    
     def close(self):
-        """
-        Clean up resources.
-        """
-        self.camera.close()
-        
-    # ================================================================
-    # Utility functions
-    # ================================================================
+        self.stop_flag = True
+        self.control_thread.join()
+        self.obs_thread.join()
 
+        self.camera.close()
