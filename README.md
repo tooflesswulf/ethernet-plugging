@@ -8,7 +8,9 @@ pip install hidapi scipy ur-rtde robosuite opencv-python
 ```
 
 Realsense: https://github.com/realsenseai/librealsense/blob/master/doc/installation.md#install-dependencies
-for hidapi: sudo apt install libhidapi-dev
+for hidapi:
+
+`sudo apt install libhidapi-dev`
 
 To read dualsense joystick via hidapi without sudo previlege, see: https://askubuntu.com/questions/978552/how-do-i-make-libusb-work-as-non-root
 
