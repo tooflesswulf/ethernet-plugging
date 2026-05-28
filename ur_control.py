@@ -48,7 +48,7 @@ if __name__ == '__main__':
     lookahead_time = 0.1
     servo_gain = 500
     # iface = interface.KeyboardInterface(home_pose, xyzspeed=0.003, rpyspeed=0.1)
-    iface = interface.DualSenseInterface(home_pose, xyzspeed=0.01, rpyspeed=0.1)
+    iface = interface.DualSenseInterface(home_pose, xyzspeed=0.05, rpyspeed=0.5)
 
     def blend(p_start: URPose, p_end: URPose):
         blended_position = (
@@ -70,6 +70,8 @@ if __name__ == '__main__':
         return out
 
     t_prev = time.time()
+    pos_query, g_pos = None, -1
+    force_query, g_force = None, -1
     while True:
         t_start = ctrl.initPeriod()
         t_now = time.time()
@@ -77,8 +79,10 @@ if __name__ == '__main__':
         t_prev = t_now
         actual_pose = URPose(*recv.getActualTCPPose())
 
-        force = gripper.force()
-        position = gripper.position()
+        if force_query is None:
+            force_query = gripper.force()
+        if pos_query is None:
+            pos_query = gripper.position()
 
         # Get desired pose from either a joystick or a robot policy
         iface.update(dt)
@@ -101,8 +105,12 @@ if __name__ == '__main__':
             0.0, 0.0, dt, lookahead_time, servo_gain)
         
         # Print diagnostic info
-        g_pos = position.value
-        g_force = force.value
+        if pos_query.is_set():
+            g_pos = pos_query.value
+            pos_query = None
+        if force_query.is_set():
+            g_force = force_query.value
+            force_query = None
         freq = 1.0 / actual_dt if actual_dt > 0 else 0.0
         print(f'pos: {g_pos:7.2f} mm | force: {g_force:7.2f} N | freq: {freq:6.1f} Hz', end='\r')
 
