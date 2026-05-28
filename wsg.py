@@ -24,6 +24,7 @@ class ActionResult:
     def wait(self, timeout=None):
         return self.finished.wait(timeout)
 
+
 class QueryResult:
     """Result of a query command sent to the WSG gripper.
     (FORCE?, POS?):
@@ -223,7 +224,7 @@ class WSG:
         with self._lock:
             self._pending_stop = ack
             self.tcp_sock.sendall(b'STOP()\n')
-        return CommandResult(ack)
+        return ActionResult(ack, ack)
 
     def bye(self):
         self._running = False
