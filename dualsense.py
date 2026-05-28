@@ -286,7 +286,7 @@ class DualSense(Device):
         print_command("Triangle button", "toggle arm/base mode (if applicable)")
         print_command("Left/Right Direction Pad", "switch active arm (if multi-armed robot)")
         print_command("Up/Down Direction Pad", "switch active robot (if multi-robot environment)")
-        print_command("Control+C", "quit")
+        print_command("Square", "quit")
         print("")
 
     def _reset_internal_state(self):
