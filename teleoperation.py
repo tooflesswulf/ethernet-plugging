@@ -1,9 +1,13 @@
+import os, imageio
 import interface
-
+import time, numpy as np
 from env import Env, URPose, blend
 
 
 def main():
+    id = 0
+    task = 'ethernet_unplug'
+    dataset_path = f'/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/{task}/{id}'
     # ================================================================
     # Home pose
     # ================================================================
@@ -23,6 +27,7 @@ def main():
         robot_ip="192.168.0.100",
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,
+        dataset_path=dataset_path,
     )
 
     # Reset robot
@@ -39,6 +44,8 @@ def main():
 
     print("Starting teleoperation loop...")
     env.start()
+    save_obs_interval = 0.1  # seconds
+    last_save_time = time.time()
     try:
         while True:
             # ========================================================
@@ -57,12 +64,27 @@ def main():
                 des_gripper_state=des_gripper,
             )
 
-           
+            print(f'pos: {env.g_pos:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
+        
     except:
         print("\nStopping teleoperation...")
 
-    finally:
-        env.close()
+    # save a gif of the RGB images for quick visualization
+    if dataset_path is not None:
+        image_dir = os.path.join(dataset_path, "images")
+        images, N = [], len(os.listdir(image_dir))
+        for idx in range(N):
+            image_path = os.path.join(image_dir, f"{idx}.png")
+            images.append(imageio.imread(image_path))
+        gif_path = os.path.join(dataset_path, f"{id}.gif")
+        # create gif wit 1/save_interval fps
+        imageio.mimsave(gif_path,
+            images,
+            fps=1.0 / env.save_interval,
+            loop=0, # infinite loop
+        )
+
+    env.close()
 
 
 if __name__ == "__main__":
