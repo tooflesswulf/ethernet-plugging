@@ -11,6 +11,8 @@ class Promise:
         self._lock = threading.Lock()
 
     def resolve(self, value=None):
+        if self._event.is_set():
+            return  # Already resolved/rejected
         with self._lock:
             self._value = value
             self._event.set()
@@ -19,6 +21,8 @@ class Promise:
             cb(value)
 
     def reject(self, error):
+        if self._event.is_set():
+            return  # Already resolved/rejected
         with self._lock:
             self._error = error
             self._event.set()
