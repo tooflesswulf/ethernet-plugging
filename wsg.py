@@ -42,9 +42,12 @@ class QueryResult:
     def wait(self, timeout=None):
         return self.promise.wait(timeout)
 
+    def is_set(self):
+        return self.promise._event.is_set()
+
     @property
     def value(self):
-        if not self.promise._event.is_set():
+        if not self.is_set():
             self.wait()
         return self._val
 
