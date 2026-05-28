@@ -71,7 +71,7 @@ if __name__ == '__main__':
     while True:
         actual_pose = URPose(*recv.getActualTCPPose())
 
-        # Get desired pose
+        # Get desired pose from either a joystick or a robot policy
         iface.update(dt)
         des_pose = URPose(*iface.target_pose)
 

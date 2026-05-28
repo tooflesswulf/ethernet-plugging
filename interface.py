@@ -30,10 +30,15 @@ class DualSenseInterface:
             self.gripper_state = 1 - self.gripper_state
 
         # Manual flips
+        tr = np.array([
+            [1, 0, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+        ])
         flips = np.array([1, -1, 1])
 
         # Position: simple addition
-        dpos = delta[:3] * flips * self.speed[:3] * dt
+        dpos = tr @ delta[:3] * self.speed[:3] * dt
         self.targ_pose[:3] += dpos
 
         # Orientation: compose delta Euler (ZYX) onto current rotation vector
