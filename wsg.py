@@ -10,16 +10,11 @@ Remaining TODO:
 '''
 
 
-class CommandResult:
-    """Result of a command sent to the WSG gripper.
-
-    For action commands (MOVE, GRIP, HOME, RELEASE):
+class ActionResult:
+    """Result of an action command sent to the WSG gripper.
+    (MOVE, GRIP, HOME, RELEASE):
         .ack     - Promise that resolves on ACK
         .finished - Promise that resolves on FIN
-
-    For query commands (FORCE?, SPEED?, POS?):
-        .ack     - Promise that resolves with the parsed value
-        .finished - same as .ack (no FIN phase)
     """
 
     def __init__(self, ack: Promise, finished: Promise = None):
@@ -29,13 +24,36 @@ class CommandResult:
     def wait(self, timeout=None):
         return self.finished.wait(timeout)
 
+class QueryResult:
+    """Result of a query command sent to the WSG gripper.
+    (FORCE?, POS?):
+        .promise - Promise that resolves with the query result
+    """
+
+    def __init__(self, promise: Promise):
+        self.promise = promise
+        self.promise.then(self._set_value)
+        self._val = None
+
+    def _set_value(self, val):
+        self._val = val
+
+    def wait(self, timeout=None):
+        return self.promise.wait(timeout)
+
+    @property
+    def value(self):
+        if not self.promise._event.is_set():
+            self.wait()
+        return self._val
+
 
 class WSG:
     def __init__(self, ip='192.168.1.20', port=1000):
         self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.tcp_sock.connect((ip, port))
         self._pending_action = None  # (key, {"ack": Promise, "fin": Promise})
-        self._pending_queries = {}   # key -> {"ack": Promise}
+        self._pending_queries = {}   # key -> {"result": Promise}
         self._pending_stop = None    # Promise (resolves on ACK STOP)
         self._lock = threading.Lock()
         self._running = True
@@ -113,7 +131,7 @@ class WSG:
                 parsed = float(val)
             except ValueError:
                 parsed = val.strip()
-            entry['ack'].resolve(parsed)
+            entry['result'].resolve(parsed)
 
     def send(self, msg):
         if isinstance(msg, str):
@@ -137,29 +155,29 @@ class WSG:
             paren = text.find('(')
             key = text[:paren] if paren != -1 else text
 
-        ack = Promise()
-
         with self._lock:
             if is_query or is_setter:
                 if key in self._pending_queries:
                     raise RuntimeError(f'Query already pending: {key}')
-                fin = ack
-                self._pending_queries[key] = {'ack': ack}
+                p = Promise()
+                self._pending_queries[key] = {'result': p}
+                out = QueryResult(p)
             else:
                 if self._pending_action is not None:
                     raise RuntimeError(f'Action already pending: {self._pending_action[0]}')
                 if key in ('HOME', 'MOVE', 'GRIP', 'RELEASE'):
                     # Motion commands have separate ACK and FIN phases
+                    ack = Promise()
                     fin = Promise()
                 else:
+                    ack = Promise()
                     fin = ack
                 fin.then(self._clear_pending_action).catch(self._clear_pending_action)
                 self._pending_action = (key, {'ack': ack, 'fin': fin})
+                out = ActionResult(ack, fin)
             self.tcp_sock.sendall(msg)
 
-        if is_query or is_setter:
-            return CommandResult(ack)
-        return CommandResult(ack, fin)
+        return out
 
     def home(self):
         return self.send(b'HOME()\n')
