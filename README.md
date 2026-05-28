@@ -4,7 +4,7 @@
 
 ```
 conda create -n realrobot python=3.10
-pip install hidapi scipy ur-rtde robosuite opencv-python
+pip install hidapi scipy ur-rtde robosuite opencv-python imageio matplotlib
 ```
 
 Realsense: https://github.com/realsenseai/librealsense/blob/master/doc/installation.md#install-dependencies

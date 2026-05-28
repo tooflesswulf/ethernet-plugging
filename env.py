@@ -1,4 +1,5 @@
-import time, threading
+import os, cv2, copy, time, threading
+import imageio
 from collections import namedtuple
 
 import numpy as np
@@ -336,6 +337,7 @@ class Env:
 
     def __init__(
         self,
+        
         robot_ip="192.168.0.100", # could be 101 or 100 depending on your setup
         gripper_ip="192.168.0.20",
         camera_crop_mode=1, # crop on the right half of the image to focus on the workspace
@@ -344,6 +346,8 @@ class Env:
         max_orientation_step=0.02,
         lookahead_time=0.1,
         servo_gain=500,
+        dataset_path = None,
+        save_interval = 0.1,
     ):
         # ============================================================
         # Camera
@@ -391,13 +395,17 @@ class Env:
         # ----------------------------
         self.stop_flag = False
         self.lock = threading.Lock()
+        self.obs_lock = threading.Lock()
         self.control_thread = None
         self.obs_thread = None
-
+        self.logger_thread = None
         # ----------------------------
         # observation buffer
         # ----------------------------
         self.latest_obs = None
+        self.dataset_path = dataset_path
+        self.save_interval = save_interval # save thread loop interval in seconds
+        self.image_idx = 0
 
     def get_gripper_state(self):
         if self.pos_query is None:
@@ -538,9 +546,84 @@ class Env:
                     "gripper_force": self.g_force,
                 },
             }
-
-            self.latest_obs = obs
+            with self.obs_lock:
+                self.latest_obs = obs
     
+    def _logger_loop(self):
+
+        image_dir = os.path.join(self.dataset_path, "images")
+
+        actual_pose_list = []
+        gripper_width_list = []
+        gripper_force_list = []
+
+        while not self.stop_flag:
+
+            t0 = time.time()
+
+            with self.obs_lock:
+                obs = copy.deepcopy(self.latest_obs)
+            if obs is not None:
+
+                # -----------------------------------
+                # Save image
+                # -----------------------------------
+                rgb = obs["rgb"][:, :, ::-1]  # convert RGB to BGR for OpenCV
+               
+                image_path = os.path.join(
+                    image_dir,
+                    f"{self.image_idx}.png",
+                )
+
+                cv2.imwrite(
+                    image_path,
+                    cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+                )
+
+                # -----------------------------------
+                # Save states
+                # -----------------------------------
+                state = obs["state"]
+
+                actual_pose_list.append(
+                    np.array(state["actual_pose"])
+                )
+
+                gripper_width_list.append(
+                    state["gripper_width"]
+                )
+
+                gripper_force_list.append(
+                    state["gripper_force"]
+                )
+
+                self.image_idx += 1
+
+            # -----------------------------------
+            # maintain logging frequency
+            # -----------------------------------
+            elapsed = time.time() - t0
+
+            sleep_time = max(
+                0,
+                self.save_interval - elapsed,
+            )
+
+            time.sleep(sleep_time)
+
+        # ============================================================
+        # save npz once thread exits
+        # ============================================================
+
+        np.savez_compressed(
+            os.path.join(self.dataset_path, "states.npz"),
+
+            actual_pose=np.array(actual_pose_list),
+            gripper_width=np.array(gripper_width_list),
+            gripper_force=np.array(gripper_force_list),
+        )
+
+
     def step(self, des_pose, des_gripper_state):
 
         with self.lock:
@@ -550,14 +633,23 @@ class Env:
         return self.latest_obs
     
     def start(self):
+        if self.dataset_path is not None:
+            os.makedirs(self.dataset_path, exist_ok=True)
+            os.makedirs(
+                os.path.join(self.dataset_path, "images"),
+                exist_ok=True,
+            )
+           
         self.stop_flag = False
-
-        self.control_thread = threading.Thread(target=self._control_loop)
-        self.obs_thread = threading.Thread(target=self._obs_loop)
-
-        self.control_thread.start()
+        if self.dataset_path is not None:
+            self.logger_thread =threading.Thread(target=self._logger_loop, daemon=True,)
+            self.logger_thread.start()
+        self.control_thread = threading.Thread(target=self._control_loop, daemon=True,)
+        self.obs_thread = threading.Thread(target=self._obs_loop, daemon=True,)
         self.obs_thread.start()
-    
+        time.sleep(1.0)  # give some time for the threads to start and populate initial obs
+        self.control_thread.start()
+        
     def close(self):
         self.stop_flag = True
         self.control_thread.join()
