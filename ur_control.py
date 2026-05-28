@@ -1,3 +1,4 @@
+import time
 from collections import namedtuple
 from scipy.spatial.transform import Rotation as R, Slerp
 import rtde_control
@@ -68,8 +69,16 @@ if __name__ == '__main__':
         out = URPose(*blended_position, *blended_orientation.as_rotvec())
         return out
 
+    t_prev = time.time()
     while True:
+        t_start = ctrl.initPeriod()
+        t_now = time.time()
+        actual_dt = t_now - t_prev
+        t_prev = t_now
         actual_pose = URPose(*recv.getActualTCPPose())
+
+        force = gripper.force()
+        position = gripper.position()
 
         # Get desired pose from either a joystick or a robot policy
         iface.update(dt)
@@ -90,4 +99,11 @@ if __name__ == '__main__':
         ctrl.servoL(
             command,
             0.0, 0.0, dt, lookahead_time, servo_gain)
-        ctrl.waitPeriod(dt)
+        
+        # Print diagnostic info
+        g_pos = position.value
+        g_force = force.value
+        freq = 1.0 / actual_dt if actual_dt > 0 else 0.0
+        print(f'pos: {g_pos:7.2f} mm | force: {g_force:7.2f} N | freq: {freq:6.1f} Hz', end='\r')
+
+        ctrl.waitPeriod(t_start)
