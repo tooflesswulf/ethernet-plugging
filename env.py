@@ -4,12 +4,14 @@ import rtde_control
 import rtde_receive
 import numpy as np
 import threading
+import pathlib
+import h5py
 import copy
 import time
 import cv2
 import os
 
-from util import URPose, blend
+from util import URPose, blend, episode_index
 from camera import Camera
 import wsg
 
@@ -61,7 +63,7 @@ class Env:
         self.open_width = 35
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
         self.gripper_state = 0  # 0=open, 1=closed
-        self.des_pose, self.des_gripper_state = None, self.gripper_state
+        self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
 
         # ============================================================
         # Camera
@@ -97,23 +99,62 @@ class Env:
         # threading
         # ----------------------------
         self.stop_flag = False
-        self.lock = threading.Lock()
-        self.obs_lock = threading.Lock()
-        self.control_thread = None
-        self.camera_thread = None
-        self.gripper_thread = None
+        self.threads = []
+        # self.control_thread = None
+        # self.camera_thread = None
+        # self.gripper_thread = None
+        # self.logger_thread = None
+        self.obs_mode = obs_mode
 
         # ----------------------------
         # observation buffer
         # ----------------------------
-        self.latest_obs = None
         self.dataset_path = dataset_path
         self.save_interval = save_interval  # save thread loop interval in seconds
-        self.image_idx = 0
-
         self.robot_obs: list[RobotObs] = []
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
+
+    def wait_for_obs(self):
+        while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
+            time.sleep(0.01)
+
+    def get_obs(self):
+        # Assume obs is populated with at least one entry
+        if self.obs_mode == 'latest':
+            obs = {
+                'rgb': self.camera_obs[-1].rgb,
+                'state': {
+                    'pose': self.robot_obs[-1].actual_pose,
+                    'force': self.robot_obs[-1].actual_force,
+                    'gripper_width': self.gripper_obs[-1].gripper_width,
+                    'gripper_force': self.gripper_obs[-1].gripper_force,
+                }
+            }
+            return obs
+
+        elif self.obs_mode == 'mean':
+            raise NotImplementedError("Mean obs mode not implemented yet")
+
+    def start(self):
+        if self.dataset_path is not None:
+            prefix = 'episode'
+            ix = episode_index(self.dataset_path, prefix=prefix)
+            self.epi_path = pathlib.Path(self.dataset_path) / f'{prefix}{ix:06d}'
+            self.epi_path.mkdir(parents=True, exist_ok=True)
+            os.makedirs(self.epi_path / 'images', exist_ok=True)
+
+        self.stop_flag = False
+        self.threads = [
+            threading.Thread(target=self._control_loop, daemon=True,),
+            threading.Thread(target=self._camera_loop, daemon=True,),
+            threading.Thread(target=self._gripper_loop, daemon=True,),
+            threading.Thread(target=self._logger_loop, daemon=True,),
+        ]
+        for thread in self.threads:
+            thread.start()
+
+        self.t0 = time.time()
 
     def reset(self, home_pose=None):
         """
@@ -128,11 +169,11 @@ class Env:
         if home_pose is None:
             home_pose = self.home_pose
 
-        print("Resetting environment...")
+        print('Resetting environment...')
         self.stop_flag = True
-        self.control_thread.join()
-        self.obs_thread.join()
-        self.gripper_thread.join()
+        for thr in self.threads:
+            thr.join()
+        self.save_data()
 
         # ============================================================
         # Home / open gripper
@@ -144,7 +185,7 @@ class Env:
         # Move robot home (blocking)
         # ============================================================
         self.ctrl.moveL(home_pose, 0.1, 0.1)
-        self.des_pose = home_pose # Ensure robot doesn't move after homing
+        self.des_pose = home_pose  # Ensure robot doesn't move after homing
 
         # Wait for gripper homing to finish
         g.finished.wait()
@@ -162,23 +203,18 @@ class Env:
         self.robot_obs: list[RobotObs] = []
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
+        self.start()
 
-        self.stop_flag = False
-        self.control_thread = threading.Thread(target=self._control_loop, daemon=True,)
-        self.obs_thread = threading.Thread(target=self._obs_loop, daemon=True,)
-        self.gripper_thread = threading.Thread(target=self._gripper_loop, daemon=True,)
-        self.control_thread.start()
-        self.obs_thread.start()
-        self.gripper_thread.start()
+        print('Environment reset complete.')
+        self.wait_for_obs()
+        return self.get_obs()
 
-        print("Environment reset complete.")
-        self.t0 = time.time()
-
-        # return initial observation
-        return obs
-
-    def get_obs(self):
-        pass
+    def close(self):
+        self.stop_flag = True
+        for thr in self.threads:
+            thr.join()
+        self.camera.close()
+        self.save_data()
 
     def _control_loop(self):
         while not self.stop_flag:
@@ -188,16 +224,9 @@ class Env:
             self.robot_obs.append(RobotObs(time=time.time() - self.t0,
                                   actual_pose=actual_pose, actual_force=actual_force))
 
-            # ----------------------------
-            # read shared command
-            # ----------------------------
-            with self.lock:
-                des_pose = self.des_pose
-                des_gripper_state = self.des_gripper_state
-                gripper_state = self.gripper_state
-
-            if des_pose is None:
-                des_pose = actual_pose
+            des_pose = self.des_pose
+            des_gripper_state = self.des_gripper_state
+            gripper_state = self.gripper_state
 
             # ----------------------------
             # gripper logic (non-blocking preferred)
@@ -248,123 +277,52 @@ class Env:
             sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
             time.sleep(sleep_dur)
 
-    def _obs_loop(self):
-        while not self.stop_flag:
-            self.get_gripper_state()
-            obs = {
-                "rgb": self.camera.get_rgb(),
-                "state": {
-                    "actual_pose": URPose(*self.recv.getActualTCPPose()),
-                    "gripper_width": self.g_pos,
-                    "gripper_force": self.g_force,
-                },
-            }
-            with self.obs_lock:
-                self.latest_obs = obs
-
     def _logger_loop(self):
+        image_path = self.epi_path / 'images'
+        pose_list = []
+        force_list = []
+        gpos_list = []
+        gforce_list = []
+        self.wait_for_obs()  # Ensure we have at least one obs before starting logging
 
-        image_dir = os.path.join(self.dataset_path, "images")
-
-        actual_pose_list = []
-        gripper_width_list = []
-        gripper_force_list = []
-
+        image_idx = 0
         while not self.stop_flag:
+            t0 = time.perf_counter()
+            obs = self.get_obs()
 
-            t0 = time.time()
+            im_path = pathlib.Path(image_path) / f'{image_idx:06d}.png'
+            cv2.imwrite(im_path, cv2.cvtColor(obs['rgb'], cv2.COLOR_RGB2BGR))
+            pose_list.append(obs['state']['pose'])
+            force_list.append(obs['state']['force'])
+            gpos_list.append(obs['state']['gripper_width'])
+            gforce_list.append(obs['state']['gripper_force'])
+            image_idx += 1
 
-            with self.obs_lock:
-                obs = copy.deepcopy(self.latest_obs)
-            if obs is not None:
-
-                # -----------------------------------
-                # Save image
-                # -----------------------------------
-                rgb = obs["rgb"][:, :, ::-1]  # convert RGB to BGR for OpenCV
-
-                image_path = os.path.join(
-                    image_dir,
-                    f"{self.image_idx}.png",
-                )
-
-                cv2.imwrite(
-                    image_path,
-                    cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
-                )
-
-                # -----------------------------------
-                # Save states
-                # -----------------------------------
-                state = obs["state"]
-
-                actual_pose_list.append(
-                    np.array(state["actual_pose"])
-                )
-
-                gripper_width_list.append(
-                    state["gripper_width"]
-                )
-
-                gripper_force_list.append(
-                    state["gripper_force"]
-                )
-
-                self.image_idx += 1
-
-            # -----------------------------------
-            # maintain logging frequency
-            # -----------------------------------
-            elapsed = time.time() - t0
-
-            sleep_time = max(
-                0,
-                self.save_interval - elapsed,
-            )
-
+            sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
             time.sleep(sleep_time)
 
-        # ============================================================
-        # save npz once thread exits
-        # ============================================================
-
+        # IMPORTANT: logger must exit via stop_flag for data to be saved
         np.savez_compressed(
-            os.path.join(self.dataset_path, "states.npz"),
-
-            actual_pose=np.array(actual_pose_list),
-            gripper_width=np.array(gripper_width_list),
-            gripper_force=np.array(gripper_force_list),
+            self.epi_path / 'states.npz',
+            pose=np.array(pose_list),
+            force=np.array(force_list),
+            gripper_width=np.array(gpos_list),
+            gripper_force=np.array(gforce_list),
         )
 
-    def step(self, des_pose, des_gripper_state):
-        with self.lock:
-            self.des_pose = des_pose
-            self.des_gripper_state = des_gripper_state
+    def save_data(self):
+        # Save collected RAW data to HDF5.
+        print(f'Saving data to {self.epi_path}...')
+        path = self.epi_path / 'rawdata.h5'
+        with h5py.File(path, 'w') as f:
+            f.create_dataset('robot_obs/time', data=[obs.time for obs in self.robot_obs])
+            f.create_dataset('robot_obs/actual_pose', data=[obs.actual_pose for obs in self.robot_obs])
+            f.create_dataset('robot_obs/actual_force', data=[obs.actual_force for obs in self.robot_obs])
 
-        return self.latest_obs
+            f.create_dataset('gripper_obs/time', data=[obs.time for obs in self.gripper_obs])
+            f.create_dataset('gripper_obs/gripper_width', data=[obs.gripper_width for obs in self.gripper_obs])
+            f.create_dataset('gripper_obs/gripper_force', data=[obs.gripper_force for obs in self.gripper_obs])
 
-    def start(self):
-        if self.dataset_path is not None:
-            os.makedirs(self.dataset_path, exist_ok=True)
-            os.makedirs(
-                os.path.join(self.dataset_path, "images"),
-                exist_ok=True,
-            )
-
-        self.stop_flag = False
-        if self.dataset_path is not None:
-            self.logger_thread = threading.Thread(target=self._logger_loop, daemon=True,)
-            self.logger_thread.start()
-        self.control_thread = threading.Thread(target=self._control_loop, daemon=True,)
-        self.obs_thread = threading.Thread(target=self._obs_loop, daemon=True,)
-        self.obs_thread.start()
-
-        time.sleep(1.0)  # give some time for the threads to start and populate initial obs
-        self.control_thread.start()
-
-    def close(self):
-        self.stop_flag = True
-        self.control_thread.join()
-        self.obs_thread.join()
-
-        self.camera.close()
+            f.create_dataset('camera_obs/time', data=[obs.time for obs in self.camera_obs])
+            f.create_dataset('camera_obs/rgb', data=[obs.rgb for obs in self.camera_obs])
+        print(f'Data saved to {path}')
