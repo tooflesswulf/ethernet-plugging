@@ -1,3 +1,5 @@
+from collections import namedtuple
+from typing import Literal
 import rtde_control
 import rtde_receive
 import numpy as np
@@ -10,6 +12,18 @@ import os
 from util import URPose, blend
 from camera import Camera
 import wsg
+
+
+class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force'))):
+    pass
+
+
+class GripperObs(namedtuple('GripperObs', ('time', 'gripper_width', 'gripper_force'))):
+    pass
+
+
+class CameraObs(namedtuple('CameraObs', ('time', 'rgb'))):
+    pass
 
 
 class Env:
@@ -27,21 +41,23 @@ class Env:
 
     def __init__(
         self,
-
         robot_ip="192.168.0.100",  # could be 101 or 100 depending on your setup
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,  # crop on the right half of the image to focus on the workspace
         servo_frequency=500,
+        gripper_query_frequency=250,
         max_position_step=(0.008, 0.008, 0.008),
         max_orientation_step=0.02,
         lookahead_time=0.1,
         servo_gain=500,
+        obs_mode: Literal['latest', 'mean'] = 'latest',
         dataset_path=None,
         save_interval=0.1,
     ):
         # ============================================================
         # Internal states
         # ============================================================
+        self.t0 = None
         self.open_width = 35
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
         self.gripper_state = 0  # 0=open, 1=closed
@@ -60,17 +76,15 @@ class Env:
         self.ctrl = rtde_control.RTDEControlInterface(robot_ip)
         self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
         self.gripper = wsg.WSG(ip=gripper_ip)
-        self.pos_query, self.force_query, self.g_pos, self.g_force = None, None, -1, -1
+        self.gripper_query_frequency = gripper_query_frequency
 
         # ============================================================
         # Servo parameters
         # ============================================================
         self.servo_frequency = servo_frequency
         self.dt = 1.0 / servo_frequency
-
         self.max_position_step = np.array(max_position_step)
         self.max_orientation_step = max_orientation_step
-
         self.lookahead_time = lookahead_time
         self.servo_gain = servo_gain
 
@@ -86,8 +100,8 @@ class Env:
         self.lock = threading.Lock()
         self.obs_lock = threading.Lock()
         self.control_thread = None
-        self.obs_thread = None
-        self.logger_thread = None
+        self.camera_thread = None
+        self.gripper_thread = None
 
         # ----------------------------
         # observation buffer
@@ -97,24 +111,11 @@ class Env:
         self.save_interval = save_interval  # save thread loop interval in seconds
         self.image_idx = 0
 
-    def get_gripper_state(self):
-        # Non-blocking gripper state query
-        # Maybe move this to its own thread to speed up query frequency
-        if self.pos_query is None:
-            self.pos_query = self.gripper.position()
-        if self.force_query is None:
-            self.force_query = self.gripper.force()
+        self.robot_obs: list[RobotObs] = []
+        self.gripper_obs: list[GripperObs] = []
+        self.camera_obs: list[CameraObs] = []
 
-        if self.pos_query.is_set():
-            self.g_pos = self.pos_query.value
-            self.pos_query = None
-        if self.force_query.is_set():
-            self.g_force = self.force_query.value
-            self.force_query = None
-
-        return self.g_pos, self.g_force
-
-    def reset(self, home_pose):
+    def reset(self, home_pose=None):
         """
         Reset environment:
             1. Open/home the gripper
@@ -124,8 +125,14 @@ class Env:
         Args:
             home_pose: URPose
         """
+        if home_pose is None:
+            home_pose = self.home_pose
 
         print("Resetting environment...")
+        self.stop_flag = True
+        self.control_thread.join()
+        self.obs_thread.join()
+        self.gripper_thread.join()
 
         # ============================================================
         # Home / open gripper
@@ -137,6 +144,7 @@ class Env:
         # Move robot home (blocking)
         # ============================================================
         self.ctrl.moveL(home_pose, 0.1, 0.1)
+        self.des_pose = home_pose # Ensure robot doesn't move after homing
 
         # Wait for gripper homing to finish
         g.finished.wait()
@@ -148,27 +156,37 @@ class Env:
         g.finished.wait()
         self.gripper_state = 0
 
-        # Not sure we need to reset queries.
-        self.pos_query, self.force_query, self.g_pos, self.g_force = self.gripper.position(), self.gripper.force(), -1, -1
+        # ============================================================
+        # Reset observations
+        # ============================================================
+        self.robot_obs: list[RobotObs] = []
+        self.gripper_obs: list[GripperObs] = []
+        self.camera_obs: list[CameraObs] = []
+
+        self.stop_flag = False
+        self.control_thread = threading.Thread(target=self._control_loop, daemon=True,)
+        self.obs_thread = threading.Thread(target=self._obs_loop, daemon=True,)
+        self.gripper_thread = threading.Thread(target=self._gripper_loop, daemon=True,)
+        self.control_thread.start()
+        self.obs_thread.start()
+        self.gripper_thread.start()
+
         print("Environment reset complete.")
+        self.t0 = time.time()
 
         # return initial observation
-        obs = {
-            "rgb": self.camera.get_rgb(),
-            "state": {
-                "actual_pose": self.home_pose,
-                # "gripper_width": self.g_pos,
-                # "gripper_force": self.g_force,
-            }
-        }
-
         return obs
+
+    def get_obs(self):
+        pass
 
     def _control_loop(self):
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
             actual_pose = URPose(*self.recv.getActualTCPPose())
             actual_force = URPose(*self.recv.getActualTCPForce())
+            self.robot_obs.append(RobotObs(time=time.time() - self.t0,
+                                  actual_pose=actual_pose, actual_force=actual_force))
 
             # ----------------------------
             # read shared command
@@ -212,6 +230,23 @@ class Env:
             )
 
             self.ctrl.waitPeriod(t_start)
+
+    def _camera_loop(self):
+        while not self.stop_flag:
+            rgb = self.camera.get_rgb()
+            self.camera_obs.append(CameraObs(time=time.time() - self.t0, rgb=rgb))
+
+    def _gripper_loop(self):
+        while not self.stop_flag:
+            t0 = time.perf_counter()
+            force = self.gripper.force()
+            pos = self.gripper.position()
+
+            self.gripper_obs.append(GripperObs(time=time.time() - self.t0,
+                                               gripper_width=force.value,
+                                               gripper_force=pos.value))
+            sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
+            time.sleep(sleep_dur)
 
     def _obs_loop(self):
         while not self.stop_flag:

@@ -84,9 +84,7 @@ class Camera:
             raise RuntimeError("Failed to get color frame from camera")
 
         image = np.asanyarray(color_frame.get_data())
-
         image = self._square_crop(image)
-
         return image
 
     def close(self):
