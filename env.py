@@ -1,19 +1,11 @@
-import os
-import cv2
-import copy
-import time
-import threading
-# import imageio
-from collections import namedtuple
-
-import numpy as np
-from scipy.spatial.transform import Rotation as R, Slerp
-
 import rtde_control
 import rtde_receive
 import numpy as np
 import threading
+import copy
 import time
+import cv2
+import os
 
 from util import URPose, blend
 from camera import Camera
@@ -48,6 +40,14 @@ class Env:
         save_interval=0.1,
     ):
         # ============================================================
+        # Internal states
+        # ============================================================
+        self.open_width = 35
+        self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
+        self.gripper_state = 0  # 0=open, 1=closed
+        self.des_pose, self.des_gripper_state = None, self.gripper_state
+
+        # ============================================================
         # Camera
         # ============================================================
         self.camera = Camera(crop_mode=camera_crop_mode)
@@ -57,12 +57,11 @@ class Env:
         # ============================================================
         self.robot_ip = robot_ip
         self.gripper_ip = gripper_ip
-
         self.ctrl = rtde_control.RTDEControlInterface(robot_ip)
         self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
-
         self.gripper = wsg.WSG(ip=gripper_ip)
         self.pos_query, self.force_query, self.g_pos, self.g_force = None, None, -1, -1
+
         # ============================================================
         # Servo parameters
         # ============================================================
@@ -75,18 +74,10 @@ class Env:
         self.lookahead_time = lookahead_time
         self.servo_gain = servo_gain
 
-        # ============================================================
-        # Internal states
-        # ============================================================
-        self.open_width = 35
-        self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
-        self.gripper_state = 0  # 0=open, 1=closed
-        self.des_pose, self.des_gripper_state = None, self.gripper_state
-
         print("Initializing environment...")
         print(f"Robot IP:   {robot_ip}")
         print(f"Gripper IP: {gripper_ip}")
-        print(f"Servo  URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653) frequency: {servo_frequency} Hz")
+        print(f"Servo  {self.home_pose} frequency: {servo_frequency} Hz")
 
         # ----------------------------
         # threading
@@ -97,6 +88,7 @@ class Env:
         self.control_thread = None
         self.obs_thread = None
         self.logger_thread = None
+
         # ----------------------------
         # observation buffer
         # ----------------------------
@@ -106,10 +98,13 @@ class Env:
         self.image_idx = 0
 
     def get_gripper_state(self):
+        # Non-blocking gripper state query
+        # Maybe move this to its own thread to speed up query frequency
         if self.pos_query is None:
             self.pos_query = self.gripper.position()
         if self.force_query is None:
             self.force_query = self.gripper.force()
+
         if self.pos_query.is_set():
             self.g_pos = self.pos_query.value
             self.pos_query = None
