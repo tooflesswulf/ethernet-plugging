@@ -146,19 +146,10 @@ class Env:
         # ============================================================
         g = self.gripper.move(position=self.open_width, speed=50)
         g.finished.wait()
-
         self.gripper_state = 0
-        if self.pos_query is None:
-            self.pos_query = self.gripper.position()
-        if self.force_query is None:
-            self.force_query = self.gripper.force()
-        if self.pos_query.is_set():
-            self.g_pos = self.pos_query.value
-            self.pos_query = None
-        if self.force_query.is_set():
-            self.g_force = self.force_query.value
-            self.force_query = None
 
+        # Not sure we need to reset queries.
+        self.pos_query, self.force_query, self.g_pos, self.g_force = self.gripper.position(), self.gripper.force(), -1, -1
         print("Environment reset complete.")
 
         # return initial observation
@@ -174,15 +165,10 @@ class Env:
         return obs
 
     def _control_loop(self):
-
-        t_prev = time.time()
-
         while not self.stop_flag:
-
             t_start = self.ctrl.initPeriod()
-
-            t_now = time.time()
             actual_pose = URPose(*self.recv.getActualTCPPose())
+            actual_force = URPose(*self.recv.getActualTCPForce())
 
             # ----------------------------
             # read shared command
@@ -316,7 +302,6 @@ class Env:
         )
 
     def step(self, des_pose, des_gripper_state):
-
         with self.lock:
             self.des_pose = des_pose
             self.des_gripper_state = des_gripper_state
@@ -338,6 +323,7 @@ class Env:
         self.control_thread = threading.Thread(target=self._control_loop, daemon=True,)
         self.obs_thread = threading.Thread(target=self._obs_loop, daemon=True,)
         self.obs_thread.start()
+
         time.sleep(1.0)  # give some time for the threads to start and populate initial obs
         self.control_thread.start()
 

@@ -1,6 +1,8 @@
-import os, imageio
+import os
+import imageio
 import interface
-import time, numpy as np
+import time
+import numpy as np
 from env import Env, URPose, blend
 
 
@@ -51,7 +53,7 @@ def main():
             # ========================================================
             # Read joystick input
             # ========================================================
-           
+
             iface.update(env.dt)
             des_pose = URPose(*iface.target_pose)
             des_gripper = iface.gripper_state
@@ -65,7 +67,7 @@ def main():
             )
 
             print(f'pos: {env.g_pos:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
-        
+
     except:
         print("\nStopping teleoperation...")
 
@@ -79,10 +81,10 @@ def main():
         gif_path = os.path.join(dataset_path, f"{id}.gif")
         # create gif wit 1/save_interval fps
         imageio.mimsave(gif_path,
-            images,
-            fps=1.0 / env.save_interval,
-            loop=0, # infinite loop
-        )
+                        images,
+                        fps=1.0 / env.save_interval,
+                        loop=0,  # infinite loop
+                        )
 
     env.close()
 
