@@ -577,11 +577,7 @@ class Env:
                     f"{self.image_idx}.png",
                 )
 
-                cv2.imwrite(
-                    image_path,
-                    cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
-                )
-
+                
                 # -----------------------------------
                 # Save states
                 # -----------------------------------
@@ -591,6 +587,11 @@ class Env:
                 
                 if max_delta < self.save_eps:
                     continue
+
+                cv2.imwrite(
+                    image_path,
+                    cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+                )
 
                 actual_pose_list.append(
                     np.array(state["actual_pose"])
