@@ -68,9 +68,9 @@ def main(path=None, id=0, debug=False):
             des_gripper_state=des_gripper,
         )
 
-        print(f'pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N', end='\r')
+        print(f"pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N", end='\r')
 
-        cv2.imshow('RGB', obs['rgb'])
+        cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)
 
         sleep_time = max(0, env.dt - (time.perf_counter() - t0))

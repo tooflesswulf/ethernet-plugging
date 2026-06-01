@@ -279,8 +279,8 @@ class Env:
             pos = self.gripper.position()
 
             self.gripper_obs.append(GripperObs(time=time.time() - self.t0,
-                                               gripper_width=force.value,
-                                               gripper_force=pos.value))
+                                               gripper_width=pos.value,
+                                               gripper_force=force.value))
             sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
             # print('============ QUERY RESOLVED ================')
             time.sleep(sleep_dur)
