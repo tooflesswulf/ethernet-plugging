@@ -22,6 +22,9 @@ class DualSenseInterface:
 
     def update(self, dt):
         act = self.dualsense.input2action()
+        if act is None:
+            print('Act is None, skipping update')
+            return -1
         delta = act['right_delta']
         grip_signal = (1 if act['right_gripper'] == 1 else 0)
 
@@ -52,3 +55,5 @@ class DualSenseInterface:
         self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
 
         self.last_grip_signal = grip_signal
+
+        return 0
