@@ -5,6 +5,7 @@ import interface
 import time
 import numpy as np
 from env import Env, URPose, blend
+import cv2
 
 
 def main(path=None, id=0, debug=False):
@@ -39,8 +40,8 @@ def main(path=None, id=0, debug=False):
     # ================================================================
     iface = interface.DualSenseInterface(
         home_pose,
-        xyzspeed=0.01,
-        rpyspeed=0.1,
+        xyzspeed=0.05,
+        rpyspeed=0.5,
     )
 
 
@@ -49,8 +50,6 @@ def main(path=None, id=0, debug=False):
 
     env.reset(home_pose) # start camera, robot go home, gripper open
 
-    
-
     print("Starting teleoperation loop...")
     env.start() # start threads
    
@@ -58,6 +57,7 @@ def main(path=None, id=0, debug=False):
         # ========================================================
         # Read joystick input
         # ========================================================
+        t0 = time.perf_counter()
     
         flag = iface.update(env.dt)
         if flag == -1:
@@ -73,7 +73,12 @@ def main(path=None, id=0, debug=False):
             des_gripper_state=des_gripper,
         )
 
-        print(f'pos: {env.g_pos:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
+        # print(f'pos: {:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
+        cv2.imshow('Camera', obs['image'])
+        cv2.waitKey(1)
+
+        sleep_time = max(0, env.dt - (time.perf_counter() - t0))
+        time.sleep(sleep_time)
 
     env.close()
 
