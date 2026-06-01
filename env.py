@@ -24,7 +24,7 @@ class GripperObs(namedtuple('GripperObs', ('time', 'gripper_width', 'gripper_for
     pass
 
 
-class CameraObs(namedtuple('CameraObs', ('time', 'rgb'))):
+class CameraObs(namedtuple('CameraObs', ('time', 'image'))):
     pass
 
 
@@ -262,8 +262,8 @@ class Env:
 
     def _camera_loop(self):
         while not self.stop_flag:
-            rgb = self.camera.get_rgb()
-            self.camera_obs.append(CameraObs(time=time.time() - self.t0, rgb=rgb))
+            image = self.camera.get_image()
+            self.camera_obs.append(CameraObs(time=time.time() - self.t0, image=image))
 
     def _gripper_loop(self):
         while not self.stop_flag:
@@ -293,7 +293,7 @@ class Env:
             obs = self.get_obs()
 
             im_path = pathlib.Path(image_path) / f'{image_idx:06d}.png'
-            cv2.imwrite(im_path, cv2.cvtColor(obs['rgb'], cv2.COLOR_RGB2BGR))
+            cv2.imwrite(im_path, obs['image'], cv2.COLOR_RGB2BGR)
             pose_list.append(obs['state']['pose'])
             force_list.append(obs['state']['force'])
             gpos_list.append(obs['state']['gripper_width'])
@@ -326,5 +326,5 @@ class Env:
             f.create_dataset('gripper_obs/gripper_force', data=[obs.gripper_force for obs in self.gripper_obs])
 
             f.create_dataset('camera_obs/time', data=[obs.time for obs in self.camera_obs])
-            f.create_dataset('camera_obs/rgb', data=[obs.rgb for obs in self.camera_obs])
+            f.create_dataset('camera_obs/image_bgr', data=[obs.image for obs in self.camera_obs])
         print(f'Data saved to {path}')
