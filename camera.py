@@ -72,7 +72,7 @@ class Camera:
             y0 = (h - size) // 2
             return image[y0:y0 + size, :]
 
-    def get_rgb(self):
+    def get_image(self):
         """
         Returns:
             np.ndarray: (H, W, 3) uint8 BGR image
@@ -84,9 +84,7 @@ class Camera:
             raise RuntimeError("Failed to get color frame from camera")
 
         image = np.asanyarray(color_frame.get_data())
-
         image = self._square_crop(image)
-
         return image
 
     def close(self):

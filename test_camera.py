@@ -5,7 +5,7 @@ from camera import Camera
 camera = Camera(crop_mode=1)
 
 while True:
-    image = camera.get_rgb()
+    image = camera.get_image()
     if image is None:
         continue
 
