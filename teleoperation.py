@@ -44,15 +44,10 @@ def main(path=None, id=0, debug=False):
         rpyspeed=0.5,
     )
 
-
-#     dataset_path = os.path.join(dataset_path, task, str(id))
-#     env.dataset_path = dataset_path
-
     env.reset(home_pose) # start camera, robot go home, gripper open
 
     print("Starting teleoperation loop...")
     env.start() # start threads
-   
     while True:
         # ========================================================
         # Read joystick input
@@ -81,6 +76,7 @@ def main(path=None, id=0, debug=False):
         time.sleep(sleep_time)
 
     env.close()
+    print('Env closed. Exiting.')
 
 
 if __name__ == "__main__":
@@ -105,9 +101,7 @@ if __name__ == "__main__":
         id = max(indices, default=-1) + 1
         print(f'Auto-selected episode ID: {id}')
         
-    dataset_path = os.path.join(args.path, f'episode{id}')
-    os.makedirs(dataset_path, exist_ok=True)
-    print(f"Saving data to: {dataset_path}")
+    print(f"Saving data to: {args.path}, Episode {id}")
 
     main(path=args.path, id=id, debug=args.debug)
 

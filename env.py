@@ -268,7 +268,7 @@ class Env:
 
     def _camera_loop(self):
         while not self.stop_flag:
-            image = self.camera.get_image()
+            image = self.camera.get_image().copy()
             self.camera_obs.append(CameraObs(time=time.time() - self.t0, image=image))
 
     def _gripper_loop(self):
