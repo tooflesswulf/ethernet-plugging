@@ -100,10 +100,6 @@ class Env:
         # ----------------------------
         self.stop_flag = False
         self.threads = []
-        # self.control_thread = None
-        # self.camera_thread = None
-        # self.gripper_thread = None
-        # self.logger_thread = None
         self.obs_mode = obs_mode
 
         # ----------------------------
@@ -170,10 +166,11 @@ class Env:
             home_pose = self.home_pose
 
         print('Resetting environment...')
-        self.stop_flag = True
-        for thr in self.threads:
-            thr.join()
-        self.save_data()
+        if len(self.threads) > 0:
+            self.stop_flag = True
+            for thr in self.threads:
+                thr.join()
+            self.save_data()
 
         # ============================================================
         # Home / open gripper

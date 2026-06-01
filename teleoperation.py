@@ -1,3 +1,4 @@
+import argparse
 import os
 import imageio
 import interface
@@ -6,10 +7,7 @@ import numpy as np
 from env import Env, URPose, blend
 
 
-def main():
-    id = 0
-    task = 'ethernet_unplug'
-    dataset_path = f'/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/{task}/{id}'
+def main(dataset_path):
     # ================================================================
     # Home pose
     # ================================================================
@@ -90,4 +88,25 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Teleoperation data collection')
+    parser.add_argument('--path', type=str,
+                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_unplug',
+                        help='Base dataset directory')
+    parser.add_argument('--id', type=int, default=None,
+                        help='Episode ID (default: next available)')
+    args = parser.parse_args()
+
+    if args.id is not None:
+        id = args.id
+    else:
+        indices = [
+            int(d.removeprefix('episode'))
+            for d in os.listdir(args.path)
+            if d.startswith('episode') and d.removeprefix('episode').isdigit()
+        ] if os.path.exists(args.path) else []
+        id = max(indices, default=-1) + 1
+        print(f'Auto-selected episode ID: {id}')
+
+    dataset_path = os.path.join(args.path, f'episode{id}')
+
+    main(dataset_path)
