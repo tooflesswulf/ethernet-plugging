@@ -64,10 +64,14 @@ def main(dataset_path):
                 des_gripper_state=des_gripper,
             )
 
-            print(f'pos: {env.g_pos:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
-
-    except:
+            # print(f'pos: {env.g_pos:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
+    except KeyboardInterrupt:
         print("\nStopping teleoperation...")
+    except Exception as e:
+        print("\nStopping teleoperation...")
+        print(f"Error: {e}")
+
+    env.close()
 
     # save a gif of the RGB images for quick visualization
     if dataset_path is not None:
@@ -84,7 +88,6 @@ def main(dataset_path):
                         loop=0,  # infinite loop
                         )
 
-    env.close()
 
 
 if __name__ == "__main__":
@@ -108,5 +111,7 @@ if __name__ == "__main__":
         print(f'Auto-selected episode ID: {id}')
 
     dataset_path = os.path.join(args.path, f'episode{id}')
+    os.makedirs(dataset_path, exist_ok=True)
+    print(f"Saving data to: {dataset_path}")
 
     main(dataset_path)

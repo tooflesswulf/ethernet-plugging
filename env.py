@@ -132,6 +132,11 @@ class Env:
         elif self.obs_mode == 'mean':
             raise NotImplementedError("Mean obs mode not implemented yet")
 
+    def step(self, des_pose, des_gripper_state):
+        self.des_pose = des_pose
+        self.des_gripper_state = des_gripper_state
+        return self.get_obs()
+
     def start(self):
         if self.dataset_path is not None:
             prefix = 'episode'
@@ -147,10 +152,11 @@ class Env:
             threading.Thread(target=self._gripper_loop, daemon=True,),
             threading.Thread(target=self._logger_loop, daemon=True,),
         ]
-        for thread in self.threads:
-            thread.start()
 
         self.t0 = time.time()
+        for thread in self.threads:
+            thread.start()
+        self.wait_for_obs()
 
     def reset(self, home_pose=None):
         """
@@ -200,11 +206,8 @@ class Env:
         self.robot_obs: list[RobotObs] = []
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
-        self.start()
 
         print('Environment reset complete.')
-        self.wait_for_obs()
-        return self.get_obs()
 
     def close(self):
         self.stop_flag = True
@@ -265,6 +268,7 @@ class Env:
     def _gripper_loop(self):
         while not self.stop_flag:
             t0 = time.perf_counter()
+            # print('============ SENDING QUERIES ================')
             force = self.gripper.force()
             pos = self.gripper.position()
 
@@ -272,6 +276,7 @@ class Env:
                                                gripper_width=force.value,
                                                gripper_force=pos.value))
             sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
+            # print('============ QUERY RESOLVED ================')
             time.sleep(sleep_dur)
 
     def _logger_loop(self):
