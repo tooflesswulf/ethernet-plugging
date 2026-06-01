@@ -47,11 +47,11 @@ def build_diffusion_policy(
     if device is not None: 
         nets.to(device)
     
-    ema = EMAModel(parameters=nets.parameters(), power=0.75)
+    ema = EMAModel(parameters=nets.parameters(), power=0.75) if num_training_steps > 0 else None
 
     # Standard ADAM optimizer
     # Note that EMA parametesr are not optimized
-    optimizer = torch.optim.AdamW( params=nets.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW( params=nets.parameters(), lr=lr, weight_decay=weight_decay) if num_training_steps > 0 else None
 
     # Cosine LR schedule with linear warmup
     lr_scheduler = get_scheduler(
@@ -59,7 +59,7 @@ def build_diffusion_policy(
         optimizer=optimizer,
         num_warmup_steps=num_warmup_steps,
         num_training_steps=num_training_steps,
-    )
+    ) if num_training_steps > 0 else None
 
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=num_diffusion_iters,
