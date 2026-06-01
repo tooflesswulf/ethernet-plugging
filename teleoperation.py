@@ -49,11 +49,11 @@ def main(path=None, id=0, debug=False):
     print("Starting teleoperation loop...")
     env.start() # start threads
     while True:
+        t0 = time.perf_counter()
+
         # ========================================================
         # Read joystick input
         # ========================================================
-        t0 = time.perf_counter()
-    
         flag = iface.update(env.dt)
         if flag == -1:
             break
@@ -68,9 +68,16 @@ def main(path=None, id=0, debug=False):
             des_gripper_state=des_gripper,
         )
 
-        # print(f'pos: {:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
-        cv2.imshow('Camera', obs['image'])
+        print(f'pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N', end='\r')
+
+        cv2.imshow('RGB', obs['rgb'])
         cv2.waitKey(1)
+
+        sleep_time = max(0, env.dt - (time.perf_counter() - t0))
+        time.sleep(sleep_time)
+
+    # except:
+    #     print("\nStopping teleoperation...")
 
         sleep_time = max(0, env.dt - (time.perf_counter() - t0))
         time.sleep(sleep_time)
