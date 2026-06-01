@@ -1,3 +1,5 @@
+import os, cv2, copy, time, threading
+import imageio, shutil
 from collections import namedtuple
 from typing import Literal
 import rtde_control
@@ -53,8 +55,9 @@ class Env:
         lookahead_time=0.1,
         servo_gain=500,
         obs_mode: Literal['latest', 'mean'] = 'latest',
-        dataset_path=None,
-        save_interval=0.1,
+        dataset_path = None,
+        save_interval = 0.1,
+        save_eps = 1e-3,
     ):
         # ============================================================
         # Internal states
@@ -68,8 +71,8 @@ class Env:
         # ============================================================
         # Camera
         # ============================================================
-        self.camera = Camera(crop_mode=camera_crop_mode)
-
+        self.camera_crop_mode = camera_crop_mode
+        
         # ============================================================
         # Robot interfaces
         # ============================================================
@@ -110,7 +113,9 @@ class Env:
         self.robot_obs: list[RobotObs] = []
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
-
+        self.save_eps = save_eps
+        self.image_idx = 0
+          
     def wait_for_obs(self):
         while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
             time.sleep(0.01)
@@ -158,7 +163,7 @@ class Env:
             thread.start()
         self.wait_for_obs()
 
-    def reset(self, home_pose=None):
+    def reset(self, home_pose):
         """
         Reset environment:
             1. Open/home the gripper
@@ -177,6 +182,7 @@ class Env:
             for thr in self.threads:
                 thr.join()
             self.save_data()
+        self.camera = Camera(crop_mode=self.camera_crop_mode)
 
         # ============================================================
         # Home / open gripper
@@ -278,7 +284,7 @@ class Env:
             sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
             # print('============ QUERY RESOLVED ================')
             time.sleep(sleep_dur)
-
+            
     def _logger_loop(self):
         image_path = self.epi_path / 'images'
         pose_list = []
@@ -286,11 +292,21 @@ class Env:
         gpos_list = []
         gforce_list = []
         self.wait_for_obs()  # Ensure we have at least one obs before starting logging
+        
+        last_pose = None
 
         image_idx = 0
         while not self.stop_flag:
             t0 = time.perf_counter()
             obs = self.get_obs()
+            
+            cur_pose = np.r_[obs['state']['pose'], obs['state']['gripper_width']]
+            delta = max( abs(cur_pose - last_pose) ) if last_pose is not None else float('inf')
+            if delta < self.save_eps:
+                sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
+                time.sleep(sleep_time)
+                continue
+            last_pose = cur_pose
 
             im_path = pathlib.Path(image_path) / f'{image_idx:06d}.png'
             cv2.imwrite(im_path, obs['image'])
