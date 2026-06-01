@@ -1,12 +1,14 @@
-import os, imageio
+import argparse
+import os
+import imageio
 import interface
-import time, numpy as np
+import time
+import numpy as np
 from env import Env, URPose, blend
 import cv2
 
 
-def main(id=0):
-   
+def main(path=None, id=0, debug=False):
     fps = 20 # saving data frequency
     task = 'ethernet_unplug'
     
@@ -24,12 +26,12 @@ def main(id=0):
     # ================================================================
     # Initialize environment
     # ================================================================
-    dataset_path = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset'
+    dataset_path = path
     env = Env(
         robot_ip="192.168.0.100",
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,
-        dataset_path=None,
+        dataset_path=dataset_path,
         save_interval=1.0 / fps, 
     )
 
@@ -42,18 +44,10 @@ def main(id=0):
         rpyspeed=0.5,
     )
 
-
-    dataset_path = os.path.join(dataset_path, task, str(id))
-    env.dataset_path = dataset_path
-
     env.reset(home_pose) # start camera, robot go home, gripper open
-
-    
 
     print("Starting teleoperation loop...")
     env.start() # start threads
-   
-    # try:
     while True:
         t0 = time.perf_counter()
 
@@ -74,9 +68,9 @@ def main(id=0):
             des_gripper_state=des_gripper,
         )
 
-        print(f'pos: {env.g_pos:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
+        print(f"pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N", end='\r')
 
-        cv2.imshow('RGB', obs['rgb'])
+        cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)
 
         sleep_time = max(0, env.dt - (time.perf_counter() - t0))
@@ -85,29 +79,36 @@ def main(id=0):
     # except:
     #     print("\nStopping teleoperation...")
 
-    # save a gif of the RGB images for quick visualization
-    # if dataset_path is not None:
-    #     image_dir = os.path.join(dataset_path, "images")
-    #     images, N = [], len(os.listdir(image_dir))
-    #     for idx in range(N):
-    #         image_path = os.path.join(image_dir, f"{idx}.png")
-    #         images.append(imageio.imread(image_path))
-    #     gif_path = os.path.join(dataset_path, f"{id}.gif")
-    #     # create gif wit 1/save_interval fps
-    #     imageio.mimsave(gif_path,
-    #         images,
-    #         fps=1.0 / env.save_interval,
-    #         loop=0, # infinite loop
-    #     )
+        sleep_time = max(0, env.dt - (time.perf_counter() - t0))
+        time.sleep(sleep_time)
 
     env.close()
+    print('Env closed. Exiting.')
 
 
 if __name__ == "__main__":
-    # accept an optional command line argument for the demo ID
-    import argparse
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
-    parser.add_argument('--id', type=int, default=0, help='ID for the demo (default: 0)')
+    parser.add_argument('--path', type=str,
+                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_unplug',
+                        help='Base dataset directory')
+    parser.add_argument('--id', type=int, default=None,
+                        help='Episode ID (default: next available)')
+    parser.add_argument('-d', '--debug', type=bool, action=argparse.BooleanOptionalAction, default=False)
+    
     args = parser.parse_args()
-    main(id=args.id)
-     
+
+    if args.id is not None:
+        id = args.id
+    else:
+        indices = [
+            int(d.removeprefix('episode'))
+            for d in os.listdir(args.path)
+            if d.startswith('episode') and d.removeprefix('episode').isdigit()
+        ] if os.path.exists(args.path) else []
+        id = max(indices, default=-1) + 1
+        print(f'Auto-selected episode ID: {id}')
+        
+    print(f"Saving data to: {args.path}, Episode {id}")
+
+    main(path=args.path, id=id, debug=args.debug)
+

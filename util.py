@@ -1,6 +1,7 @@
 from scipy.spatial.transform import Rotation as R, Slerp
 from collections import namedtuple
 import numpy as np
+import os
 
 
 class RotationVector(namedtuple("RotationVector", ("rx", "ry", "rz"))):
@@ -54,3 +55,12 @@ def blend(
         *blended_position,
         *blended_orientation.as_rotvec(),
     )
+
+
+def episode_index(data_dir, prefix='ep'):
+    ixs = [
+        int(d.removeprefix(prefix))
+        for d in os.listdir(data_dir)
+        if d.startswith(prefix) and d.removeprefix(prefix).isdigit()
+    ]
+    return max(ixs, default=0) + 1
