@@ -1,9 +1,5 @@
-import os
-import cv2
-import copy
-import time
-import threading
-# import imageio
+import os, cv2, copy, time, threading
+import imageio, shutil
 from collections import namedtuple
 
 import numpy as np
@@ -44,24 +40,25 @@ class Env:
         max_orientation_step=0.02,
         lookahead_time=0.1,
         servo_gain=500,
-        dataset_path=None,
-        save_interval=0.1,
+        dataset_path = None,
+        save_interval = 0.1,
+        save_eps = 1e-3,
     ):
         # ============================================================
         # Camera
         # ============================================================
-        self.camera = Camera(crop_mode=camera_crop_mode)
-
+        self.camera_crop_mode = camera_crop_mode
+        
         # ============================================================
         # Robot interfaces
         # ============================================================
         self.robot_ip = robot_ip
         self.gripper_ip = gripper_ip
 
-        self.ctrl = rtde_control.RTDEControlInterface(robot_ip)
-        self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
+        self.ctrl = rtde_control.RTDEControlInterface(self.robot_ip)
+        self.recv = rtde_receive.RTDEReceiveInterface(self.robot_ip)
 
-        self.gripper = wsg.WSG(ip=gripper_ip)
+        self.gripper = wsg.WSG(ip=self.gripper_ip)
         self.pos_query, self.force_query, self.g_pos, self.g_force = None, None, -1, -1
         # ============================================================
         # Servo parameters
@@ -102,7 +99,8 @@ class Env:
         # ----------------------------
         self.latest_obs = None
         self.dataset_path = dataset_path
-        self.save_interval = save_interval  # save thread loop interval in seconds
+        self.save_interval = save_interval # save thread loop interval in seconds
+        self.save_eps = save_eps
         self.image_idx = 0
 
     def get_gripper_state(self):
@@ -131,7 +129,7 @@ class Env:
         """
 
         print("Resetting environment...")
-
+        self.camera = Camera(crop_mode=self.camera_crop_mode)
         # ============================================================
         # Home / open gripper
         # ============================================================
@@ -171,8 +169,8 @@ class Env:
             "rgb": self.camera.get_rgb(),
             "state": {
                 "actual_pose": self.home_pose,
-                # "gripper_width": self.g_pos,
-                # "gripper_force": self.g_force,
+                "gripper_width": self.g_pos,
+                "gripper_force": self.g_force,
             }
         }
 
@@ -253,7 +251,7 @@ class Env:
         actual_pose_list = []
         gripper_width_list = []
         gripper_force_list = []
-
+        last_pose = None
         while not self.stop_flag:
 
             t0 = time.time()
@@ -272,19 +270,27 @@ class Env:
                     f"{self.image_idx}.png",
                 )
 
+                
+                # -----------------------------------
+                # Save states
+                # -----------------------------------
+                state = obs["state"]
+                new_pose = np.concatenate( [ np.array(state["actual_pose"]), np.array([state["gripper_width"]]) ] )
+                max_delta = max( abs(new_pose - last_pose) ) if last_pose is not None else float('inf')
+                
+                if max_delta < self.save_eps:
+                    continue
+
                 cv2.imwrite(
                     image_path,
                     cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
                 )
 
-                # -----------------------------------
-                # Save states
-                # -----------------------------------
-                state = obs["state"]
-
                 actual_pose_list.append(
                     np.array(state["actual_pose"])
                 )
+               
+                last_pose = np.concatenate( [ np.array(state["actual_pose"]), np.array([state["gripper_width"]]) ] )
 
                 gripper_width_list.append(
                     state["gripper_width"]
@@ -329,7 +335,12 @@ class Env:
         return self.latest_obs
 
     def start(self):
+
         if self.dataset_path is not None:
+            # if dataset path exists, delete it to avoid confusion
+            if os.path.exists(self.dataset_path):
+                shutil.rmtree(self.dataset_path)
+
             os.makedirs(self.dataset_path, exist_ok=True)
             os.makedirs(
                 os.path.join(self.dataset_path, "images"),
@@ -350,5 +361,6 @@ class Env:
         self.stop_flag = True
         self.control_thread.join()
         self.obs_thread.join()
+        self.logger_thread.join()
 
         self.camera.close()
