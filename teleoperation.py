@@ -2,6 +2,7 @@ import os, imageio
 import interface
 import time, numpy as np
 from env import Env, URPose, blend
+import cv2
 
 
 def main(id=0):
@@ -37,8 +38,8 @@ def main(id=0):
     # ================================================================
     iface = interface.DualSenseInterface(
         home_pose,
-        xyzspeed=0.01,
-        rpyspeed=0.1,
+        xyzspeed=0.05,
+        rpyspeed=0.5,
     )
 
 
@@ -54,10 +55,11 @@ def main(id=0):
    
     # try:
     while True:
+        t0 = time.perf_counter()
+
         # ========================================================
         # Read joystick input
         # ========================================================
-    
         flag = iface.update(env.dt)
         if flag == -1:
             break
@@ -73,7 +75,13 @@ def main(id=0):
         )
 
         print(f'pos: {env.g_pos:7.2f} mm | force: {env.g_force:7.2f} N', end='\r')
-        
+
+        cv2.imshow('RGB', obs['rgb'])
+        cv2.waitKey(1)
+
+        sleep_time = max(0, env.dt - (time.perf_counter() - t0))
+        time.sleep(sleep_time)
+
     # except:
     #     print("\nStopping teleoperation...")
 
