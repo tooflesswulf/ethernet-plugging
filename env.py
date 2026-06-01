@@ -119,7 +119,7 @@ class Env:
         # Assume obs is populated with at least one entry
         if self.obs_mode == 'latest':
             obs = {
-                'rgb': self.camera_obs[-1].rgb,
+                'image': self.camera_obs[-1].image,
                 'state': {
                     'pose': self.robot_obs[-1].actual_pose,
                     'force': self.robot_obs[-1].actual_force,
@@ -293,7 +293,7 @@ class Env:
             obs = self.get_obs()
 
             im_path = pathlib.Path(image_path) / f'{image_idx:06d}.png'
-            cv2.imwrite(im_path, obs['image'], cv2.COLOR_RGB2BGR)
+            cv2.imwrite(im_path, obs['image'])
             pose_list.append(obs['state']['pose'])
             force_list.append(obs['state']['force'])
             gpos_list.append(obs['state']['gripper_width'])
