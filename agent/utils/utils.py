@@ -1,5 +1,6 @@
 
 import torch
+from PIL import Image
 import torch.nn as nn
 from pathlib import Path
 import os, copy, numpy as np
@@ -130,3 +131,8 @@ def denormalize(arr: np.ndarray, stats: dict) -> np.ndarray:
     denormalized = (arr + 1) / 2 * range_val + min_val
 
     return np.where(range_val == 0, arr, denormalized)
+
+def resize_image(np_array, new_size=(128, 128)):
+    img = Image.fromarray(np_array)
+    img = img.resize(new_size, )
+    return np.array(img)

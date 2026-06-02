@@ -154,9 +154,9 @@ class Env:
         self.threads = [
             threading.Thread(target=self._control_loop, daemon=True,),
             threading.Thread(target=self._camera_loop, daemon=True,),
-            threading.Thread(target=self._gripper_loop, daemon=True,),
-            threading.Thread(target=self._logger_loop, daemon=True,),
-        ]
+            threading.Thread(target=self._gripper_loop, daemon=True,) ]
+        if self.dataset_path is not None:
+            self.threads.append(threading.Thread(target=self._logger_loop, daemon=True,))
 
         self.t0 = time.time()
         for thread in self.threads:
@@ -181,7 +181,8 @@ class Env:
             self.stop_flag = True
             for thr in self.threads:
                 thr.join()
-            self.save_data()
+            if self.dataset_path is not None:
+                self.save_data()
         self.camera = Camera(crop_mode=self.camera_crop_mode)
 
         # ============================================================
@@ -220,7 +221,8 @@ class Env:
         for thr in self.threads:
             thr.join()
         self.camera.close()
-        self.save_data()
+        if self.dataset_path is not None:
+            self.save_data()
 
     def _control_loop(self):
         while not self.stop_flag:
