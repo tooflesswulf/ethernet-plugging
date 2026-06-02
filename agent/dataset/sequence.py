@@ -87,7 +87,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         dataset = np.load(state_path, allow_pickle=False)  # only np arrays
         traj_lengths = dataset["traj_length"][:max_n_episodes]  # 1-D array
         total_num_steps = np.sum(traj_lengths)
-        actions = pose2actions(dataset['actual_pose'],  dataset['gripper_width'], traj_lengths)
+        # actions = pose2actions(dataset['actual_pose'],  dataset['gripper_width'], traj_lengths)
         states = np.concatenate([dataset['actual_pose'], dataset['gripper_width'][:, None] ], axis = -1)
         
         # Set up indices for sampling
@@ -95,11 +95,12 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
         # Extract states and actions up to max_n_episodes
         self.states = (
-            torch.from_numpy(normalize(states[:total_num_steps])).float().to(device)
+            # torch.from_numpy(normalize(states[:total_num_steps])).float().to(device)
+            torch.from_numpy(states[:total_num_steps]).float().to(device)
         )  # (total_num_steps, obs_dim)
-        self.actions = (
-            torch.from_numpy(normalize(actions[:total_num_steps])).float().to(device)
-        )  # (total_num_steps, action_dim)
+        # self.actions = (
+        #     torch.from_numpy(normalize(actions[:total_num_steps])).float().to(device)
+        # )  # (total_num_steps, action_dim)
         
         self.images = torch.from_numpy(get_images(img_dir, total_num_steps)).to(
             device
@@ -109,10 +110,27 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         """
         repeat states/images if using history observation at the beginning of the episode
         """
-        start, num_before_start = self.indices[idx]
+        start, num_before_start, traj_end = self.indices[idx]
         end = start + self.horizon_steps
         states = self.states[(start - num_before_start) : (start + 1)]
-        actions = self.actions[start:end] # horizon x dim
+        # actions = self.actions[start:end] # horizon x dim
+        
+        # Delta action: 
+        # s_t - s_0 (delta between current state and meta state), with absolute gripper
+        _end = min(traj_end, end+1)
+        future_states = self.states[(start + 1) : _end]
+        actions = future_states - self.states[start]
+        # fix last dimension with absolute gripper width
+        gripper = future_states[:, -1] 
+        # if > 20, set 0, otherwise set 1
+        gripper = 1-(gripper > 20).float()
+        actions[:, -1] = gripper
+        if len(actions) < self.horizon_steps:
+            padding = self.horizon_steps - len(actions)
+            actions = torch.cat(
+                [actions, actions[-1:].repeat(padding, 1)], dim=0
+            )  # repeat last action if not enough future states
+
         states = torch.stack(
             [
                 states[max(num_before_start - t, 0)]
@@ -129,7 +147,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 for t in reversed(range(self.img_cond_steps))
             ]
         ) # img_cond_steps x H x W x C
-        conditions["rgb"] = rearrange(images, ' T H W C -> T C H W') / 255.0 - 0.5
+       
+        conditions["rgb"] = rearrange(images, ' T H W C -> T C H W') / 255.0 # - 0.5
         batch = Batch(actions, conditions)
         return batch
 
@@ -142,8 +161,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         cur_traj_index = 0
         for traj_length in traj_lengths:
             max_start = cur_traj_index + traj_length - horizon_steps
+            traj_end = cur_traj_index + traj_length
             indices += [
-                (i, i - cur_traj_index) for i in range(cur_traj_index, max_start + 1)
+                (i, i - cur_traj_index, traj_end) for i in range(cur_traj_index, max_start + 1)
             ]
             cur_traj_index += traj_length
         return indices
