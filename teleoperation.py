@@ -76,12 +76,6 @@ def main(path=None, id=0, debug=False):
         sleep_time = max(0, env.dt - (time.perf_counter() - t0))
         time.sleep(sleep_time)
 
-    # except:
-    #     print("\nStopping teleoperation...")
-
-        sleep_time = max(0, env.dt - (time.perf_counter() - t0))
-        time.sleep(sleep_time)
-
     env.close()
     print('Env closed. Exiting.')
 
