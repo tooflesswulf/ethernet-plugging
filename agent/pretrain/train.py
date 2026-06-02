@@ -21,7 +21,7 @@ def batch_to_device(batch, device="cuda:0"):
     return type(batch)(*vals)
 
 def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
-    logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=f"pretrain-{task}")
+    logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=f"pretrain-{task}-relact")
     dataset = StitchedSequenceDataset(dataset_path, device = device)
     dataloader = torch.utils.data.DataLoader(
         dataset,
