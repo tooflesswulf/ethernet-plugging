@@ -38,7 +38,7 @@ def get_actions(nets, stats, noise_scheduler, num_diffusion_iters, nimages, nage
 
     # unnormalize action
     naction = naction.detach().to('cpu').numpy()[0]
-    return denormalize(naction, stats['actions'])
+    return naction # denormalize(naction, stats['actions'])
 
 def evaluate(nets, noise_scheduler, stats, fps, ep_id=0, obs_horizon=1, action_horizon=16, num_diffusion_iters=100, img_size=128, device='cuda'):
     home_pose = URPose(-0.125,0.545,0.305,2.44,2.44,0.653, )
@@ -64,11 +64,11 @@ def evaluate(nets, noise_scheduler, stats, fps, ep_id=0, obs_horizon=1, action_h
         if iface.update(env.dt) == -1:
             break # -1 indicates square is pressed and an error is thrown.
         
-        images = np.stack([resize_image(x['image'], (img_size, img_size)) for x in obs_deque])/255.0 - 0.5
+        images = np.stack([resize_image(x['image'], (img_size, img_size)) for x in obs_deque])/255.0 # - 0.5
         agent_poses, agent_grippers = np.stack([x['state']['pose'] for x in obs_deque]), np.stack([ [x['state']['gripper_width']] for x in obs_deque])
         curr_pose, curr_gripper = agent_poses[-1], agent_grippers[-1][0]
         agent_poses = np.concatenate( [agent_poses, agent_grippers], -1)
-        agent_poses = normalize(agent_poses, stats['states']) # normalize between -1 to 1.
+        # agent_poses = normalize(agent_poses, stats['states']) # normalize between -1 to 1.
 
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
         nagent_poses = torch.from_numpy(agent_poses).to(device, dtype=torch.float32) # txd
@@ -81,11 +81,13 @@ def evaluate(nets, noise_scheduler, stats, fps, ep_id=0, obs_horizon=1, action_h
             actions = actions[start:end] # (action_horizon, action_dim)
 
             des_grippers_widths = actions[:, -1]
-            # binary des_grippers, given threshold of 20. >20 is 0, otherwise 1.
-            des_grippers = np.where(des_grippers_widths > 20, 0.0, 1.0)
-            for i, (delta_des_pose, des_gripper) in enumerate(zip(actions[:, :-1], des_grippers)): # open loop execution of actions:
+            # binary des_grippers, given threshold of 0.5. >0.5 is 1, otherwise 0
+            des_grippers = (des_grippers_widths > 0.5).astype(int)
+
+            for i in tqdm(range(len(actions)), desc=f'Open-loop execution'):
+                delta_des_pose, des_gripper = actions[i, :-1], des_grippers[i]
                 t0 = time.perf_counter()
-                des_pose = curr_pose + delta_des_pose
+                des_pose = curr_pose + delta_des_pose # s_0 + delta_t --> s_t
                 des_pose = URPose(*des_pose)
                 obs = env.step(
                     des_pose=des_pose,
@@ -93,12 +95,10 @@ def evaluate(nets, noise_scheduler, stats, fps, ep_id=0, obs_horizon=1, action_h
                 )
 
                 obs_deque.append(obs)
-                sleep_time = 0.2
+                sleep_time = 0.1
                 time.sleep(sleep_time)
-                curr_pose = des_pose
-                break
-           
-
+                
+        
 def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Evaluation.')
     parser.add_argument('--use_wandb', action='store_true', default=False)
@@ -106,7 +106,7 @@ def parse_args():
     parser.add_argument('--ckpt_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/ckpts')
     parser.add_argument('--device',    type=str,  default='cuda')
     parser.add_argument('--task',      type=str,  default='ethernet_unplug')
-    parser.add_argument('--ckptname',    type=str,  default='ckpt_ep_200.pth')
+    parser.add_argument('--ckptname',    type=str,  default='ckpt_ep_190.pth')
     parser.add_argument('--ep_id',    type=int,  default=0)
     parser.add_argument('--fps',    type=int,  default=20)
     parser.add_argument('--img_size',    type=int,  default=128)
