@@ -1,5 +1,6 @@
 from scipy.spatial.transform import Rotation as R, Slerp
 from collections import namedtuple
+from PIL import Image
 import numpy as np
 import os
 
@@ -64,3 +65,4 @@ def episode_index(data_dir, prefix='ep'):
         if d.startswith(prefix) and d.removeprefix(prefix).isdigit()
     ]
     return max(ixs, default=0) + 1
+
