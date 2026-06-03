@@ -43,8 +43,8 @@ def main(path=None, id=0, debug=False):
     # ================================================================
     iface = interface.DualSenseInterface(
         home_pose,
-        xyzspeed=0.05,
-        rpyspeed=0.5,
+        xyzspeed=0.08,
+        rpyspeed=1.,
         forcespeed=5.,
     )
 
