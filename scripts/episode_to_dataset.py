@@ -45,6 +45,7 @@ np.savez_compressed(
     force=total_forces,
     gripper_width=total_widths,
     gripper_force=total_g_forces,
+    traj_length=np.array(lens)
 )
 # save images 
 os.makedirs(save_img_dir,  exist_ok=True)
