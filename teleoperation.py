@@ -44,7 +44,7 @@ def main(path=None, id=0, debug=False):
         home_pose,
         xyzspeed=0.05,
         rpyspeed=0.5,
-        forcespeed=1.,
+        forcespeed=5.,
     )
 
     env.reset(home_pose)  # start camera, robot go home, gripper open

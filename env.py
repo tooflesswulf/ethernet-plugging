@@ -286,11 +286,11 @@ class Env:
             # ----------------------------
             if self.adaptive_mode:
                 fz = actual_force.z           # base-frame z force (N)
-                force_err = self.des_zforce - fz
+                force_err = fz - self.des_zforce
                 d_force_err = (force_err - self._prev_force_err) / self.dt
-                # self._prev_force_err = force_err
+                self._prev_force_err = force_err
 
-                kp = -.0003
+                kp = .0003
                 kd = 0
 
                 force_z_offset = (
