@@ -290,14 +290,14 @@ class Env:
                 d_force_err = (force_err - self._prev_force_err) / self.dt
                 # self._prev_force_err = force_err
 
-                kp = .0001
+                kp = -.0003
                 kd = 0
 
                 force_z_offset = (
                     kp * force_err
                     + kd * d_force_err
                 )
-                # print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f} c={actual_pose.z}')
+                print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f}')
                 force_z_offset = np.clip(force_z_offset, -self.max_position_step[2], self.max_position_step[2])
 
                 command = URPose(
