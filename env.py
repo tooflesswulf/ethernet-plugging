@@ -1,5 +1,10 @@
-import os, cv2, copy, time, threading
-import imageio, shutil
+import os
+import cv2
+import copy
+import time
+import threading
+import imageio
+import shutil
 from collections import namedtuple
 from typing import Literal
 import rtde_control
@@ -55,9 +60,13 @@ class Env:
         lookahead_time=0.1,
         servo_gain=500,
         obs_mode: Literal['latest', 'mean'] = 'latest',
-        dataset_path = None,
-        save_interval = 0.1,
-        save_eps = 1e-3,
+        dataset_path=None,
+        save_interval=0.1,
+        save_eps=1e-3,
+        gwidth=20,
+        gforce=40,
+        gspeed=50,
+        gpullback=10,
     ):
         # ============================================================
         # Internal states
@@ -67,12 +76,26 @@ class Env:
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
         self.gripper_state = 0  # 0=open, 1=closed
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
+        self.des_zforce = 0.
+        self.adaptive_mode = False
+        self._force_z_offset = 0.
+        self._prev_force_err = 0.
+
+        # ============================================================
+        # Control parameters
+        # ============================================================
+        self.g_force = gforce
+        self.g_width = gwidth
+        self.g_speed = gspeed
+        self.g_pullback = gpullback
+        self.force_kp = 0.0001     # m / N  — position correction per unit force error
+        self.force_kd = 0.00002    # m / (N/s) — damping on force error rate
 
         # ============================================================
         # Camera
         # ============================================================
         self.camera_crop_mode = camera_crop_mode
-        
+
         # ============================================================
         # Robot interfaces
         # ============================================================
@@ -115,7 +138,7 @@ class Env:
         self.camera_obs: list[CameraObs] = []
         self.save_eps = save_eps
         self.image_idx = 0
-          
+
     def wait_for_obs(self):
         while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
             time.sleep(0.01)
@@ -154,7 +177,7 @@ class Env:
         self.threads = [
             threading.Thread(target=self._control_loop, daemon=True,),
             threading.Thread(target=self._camera_loop, daemon=True,),
-            threading.Thread(target=self._gripper_loop, daemon=True,) ]
+            threading.Thread(target=self._gripper_loop, daemon=True,)]
         if self.dataset_path is not None:
             self.threads.append(threading.Thread(target=self._logger_loop, daemon=True,))
 
@@ -203,7 +226,7 @@ class Env:
         # ============================================================
         # Move gripper to default open width
         # ============================================================
-        g = self.gripper.move(position=self.open_width, speed=50)
+        g = self.gripper.move(position=self.open_width, speed=self.g_speed)
         g.finished.wait()
         self.gripper_state = 0
 
@@ -241,10 +264,10 @@ class Env:
             # ----------------------------
             if gripper_state != des_gripper_state:
                 if gripper_state == 0:
-                    self.gripper.grip(force=40, width=20, speed=50)
+                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed)
                     self.gripper_state = 1
                 else:
-                    self.gripper.release(pullback=10, speed=50)
+                    self.gripper.release(pullback=self.g_pullback, speed=self.g_speed)
                     self.gripper_state = 0
 
             # ----------------------------
@@ -256,6 +279,32 @@ class Env:
                 self.max_position_step,
                 self.max_orientation_step,
             )
+
+            # ----------------------------
+            # adaptive z-force control
+            # ----------------------------
+            if self.adaptive_mode:
+                fz = actual_force.z           # base-frame z force (N)
+                force_err = self.des_zforce - fz
+                d_force_err = (force_err - self._prev_force_err) / self.dt
+                self._prev_force_err = force_err
+
+                self._force_z_offset = (
+                    self.force_kp * force_err
+                    + self.force_kd * d_force_err
+                )
+
+                command = URPose(
+                    command.x,
+                    command.y,
+                    actual_pose.z + self._force_z_offset,
+                    command.rx,
+                    command.ry,
+                    command.rz,
+                )
+            else:
+                self._force_z_offset = 0.
+                self._prev_force_err = 0.
 
             self.ctrl.servoL(
                 command,
@@ -286,7 +335,7 @@ class Env:
             sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
             # print('============ QUERY RESOLVED ================')
             time.sleep(sleep_dur)
-            
+
     def _logger_loop(self):
         image_path = self.epi_path / 'images'
         pose_list = []
@@ -294,16 +343,16 @@ class Env:
         gpos_list = []
         gforce_list = []
         self.wait_for_obs()  # Ensure we have at least one obs before starting logging
-        
+
         last_pose = None
 
         image_idx = 0
         while not self.stop_flag:
             t0 = time.perf_counter()
             obs = self.get_obs()
-            
+
             cur_pose = np.r_[obs['state']['pose'], obs['state']['gripper_width']]
-            delta = max( abs(cur_pose - last_pose) ) if last_pose is not None else float('inf')
+            delta = max(abs(cur_pose - last_pose)) if last_pose is not None else float('inf')
             if delta < self.save_eps:
                 sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
                 time.sleep(sleep_time)

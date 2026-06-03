@@ -7,6 +7,11 @@ import numpy as np
 from env import Env, URPose, blend
 import cv2
 
+GRIP_WIDTH_MM = 20
+GRIP_FORCE_N = 40
+GRIP_SPEED_MMPS = 50
+GRIP_PULLBACK_MM = 10
+
 
 def main(path=None, id=0, debug=False):
     fps = 20  # saving data frequency
@@ -26,6 +31,10 @@ def main(path=None, id=0, debug=False):
         camera_crop_mode=1,
         dataset_path=dataset_path,
         save_interval=1.0 / fps,
+        gforce=GRIP_FORCE_N,
+        gwidth=GRIP_WIDTH_MM,
+        gspeed=GRIP_SPEED_MMPS,
+        gpullback=GRIP_PULLBACK_MM,
     )
 
     # ================================================================
