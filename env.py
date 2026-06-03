@@ -78,7 +78,6 @@ class Env:
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
         self.des_zforce = 0.
         self.adaptive_mode = False
-        self._force_z_offset = 0.
         self._prev_force_err = 0.
 
         # ============================================================
@@ -288,18 +287,23 @@ class Env:
             if self.adaptive_mode:
                 fz = actual_force.z           # base-frame z force (N)
                 force_err = self.des_zforce - fz
-                # d_force_err = (force_err - self._prev_force_err) / self.dt
+                d_force_err = (force_err - self._prev_force_err) / self.dt
                 # self._prev_force_err = force_err
 
-                # self._force_z_offset = (
-                #     self.force_kp * force_err
-                #     + self.force_kd * d_force_err
-                # )
+                kp = .0001
+                kd = 0
+
+                force_z_offset = (
+                    kp * force_err
+                    + kd * d_force_err
+                )
+                # print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f} c={actual_pose.z}')
+                force_z_offset = np.clip(force_z_offset, -self.max_position_step[2], self.max_position_step[2])
 
                 command = URPose(
                     command.x,
                     command.y,
-                    actual_pose.z,
+                    actual_pose.z + force_z_offset,
                     command.rx,
                     command.ry,
                     command.rz,
