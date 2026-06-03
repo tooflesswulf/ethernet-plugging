@@ -123,10 +123,10 @@ def parse_args():
     parser.add_argument('--device',    type=str,  default='cuda')
     parser.add_argument('--task',      type=str,  default='ethernet_unplug')
     parser.add_argument('--ckptname',    type=str,  default='ckpt_ep_190.pth')
-    parser.add_argument('--ep_id',    type=int,  default=0)
+    parser.add_argument('--ep_id',    type=int,  default=2)
     parser.add_argument('--fps',    type=int,  default=20)
     parser.add_argument('--img_size',    type=int,  default=128)
-    parser.add_argument('--horizon',    type=int,  default=16)
+    parser.add_argument('--horizon',    type=int,  default=4)
     parser.add_argument('--num_diffusion_iters', type=int,  default=100)
     return parser.parse_args()
 
