@@ -6,7 +6,9 @@ import numpy as np
 
 class DualSenseInterface:
     last_grip_signal = 0
+    last_mode_signal = 0
     gripper_state = 0
+    adaptive_mode = False
 
     def __init__(self, start_pose, xyzspeed=0.1, rpyspeed=1.0):
         self.env = make("Lift", robots="Panda")
@@ -31,6 +33,11 @@ class DualSenseInterface:
         if grip_signal == 1 and self.last_grip_signal == 0:
             # Toggle gripper state on rising edge of grip signal
             self.gripper_state = 1 - self.gripper_state
+
+        mode_signal = (1 if act['toggle_zforce'] == 1 else 0)
+        if mode_signal == 1 and self.last_mode_signal == 0:
+            # Toggle adaptive mode on rising edge of mode signal
+            self.adaptive_mode = not self.adaptive_mode
 
         # Manual flips
         tr = np.array([

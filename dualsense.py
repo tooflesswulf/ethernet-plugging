@@ -481,9 +481,14 @@ class DualSense(Device):
 
         return dpos, drotation
 
+    last_triangle = False
+    last_circle = False
     def input2action(self):
         act = super().input2action()
-        act['toggle_zforce'] = self.state.Triangle
+        act['right_delta'] = self.state.Circle and not self.last_circle
+        act['toggle_zforce'] = self.state.Triangle and not self.last_triangle
+        self.last_circle = self.state.Circle
+        self.last_triangle = self.state.Triangle
         return act
 
 def parse_usb_report(state_bytes: bytearray) -> DSState:
