@@ -61,7 +61,8 @@ def main(path=None, id=0, debug=False):
             des_gripper_state=des_gripper,
         )
 
-        print(f"pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N", end='\r')
+        ff = obs['state']['force']
+        print(f"pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N | eef force: [{ff.x:5.2f}, {ff.y:5.2f}, {ff.z:5.2f}, {ff.rx:5.2f}, {ff.ry:5.2f}, {ff.rz:5.2f}]", end='\r')
 
         cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)

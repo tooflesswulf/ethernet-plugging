@@ -282,10 +282,8 @@ class DualSense(Device):
         print_command("Move RX/RY right joystick", "rotate arm about x/y axis, namely roll/pitch")
         print_command("Press R2 Trigger with or without R1", "rotate arm about z axis, namely yaw")
         print_command("Square button", "reset simulation")
-        print_command("Circle button (hold)", "close gripper")
-        print_command("Triangle button", "toggle arm/base mode (if applicable)")
-        print_command("Left/Right Direction Pad", "switch active arm (if multi-armed robot)")
-        print_command("Up/Down Direction Pad", "switch active robot (if multi-robot environment)")
+        print_command("Circle button", "toggle gripper")
+        print_command("Triangle button", "toggle z-force mode")
         print_command("Square", "quit")
         print("")
 
@@ -483,6 +481,10 @@ class DualSense(Device):
 
         return dpos, drotation
 
+    def input2action(self):
+        act = super().input2action()
+        act['toggle_zforce'] = self.state.Triangle
+        return act
 
 def parse_usb_report(state_bytes: bytearray) -> DSState:
     new_state = DSState()
