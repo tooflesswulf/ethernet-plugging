@@ -10,18 +10,11 @@ import cv2
 
 def main(path=None, id=0, debug=False):
     fps = 20 # saving data frequency
-    task = 'ethernet_unplug'
     
     # Home pose
     # ================================================================
-    home_pose = URPose(
-        -0.125,
-        0.545,
-        0.305,
-        2.44,
-        2.44,
-        0.653,
-    )
+    # home_pose = URPose(-0.125,0.545,0.305, 2.44,2.44,0.653, ) # high-position (cable too hard to to see)
+    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633) # low-position (cable easy to see)
 
     # ================================================================
     # Initialize environment
@@ -83,7 +76,7 @@ def main(path=None, id=0, debug=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
     parser.add_argument('--path', type=str,
-                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_unplug',
+                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_unplug_red',
                         help='Base dataset directory')
     parser.add_argument('--id', type=int, default=None,
                         help='Episode ID (default: next available)')
@@ -103,6 +96,6 @@ if __name__ == "__main__":
         print(f'Auto-selected episode ID: {id}')
         
     print(f"Saving data to: {args.path}, Episode {id}")
-
+    os.makedirs(args.path,  exist_ok=True)
     main(path=args.path, id=id, debug=args.debug)
 
