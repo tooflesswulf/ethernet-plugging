@@ -78,7 +78,6 @@ class Env:
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
         self.des_zforce = 0.
         self.adaptive_mode = False
-        self._prev_force_err = 0.
 
         # ============================================================
         # Control parameters
@@ -87,8 +86,6 @@ class Env:
         self.g_width = gwidth
         self.g_speed = gspeed
         self.g_pullback = gpullback
-        self.force_kp = 0.0001     # m / N  — position correction per unit force error
-        self.force_kd = 0.00002    # m / (N/s) — damping on force error rate
 
         # ============================================================
         # Camera
@@ -248,6 +245,14 @@ class Env:
         if self.dataset_path is not None:
             self.save_data()
 
+    force_alpha = 0.05
+    _fz_filtered = 0.
+    _prev_force_err = 0.
+
+    def _filter_force_z(self, force):
+        self._fz_filtered = self.force_alpha * force + (1 - self.force_alpha) * self._fz_filtered
+        return self._fz_filtered
+
     def _control_loop(self):
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
@@ -285,7 +290,7 @@ class Env:
             # adaptive z-force control
             # ----------------------------
             if self.adaptive_mode:
-                fz = actual_force.z           # base-frame z force (N)
+                fz = self._filter_force_z(actual_force.z)  # base-frame z force (N)
                 force_err = fz - self.des_zforce
                 d_force_err = (force_err - self._prev_force_err) / self.dt
                 self._prev_force_err = force_err
