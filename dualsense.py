@@ -485,7 +485,7 @@ class DualSense(Device):
     last_circle = False
     def input2action(self):
         act = super().input2action()
-        act['right_delta'] = self.state.Circle and not self.last_circle
+        act['right_gripper'] = self.state.Circle and not self.last_circle
         act['toggle_zforce'] = self.state.Triangle and not self.last_triangle
         self.last_circle = self.state.Circle
         self.last_triangle = self.state.Triangle
