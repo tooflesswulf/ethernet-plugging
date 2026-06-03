@@ -136,3 +136,4 @@ def resize_image(np_array, new_size=(128, 128)):
     img = Image.fromarray(np_array)
     img = img.resize(new_size, )
     return np.array(img)
+
