@@ -288,18 +288,18 @@ class Env:
             if self.adaptive_mode:
                 fz = actual_force.z           # base-frame z force (N)
                 force_err = self.des_zforce - fz
-                d_force_err = (force_err - self._prev_force_err) / self.dt
-                self._prev_force_err = force_err
+                # d_force_err = (force_err - self._prev_force_err) / self.dt
+                # self._prev_force_err = force_err
 
-                self._force_z_offset = (
-                    self.force_kp * force_err
-                    + self.force_kd * d_force_err
-                )
+                # self._force_z_offset = (
+                #     self.force_kp * force_err
+                #     + self.force_kd * d_force_err
+                # )
 
                 command = URPose(
                     command.x,
                     command.y,
-                    actual_pose.z + self._force_z_offset,
+                    actual_pose.z,
                     command.rx,
                     command.ry,
                     command.rz,
