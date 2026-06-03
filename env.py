@@ -160,9 +160,11 @@ class Env:
         elif self.obs_mode == 'mean':
             raise NotImplementedError("Mean obs mode not implemented yet")
 
-    def step(self, des_pose, des_gripper_state):
+    def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False):
         self.des_pose = des_pose
         self.des_gripper_state = des_gripper_state
+        self.des_zforce = des_zforce
+        self.adaptive_mode = adaptive_mode
         return self.get_obs()
 
     def start(self):

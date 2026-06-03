@@ -21,7 +21,7 @@ class DualSenseInterface:
     @property
     def target_pose(self):
         return self.targ_pose
-    
+
     @property
     def target_zforce(self):
         return self.targ_zforce
@@ -84,7 +84,6 @@ class DualSenseInterface:
         R_cur = R.from_rotvec(self.targ_pose[3:])
         R_delta = R.from_euler('ZYX', [drz, dry, drx])
         self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
-
 
     def activate_adaptive_mode(self):
         self.targ_zforce = self.latest_obs['state']['force'].z
