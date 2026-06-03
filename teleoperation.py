@@ -9,12 +9,12 @@ import cv2
 
 
 def main(path=None, id=0, debug=False):
-    fps = 20 # saving data frequency
-    
+    fps = 20  # saving data frequency
+
     # Home pose
     # ================================================================
     # home_pose = URPose(-0.125,0.545,0.305, 2.44,2.44,0.653, ) # high-position (cable too hard to to see)
-    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633) # low-position (cable easy to see)
+    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see)
 
     # ================================================================
     # Initialize environment
@@ -25,7 +25,7 @@ def main(path=None, id=0, debug=False):
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,
         dataset_path=dataset_path,
-        save_interval=1.0 / fps, 
+        save_interval=1.0 / fps,
     )
 
     # ================================================================
@@ -37,10 +37,10 @@ def main(path=None, id=0, debug=False):
         rpyspeed=0.5,
     )
 
-    env.reset(home_pose) # start camera, robot go home, gripper open
+    env.reset(home_pose)  # start camera, robot go home, gripper open
 
     print("Starting teleoperation loop...")
-    env.start() # start threads
+    env.start()  # start threads
     while True:
         t0 = time.perf_counter()
 
@@ -60,9 +60,11 @@ def main(path=None, id=0, debug=False):
             des_pose=des_pose,
             des_gripper_state=des_gripper,
         )
+        iface.store_obs(obs)
 
         ff = obs['state']['force']
-        print(f"pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N | eef force: [{ff.x:5.2f}, {ff.y:5.2f}, {ff.z:5.2f}, {ff.rx:5.2f}, {ff.ry:5.2f}, {ff.rz:5.2f}]", end='\r')
+        print(f"pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N" +
+              f" | eef force: [{ff.x:5.2f}, {ff.y:5.2f}, {ff.z:5.2f}, {ff.rx:5.2f}, {ff.ry:5.2f}, {ff.rz:5.2f}]", end='\r')
 
         cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)
@@ -82,7 +84,7 @@ if __name__ == "__main__":
     parser.add_argument('--id', type=int, default=None,
                         help='Episode ID (default: next available)')
     parser.add_argument('-d', '--debug', type=bool, action=argparse.BooleanOptionalAction, default=False)
-    
+
     args = parser.parse_args()
 
     if args.id is not None:
@@ -95,8 +97,7 @@ if __name__ == "__main__":
         ] if os.path.exists(args.path) else []
         id = max(indices, default=-1) + 1
         print(f'Auto-selected episode ID: {id}')
-        
-    print(f"Saving data to: {args.path}, Episode {id}")
-    os.makedirs(args.path,  exist_ok=True)
-    main(path=args.path, id=id, debug=args.debug)
 
+    print(f"Saving data to: {args.path}, Episode {id}")
+    os.makedirs(args.path, exist_ok=True)
+    main(path=args.path, id=id, debug=args.debug)
