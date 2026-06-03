@@ -5,8 +5,6 @@ import numpy as np
 
 
 class DualSenseInterface:
-    last_grip_signal = 0
-    last_mode_signal = 0
     gripper_state = 0
     adaptive_mode = False
 
@@ -28,15 +26,9 @@ class DualSenseInterface:
             print('Act is None, skipping update')
             return -1
         delta = act['right_delta']
-        grip_signal = (1 if act['right_gripper'] == 1 else 0)
-
-        if grip_signal == 1 and self.last_grip_signal == 0:
-            # Toggle gripper state on rising edge of grip signal
+        if act['right_gripper']:
             self.gripper_state = 1 - self.gripper_state
-
-        mode_signal = (1 if act['toggle_zforce'] == 1 else 0)
-        if mode_signal == 1 and self.last_mode_signal == 0:
-            # Toggle adaptive mode on rising edge of mode signal
+        if act['toggle_zforce']:
             self.adaptive_mode = not self.adaptive_mode
 
         # Manual flips
@@ -45,7 +37,6 @@ class DualSenseInterface:
             [0, -1, 0],
             [0, 0, 1],
         ])
-        flips = np.array([1, -1, 1])
 
         # Position: simple addition
         dpos = tr @ delta[:3] * self.speed[:3] * dt
@@ -55,12 +46,9 @@ class DualSenseInterface:
         drx, dry, drz = delta[3:] * self.speed[3:] * dt
 
         # Manually flip rotations
-        drx, dry = -dry, -drx
+        drx, dry, drz = dry, drx, -drz
 
         R_cur = R.from_rotvec(self.targ_pose[3:])
         R_delta = R.from_euler('ZYX', [drz, dry, drx])
         self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
-
-        self.last_grip_signal = grip_signal
-
         return 0
