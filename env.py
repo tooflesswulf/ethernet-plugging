@@ -245,7 +245,7 @@ class Env:
         if self.dataset_path is not None:
             self.save_data()
 
-    force_alpha = 0.05
+    force_alpha = 0.02
     _fz_filtered = 0.
     _prev_force_err = 0.
 
@@ -295,15 +295,17 @@ class Env:
                 d_force_err = (force_err - self._prev_force_err) / self.dt
                 self._prev_force_err = force_err
 
-                kp = .0003
-                kd = 0
+                kp = .001
+                kd = .00001
 
                 force_z_offset = (
                     kp * force_err
                     + kd * d_force_err
                 )
-                print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f}')
-                force_z_offset = np.clip(force_z_offset, -self.max_position_step[2], self.max_position_step[2])
+                # print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f}')
+                # if np.abs(force_z_offset) > self.max_position_step[2]:
+                    # print('EXCEEDED SPEED LIMIT?')
+                # force_z_offset = np.clip(force_z_offset, -self.max_position_step[2], self.max_position_step[2])
 
                 command = URPose(
                     command.x,
