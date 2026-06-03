@@ -81,8 +81,8 @@ def get_stats(dataset_path, max_n_episodes=10000 ):
     state_path = os.path.join(dataset_path, 'states.npz')
     dataset = np.load(state_path, allow_pickle=False)  # only np arrays
     traj_lengths = dataset["traj_length"][:max_n_episodes]  # 1-D array
-    actions = pose2actions(dataset['actual_pose'],  dataset['gripper_width'], traj_lengths)
-    states = np.concatenate([dataset['actual_pose'], dataset['gripper_width'][:, None] ], axis = -1)
+    actions = pose2actions(dataset['pose'],  dataset['gripper_width'], traj_lengths)
+    states = np.concatenate([dataset['pose'], dataset['gripper_width'][:, None] ], axis = -1)
 
     return {
         'actions': {'min': actions.min(0), 'max': actions.max(0)},
