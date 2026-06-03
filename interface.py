@@ -49,7 +49,12 @@ class DualSenseInterface:
         if act['right_gripper']:
             self.gripper_state = 1 - self.gripper_state
         if act['toggle_zforce']:
-            self.adaptive_mode = not self.adaptive_mode
+            if self.adaptive_mode:
+                self.adaptive_mode = False
+                self.deactivate_adaptive_mode()
+            else:
+                self.adaptive_mode = True
+                self.activate_adaptive_mode()
 
         self.flip_actions(act)
         if self.adaptive_mode:
@@ -89,7 +94,7 @@ class DualSenseInterface:
         self.targ_zforce = self.latest_obs['state']['force'].z
 
     def deactivate_adaptive_mode(self):
-        self.targ_pose = self.latest_obs['state']['pose']
+        self.targ_pose = np.array(self.latest_obs['state']['pose'])
         self.targ_zforce = 0.
 
     def store_obs(self, obs):
