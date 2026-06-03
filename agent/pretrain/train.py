@@ -2,6 +2,7 @@ import numpy as np
 from tqdm import tqdm 
 import argparse, os, wandb, torch, torch.nn as nn 
 
+
 from agent.utils.utils import save_checkpoint
 from agent.utils.logging import NoOpLogger, setup_logger
 from agent.model.diffusion import build_diffusion_policy
@@ -22,7 +23,7 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=f"pretrain-{task}-relact")
-    dataset = StitchedSequenceDataset(dataset_path, device = device)
+    dataset = StitchedSequenceDataset(dataset_path, horizon_steps=16, device = device)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=64,
@@ -88,8 +89,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Training')
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--device',    type=str,  default='cuda')
-    parser.add_argument('--task',      type=str,  default='ethernet_unplug')
-    parser.add_argument('--epochs',    type=int,  default=300)
+    parser.add_argument('--task',      type=str,  default='ethernet_unplug_red')
+    parser.add_argument('--epochs',    type=int,  default=200)
     return parser.parse_args()
 
 if __name__ == '__main__':
