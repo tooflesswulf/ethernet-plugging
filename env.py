@@ -1,10 +1,3 @@
-import os
-import cv2
-import copy
-import time
-import threading
-import imageio
-import shutil
 from collections import namedtuple
 from typing import Literal
 import rtde_control
@@ -13,7 +6,6 @@ import numpy as np
 import threading
 import pathlib
 import h5py
-import copy
 import time
 import cv2
 import os
@@ -304,7 +296,7 @@ class Env:
                 )
                 # print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f}')
                 # if np.abs(force_z_offset) > self.max_position_step[2]:
-                    # print('EXCEEDED SPEED LIMIT?')
+                # print('EXCEEDED SPEED LIMIT?')
                 # force_z_offset = np.clip(force_z_offset, -self.max_position_step[2], self.max_position_step[2])
 
                 command = URPose(
