@@ -17,8 +17,8 @@ def main(path=None, id=0, debug=False):
     # Home pose
     # ================================================================
     # home_pose = URPose(-0.125,0.545,0.305, 2.44,2.44,0.653, ) # high-position (cable too hard to to see)
-    # home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see)
-    home_pose = URPose(-0.147, 0.612, 0.184, 2.42, 2.42, 2.42)  # low-position (cable easy to see)
+    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see)
+    # home_pose = URPose(-0.147, 0.612, 0.184, 2.42, 2.42, 2.42)  # low-position (cable easy to see)
 
     # ================================================================
     # Initialize environment
