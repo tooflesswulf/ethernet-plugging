@@ -1,4 +1,4 @@
 
 python agent/pretrain/train.py \
-    --epochs 200 \
+    --epochs 300 \
     --use_wandb

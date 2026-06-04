@@ -38,10 +38,12 @@ def get_actions(nets, stats, noise_scheduler, num_diffusion_iters, nimages, nage
 
     # unnormalize action
     naction = naction.detach().to('cpu').numpy()[0]
-    return naction # denormalize(naction, stats['actions'])
+    # return naction # denormalize(naction, stats['actions'])
+    return denormalize(naction, stats['actions'])
 
 def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_horizon=16, num_diffusion_iters=100, img_size=128, device='cuda'):
-    home_pose = URPose(-0.125,0.545,0.305,2.44,2.44,0.653, )
+    # home_pose = URPose(-0.125,0.545,0.305,2.44,2.44,0.653, )
+    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633) # low-position (cable easy to see)
     iface = interface.DualSenseInterface(
         home_pose,
         xyzspeed=0.01,
@@ -67,8 +69,8 @@ def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_
         images = np.stack([resize_image(x['image'], (img_size, img_size)) for x in obs_deque])/255.0 # - 0.5
         agent_poses, agent_grippers = np.stack([x['state']['pose'] for x in obs_deque]), np.stack([ [x['state']['gripper_width']] for x in obs_deque])
         curr_pose, curr_gripper = agent_poses[-1], agent_grippers[-1][0]
-        agent_poses = np.concatenate( [agent_poses, agent_grippers], -1)
-        # agent_poses = normalize(agent_poses, stats['states']) # normalize between -1 to 1.
+        # agent_poses = np.concatenate( [agent_poses, agent_grippers], -1)
+        agent_poses = normalize(agent_poses, stats['states']) # normalize between -1 to 1.
 
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
         nagent_poses = torch.from_numpy(agent_poses).to(device, dtype=torch.float32) # txd
@@ -138,7 +140,7 @@ if __name__ == '__main__':
     dataset_path, ckpt_path = os.path.join(dataset_dir, args.task+'_dataset'),os.path.join(ckpt_dir, args.task, f"h{args.horizon}", args.ckptname) 
     nets, _, _, _, noise_scheduler = build_diffusion_policy(  num_training_steps=0, device=args.device )
     nets = load_checkpoint(nets, ckpt_path, args.device)
-    stats = get_stats(dataset_path)
+    stats = get_stats(dataset_path, horizon=args.horizon)
 
     # create save dir if not exists and corresponding parent 
     os.makedirs(save_dir, exist_ok=True)

@@ -5,7 +5,7 @@ import torch.nn as nn
 from pathlib import Path
 import os, copy, numpy as np
 from diffusers.training_utils import EMAModel
-from agent.dataset.sequence import pose2actions
+from agent.dataset.sequence import pose2actions, get_chunk_actions_stats
 
 def save_checkpoint(
     nets: nn.ModuleDict,
@@ -76,16 +76,16 @@ def load_checkpoint(
     print(f"[Checkpoint] Loaded from {ckpt_path}")
     return nets
 
-def get_stats(dataset_path, max_n_episodes=10000 ):
+def get_stats(dataset_path, horizon_steps, max_n_episodes=10000 ):
     
     state_path = os.path.join(dataset_path, 'states.npz')
     dataset = np.load(state_path, allow_pickle=False)  # only np arrays
     traj_lengths = dataset["traj_length"][:max_n_episodes]  # 1-D array
-    actions = pose2actions(dataset['pose'],  dataset['gripper_width'], traj_lengths)
     states = np.concatenate([dataset['pose'], dataset['gripper_width'][:, None] ], axis = -1)
+    action_max, action_min = get_chunk_actions_stats(states[:sum(traj_lengths)], horizon_steps, traj_lengths )
 
     return {
-        'actions': {'min': actions.min(0), 'max': actions.max(0)},
+        'actions': {'min': action_min, 'max': action_max},
         'states':  {'min': states.min(0), 'max': states.max(0)},
     }
 
