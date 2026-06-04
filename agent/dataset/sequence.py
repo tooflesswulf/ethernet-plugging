@@ -64,6 +64,7 @@ def get_chunk_actions_stats(states, horizon, traj_lengths):
     for traj_length in traj_lengths:
         ep_states = states[ep_start: ep_start + traj_length]
         out = _ep_actions(ep_states, horizon)
+        # print( f"{out.reshape(-1, 7)[::16, -1]}" )
         ep_actions.append( out )
         ep_start += traj_length
         if len(all_actions) == 0:
@@ -72,6 +73,7 @@ def get_chunk_actions_stats(states, horizon, traj_lengths):
             all_actions = np.concatenate([all_actions, out])
     all_actions = all_actions.reshape(-1, all_actions.shape[-1])
     max_, min_ = all_actions.max(0), all_actions.min(0)
+    # assert False
     return max_, min_
 
 class StitchedSequenceDataset(torch.utils.data.Dataset):
@@ -120,6 +122,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
        
         action_max, action_min = get_chunk_actions_stats(states[:total_num_steps], horizon_steps, traj_lengths )
         self.action_max = torch.from_numpy(action_max).float().to(device); self.action_min =  torch.from_numpy(action_min).float().to(device)
+
         # Set up indices for sampling
         self.indices = self.make_indices(traj_lengths, horizon_steps)
 

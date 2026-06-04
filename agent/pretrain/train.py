@@ -96,6 +96,7 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     dataset_dir = '/zfsauton/scratch/yiqiw2/100%/datasets'
+    dataset_dir = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset' 
     ckpt_dir = '/zfsauton/scratch/yiqiw2/100%/ckpts'
     dataset_path, ckpt_dir = os.path.join(dataset_dir, args.task),os.path.join(ckpt_dir, args.task) 
    
