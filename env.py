@@ -15,7 +15,7 @@ from camera import Camera
 import wsg
 
 
-class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force'))):
+class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
     pass
 
 
@@ -138,7 +138,7 @@ class Env:
                 'image': self.camera_obs[-1].image,
                 'state': {
                     'pose': self.robot_obs[-1].actual_pose,
-                    'force': self.robot_obs[-1].actual_force,
+                    'force': self.robot_obs[-1].filtered_force,
                     'gripper_width': self.gripper_obs[-1].gripper_width,
                     'gripper_force': self.gripper_obs[-1].gripper_force,
                 }
@@ -237,21 +237,22 @@ class Env:
         if self.dataset_path is not None:
             self.save_data()
 
-    force_alpha = 0.02
-    _fz_filtered = 0.
     _prev_force_err = 0.
+    force_alpha = 0.02
+    _force_filtered = np.zeros(6)
+    def filter_force(self, force):
+        self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
+        return self._force_filtered
 
-    def _filter_force_z(self, force):
-        self._fz_filtered = self.force_alpha * force + (1 - self.force_alpha) * self._fz_filtered
-        return self._fz_filtered
 
     def _control_loop(self):
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
             actual_pose = URPose(*self.recv.getActualTCPPose())
             actual_force = URPose(*self.recv.getActualTCPForce())
+            filtered_force = URPose(*self.filter_force(actual_force))
             self.robot_obs.append(RobotObs(time=time.time() - self.t0,
-                                  actual_pose=actual_pose, actual_force=actual_force))
+                                  actual_pose=actual_pose, actual_force=actual_force, filtered_force=filtered_force))
 
             des_pose = self.des_pose
             des_gripper_state = self.des_gripper_state
@@ -282,7 +283,7 @@ class Env:
             # adaptive z-force control
             # ----------------------------
             if self.adaptive_mode:
-                fz = self._filter_force_z(actual_force.z)  # base-frame z force (N)
+                fz = filtered_force.z  # base-frame z force (N)
                 force_err = fz - self.des_zforce
                 d_force_err = (force_err - self._prev_force_err) / self.dt
                 self._prev_force_err = force_err
