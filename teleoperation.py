@@ -13,6 +13,7 @@ GRIP_PULLBACK_MM = 10
 
 def main(path=None, id=0, debug=False):
     fps = 20  # saving data frequency
+    controller_dt = 1 / fps
 
     # Home pose
     # ================================================================
@@ -42,7 +43,7 @@ def main(path=None, id=0, debug=False):
     iface = interface.DualSenseInterface(
         home_pose,
         xyzspeed=0.08,
-        rpyspeed=1.,
+        rpyspeed=0.9,
         forcespeed=5.,
     )
 
@@ -56,7 +57,7 @@ def main(path=None, id=0, debug=False):
         # ========================================================
         # Read joystick input
         # ========================================================
-        flag = iface.update(env.dt)
+        flag = iface.update(controller_dt)
         if flag == -1:
             break
         des_pose = URPose(*iface.target_pose)
@@ -81,7 +82,7 @@ def main(path=None, id=0, debug=False):
         cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)
 
-        sleep_time = max(0, env.dt - (time.perf_counter() - t0))
+        sleep_time = max(0, controller_dt - (time.perf_counter() - t0))
         time.sleep(sleep_time)
 
     env.close()

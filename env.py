@@ -48,7 +48,7 @@ class Env:
         servo_frequency=500,
         gripper_query_frequency=250,
         max_position_step=(0.008, 0.008, 0.008),
-        max_orientation_step=0.02,
+        max_orientation_step=0.05,
         lookahead_time=0.1,
         servo_gain=500,
         obs_mode: Literal['latest', 'mean'] = 'latest',

@@ -15,7 +15,7 @@ class DualSenseInterface:
 
         self.targ_pose = np.array(start_pose)
         self.targ_zforce = 0.
-        self.speed = np.r_[xyzspeed, xyzspeed, xyzspeed, rpyspeed, rpyspeed, rpyspeed]
+        self.speed = np.r_[xyzspeed, xyzspeed, xyzspeed, rpyspeed, rpyspeed, 2*rpyspeed]
         self.zfspeed = forcespeed
 
     @property
