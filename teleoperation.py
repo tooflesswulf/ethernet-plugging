@@ -13,7 +13,7 @@ GRIP_PULLBACK_MM = 10
 
 def main(path=None, id=0, debug=False):
     fps = 20  # saving data frequency
-    controller_dt = 1 / fps
+    controller_dt = 1 / 100
 
     # Home pose
     # ================================================================
