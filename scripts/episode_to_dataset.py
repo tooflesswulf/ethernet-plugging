@@ -17,10 +17,10 @@ def get_episode(episode_dir):
     
 
 dir = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset'
-task = 'ethernet_unplug_red'
+task = 'ethernet_unplug_red_topdown'
 save_dir = os.path.join(dir, task+"_dataset")
 save_img_dir, save_state_path = os.path.join(save_dir, 'images'), os.path.join(save_dir, 'states.npz')
-episodes = 31
+episodes = len(os.listdir( os.path.join(dir, task) ))
 total_images, total_poses, total_widths, total_g_forces, total_forces, lens = [], [], [], [], [], []
 for ep_id in range(1, episodes+1):
     # episode_path = os.path.join( dir, task, str(ep_id))

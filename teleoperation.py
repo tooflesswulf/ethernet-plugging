@@ -76,7 +76,7 @@ def main(path=None, id=0, debug=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
     parser.add_argument('--path', type=str,
-                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_unplug_red',
+                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_unplug_red_topdown',
                         help='Base dataset directory')
     parser.add_argument('--id', type=int, default=None,
                         help='Episode ID (default: next available)')
