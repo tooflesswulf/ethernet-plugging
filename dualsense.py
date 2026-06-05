@@ -74,7 +74,7 @@ DUALSENSE_STICK_Neutral = 128
 DUALSENSE_Trigger_Neutral = 0
 
 
-def scale_to_control(x, axis_scale=128, min_v=-1.0, max_v=1.0):
+def scale_to_control(x, axis_scale=128, min_v=-1.0, max_v=1.0, deadzone=5):
     """
     Normalize raw HID readings to target range.
 
@@ -87,6 +87,8 @@ def scale_to_control(x, axis_scale=128, min_v=-1.0, max_v=1.0):
     Returns:
         float: Clipped, scaled input from HID
     """
+    if abs(x) < deadzone:
+        return 0.0
     x = x / axis_scale
     x = min(max(x, min_v), max_v)
     return x
