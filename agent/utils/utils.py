@@ -76,40 +76,19 @@ def load_checkpoint(
     print(f"[Checkpoint] Loaded from {ckpt_path}")
     return nets
 
-def get_stats(dataset_path, horizon_steps, max_n_episodes=10000 ):
+def get_stats(dataset_path, horizon, max_n_episodes=10000 ):
     
     state_path = os.path.join(dataset_path, 'states.npz')
     dataset = np.load(state_path, allow_pickle=False)  # only np arrays
     traj_lengths = dataset["traj_length"][:max_n_episodes]  # 1-D array
     states = np.concatenate([dataset['pose'], dataset['gripper_width'][:, None] ], axis = -1)
-    action_max, action_min = get_chunk_actions_stats(states[:sum(traj_lengths)], horizon_steps, traj_lengths )
+    action_max, action_min = get_chunk_actions_stats(states[:sum(traj_lengths)], horizon, traj_lengths )
 
     return {
         'actions': {'min': action_min, 'max': action_max},
         'states':  {'min': states.min(0), 'max': states.max(0)},
     }
 
-def normalize(arr: np.ndarray, stats: dict) -> np.ndarray:
-    """
-    Normalize a numpy array to [-1, 1] using precomputed min/max stats.
-    Dimensions where max == min are left unchanged.
-
-    Args:
-        arr:   Input array to normalize.
-        stats: Dict with keys 'min' and 'max' (scalars or arrays matching arr).
-
-    Returns:
-        Normalized array with same shape as input.
-    """
-    min_val = np.array(stats['min'])
-    max_val = np.array(stats['max'])
-
-    range_val = max_val - min_val
-    safe_range = np.where(range_val == 0, 1, range_val)  # avoid division by zero
-
-    normalized = 2 * (arr - min_val) / safe_range - 1
-
-    return np.where(range_val == 0, arr, normalized)
 
 def denormalize(arr: np.ndarray, stats: dict) -> np.ndarray:
     """
@@ -128,9 +107,9 @@ def denormalize(arr: np.ndarray, stats: dict) -> np.ndarray:
 
     range_val = max_val - min_val
 
-    denormalized = (arr + 1) / 2 * range_val + min_val
+    denormalized = ((arr + 1) / 2 )* range_val + min_val
 
-    return np.where(range_val == 0, arr, denormalized)
+    return denormalized
 
 def resize_image(np_array, new_size=(128, 128)):
     img = Image.fromarray(np_array)
