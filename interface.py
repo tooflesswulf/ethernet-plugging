@@ -29,8 +29,8 @@ class DualSenseInterface:
     def flip_actions(self, act):
         # Manual flips
         tr = np.array([
-            [1, 0, 0],
             [0, -1, 0],
+            [-1, 0, 0],
             [0, 0, 1],
         ])
         delta = act['right_delta']
