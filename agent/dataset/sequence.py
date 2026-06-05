@@ -120,12 +120,13 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
        
         action_max, action_min = get_chunk_actions_stats(states[:total_num_steps], horizon_steps, traj_lengths )
         self.action_max = torch.from_numpy(action_max).float().to(device); self.action_min =  torch.from_numpy(action_min).float().to(device)
+        self.state_max, self.state_min = torch.from_numpy(states[:total_num_steps].max(0)).float().to(device), torch.from_numpy(states[:total_num_steps].min(0)).float().to(device)
         # Set up indices for sampling
         self.indices = self.make_indices(traj_lengths, horizon_steps)
 
         # Extract states and actions up to max_n_episodes
         self.states = (
-            torch.from_numpy(normalize(states[:total_num_steps])).float().to(device)
+            torch.from_numpy(states[:total_num_steps]).float().to(device)
             # torch.from_numpy(states[:total_num_steps]).float().to(device)
         )  # (total_num_steps, obs_dim)
         # self.actions = (
@@ -162,13 +163,16 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             )  # repeat last action if not enough future states
     
         actions = normalize(actions, min_val=self.action_min, max_val=self.action_max)
+        # binary gripper
+        m_close, m_open = actions[:, -1]<=0, actions[:, -1]>0
+        actions[:, -1][m_close] = -1; actions[:, -1][m_open] = 1
         states = torch.stack(
             [
                 states[max(num_before_start - t, 0)]
                 for t in reversed(range(self.cond_steps))
             ]
         )  # more recent is at the end, # cond_steps x dim
-       
+        states = normalize(states, min_val=self.state_min, max_val=self.state_max)
         conditions = {"state": states}
 
         images = self.images[(start - num_before_start) : end]
