@@ -24,12 +24,16 @@ def batch_to_device(batch, device="cuda:0"):
 def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=f"pretrain-{task}-relact")
     dataset = StitchedSequenceDataset(dataset_path, horizon_steps=16, device = device)
+    val_dataset = StitchedSequenceDataset(dataset_path, horizon_steps=16, max_n_episodes=1, device = device)
+    val_dataset.state_max = dataset.state_max; val_dataset.state_min = dataset.state_min 
+    val_dataset.action_max = dataset.action_max; val_dataset.action_min = dataset.action_min
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=64,
         num_workers=0, # since all data are in ram, worker=0 is fine. multi-worker causing issue.
         shuffle=True,
     )
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=64 )
     nets, ema, opt, lr_scheduler, noise_scheduler = build_diffusion_policy( 
         num_training_steps= len(dataloader) * epochs, 
         num_warmup_steps=len(dataloader),
@@ -80,6 +84,44 @@ def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
         pbar.set_postfix({"loss": avg_loss})
         if epoch % save_interval == 0:
             save_checkpoint(nets, ema, ckpt_dir, epoch=epoch)
+        val_mses, gripper_correctness = [], []
+        for i, batch in enumerate(val_dataloader):
+            with torch.no_grad():
+                batch = batch_to_device(batch, device)
+                images, states, actions, B = batch.conditions['rgb'], batch.conditions['state'], batch.actions, len(batch.actions)
+                # BxTxCxHxW -> (B T)xCxHxW -> (B T) x d -> BxTxd
+                image_features = nets['vision_encoder'](images.flatten(end_dim=1)).reshape(*images.shape[:2],-1)
+                obs_features = torch.cat([image_features, states], dim=-1)
+                obs_cond = obs_features.flatten(start_dim=1) 
+                naction = torch.randn(actions.shape, device=device)
+  
+                # init scheduler
+                noise_scheduler.set_timesteps(100)
+
+                for k in noise_scheduler.timesteps:
+                    # predict noise
+                    noise_pred = nets['noise_pred_net'](
+                        sample=naction,
+                        timestep=k,
+                        global_cond=obs_cond
+                    )
+
+                    # inverse diffusion step (remove noise)
+                    naction = noise_scheduler.step(
+                        model_output=noise_pred,
+                        timestep=k,
+                        sample=naction
+                    ).prev_sample
+                val_mses.append( nn.functional.mse_loss(naction, actions).mean().item() )
+                tgt_gripper = actions[:, :, -1].long() # it should be binary already
+                tgt_mask = tgt_gripper<=0
+                tgt_gripper[tgt_mask] = -1; tgt_gripper[~tgt_mask] = 1
+                pred_gripper = naction[:, :, -1]; mask = pred_gripper<=0
+                pred_gripper[mask] = -1; pred_gripper[~mask] = 1 
+                gripper_correctness.append( (pred_gripper == tgt_gripper ).float().mean().item() )
+
+        logger.log({"val/mse_loss": np.mean(val_mses), "val/gripper_correctness": np.mean(gripper_correctness),  "val/epoch": epoch}, step=step)
+    
     # save the lastest model
     # ema_nets = nets
     # ema.copy_to(ema_nets.parameters())
