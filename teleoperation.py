@@ -76,8 +76,7 @@ def main(path=None, id=0, debug=False):
 
         # print(f"pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N" +
         #       f" | eef force: [{ff.x:5.2f}, {ff.y:5.2f}, {ff.z:5.2f}, {ff.rx:5.2f}, {ff.ry:5.2f}, {ff.rz:5.2f}]", end='\r')
-        print(
-            f"mode: {iface.adaptive_mode}, des zforce: {iface.target_zforce:7.2f} N | eef zforce: {obs['state']['force'].z:7.2f} N", end='\r')
+        print(f"mode: {iface.adaptive_mode}, des zforce: {iface.target_zforce:7.2f} N | eef zforce: {obs['state']['filtered_force'].z:7.2f} N", end='\r')
 
         cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)

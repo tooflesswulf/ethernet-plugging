@@ -137,8 +137,9 @@ class Env:
             obs = {
                 'image': self.camera_obs[-1].image,
                 'state': {
-                    'pose': self.robot_obs[-1].actual_pose,
-                    'force': self.robot_obs[-1].filtered_force,
+                    'actual_pose': self.robot_obs[-1].actual_pose,
+                    'actual_force': self.robot_obs[-1].actual_force,
+                    'filtered_force': self.robot_obs[-1].filtered_force,
                     'gripper_width': self.gripper_obs[-1].gripper_width,
                     'gripper_force': self.gripper_obs[-1].gripper_force,
                 }
@@ -344,8 +345,10 @@ class Env:
 
     def _logger_loop(self):
         image_path = self.epi_path / 'images'
+        time_list = []
         pose_list = []
         force_list = []
+        filt_force_list = []
         gpos_list = []
         gforce_list = []
         self.wait_for_obs()  # Ensure we have at least one obs before starting logging
@@ -353,11 +356,12 @@ class Env:
         last_pose = None
 
         image_idx = 0
+        tinit = time.time()
         while not self.stop_flag:
             t0 = time.perf_counter()
             obs = self.get_obs()
 
-            cur_pose = np.r_[obs['state']['pose'], obs['state']['gripper_width']]
+            cur_pose = np.r_[obs['state']['actual_pose'], obs['state']['gripper_width']]
             delta = max(abs(cur_pose - last_pose)) if last_pose is not None else float('inf')
             if delta < self.save_eps:
                 sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
@@ -367,8 +371,10 @@ class Env:
 
             im_path = pathlib.Path(image_path) / f'{image_idx:06d}.png'
             cv2.imwrite(im_path, obs['image'])
-            pose_list.append(obs['state']['pose'])
-            force_list.append(obs['state']['force'])
+            time_list.append(time.time() - tinit)
+            pose_list.append(obs['state']['actual_pose'])
+            force_list.append(obs['state']['actual_force'])
+            filt_force_list.append(obs['state']['filtered_force'])
             gpos_list.append(obs['state']['gripper_width'])
             gforce_list.append(obs['state']['gripper_force'])
             image_idx += 1
@@ -379,8 +385,10 @@ class Env:
         # IMPORTANT: logger must exit via stop_flag for data to be saved
         np.savez_compressed(
             self.epi_path / 'states.npz',
+            time=np.array(time_list),
             pose=np.array(pose_list),
-            force=np.array(force_list),
+            force=np.array(filt_force_list),
+            force_raw=np.array(force_list),
             gripper_width=np.array(gpos_list),
             gripper_force=np.array(gforce_list),
         )

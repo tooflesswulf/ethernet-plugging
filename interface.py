@@ -91,10 +91,10 @@ class DualSenseInterface:
         self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
 
     def activate_adaptive_mode(self):
-        self.targ_zforce = self.latest_obs['state']['force'].z
+        self.targ_zforce = self.latest_obs['state']['filtered_force'].z
 
     def deactivate_adaptive_mode(self):
-        self.targ_pose = np.array(self.latest_obs['state']['pose'])
+        self.targ_pose = np.array(self.latest_obs['state']['actual_pose'])
         self.targ_zforce = 0.
 
     def store_obs(self, obs):
