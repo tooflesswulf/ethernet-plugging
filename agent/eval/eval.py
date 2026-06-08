@@ -39,9 +39,7 @@ def get_actions(nets, stats, noise_scheduler, num_diffusion_iters, nimages, nage
 
     # unnormalize action
     naction = naction.detach().to('cpu').numpy()[0]
-    # print('Pre-denormalize grippers:', naction[:, -1], stats['actions']['max'][-1])
-    # return naction # denormalize(naction, stats['actions'])
-    # assert False, f"{naction[0]}\n\n{denormalize(naction, stats['actions'])[0]} {stats['actions']}"
+
     grippers = 1-(naction[:, -1] > 0).astype(float) # (-1, 1) -> (0, 1) -> flip
     naction = denormalize(naction, stats['actions'])
     naction[:, -1] = grippers
@@ -120,7 +118,7 @@ def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_
     out = cv2.VideoWriter(video_path, fourcc, fps, (w, h))
     for frame in save_frames:
         # convert RGB to BGR for opencv
-        frame_bgr = frame[:, :, ::-1]
+        frame_bgr = frame # [:, :, ::-1]
         out.write(frame_bgr)
     out.release()
 
@@ -134,9 +132,9 @@ def parse_args():
     parser.add_argument('--ckpt_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/ckpts')
     parser.add_argument('--save_dir', type=str, default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/results')
     parser.add_argument('--device',    type=str,  default='cuda')
-    parser.add_argument('--task',      type=str,  default='ethernet_unplug_red')
+    parser.add_argument('--task',      type=str,  default='ethernet_unplug_red_topdown')
     parser.add_argument('--ckptname',    type=str,  default='ckpt_ep_80.pth')
-    parser.add_argument('--ep_id',    type=int,  default=4)
+    parser.add_argument('--ep_id',    type=int,  default=11)
     parser.add_argument('--fps',    type=int,  default=20)
     parser.add_argument('--img_size',    type=int,  default=128)
     parser.add_argument('--horizon',    type=int,  default=16)
