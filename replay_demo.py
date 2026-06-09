@@ -7,13 +7,16 @@ from env import Env, URPose, blend
 def main():
     id = 0
     task = 'ethernet_unplug'
-    dataset_path = f'/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_unplug/10'
+    # dataset_path = f'/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/plug-handpick/episode000025'
+    dataset_path = f'/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/albert-test/episode000123'
     state_path = os.path.join(dataset_path, 'states.npz')
-    des_poses = np.load(state_path)['actual_pose']
+    # des_poses = np.load(state_path)['actual_pose']
+    des_poses = np.load(state_path)['pose']
     des_grippers = np.load(state_path)['gripper_width']
     assert len(des_poses) == len(des_grippers), "Length of poses and gripper states must match"
     threshold = 30 # larger than threshold is 0, smaller than threshold is 1
     des_grippers = np.where(des_grippers > 20, 0.0, 1.0)
+    cmd_freq = 10
    
     # ================================================================
     # Home pose
@@ -68,7 +71,7 @@ def main():
     # except:
     #     print("\nStopping teleoperation...")
 
-        sleep_time = max(0, env.dt - (time.perf_counter() - t0))
+        sleep_time = max(0, 1/cmd_freq - (time.perf_counter() - t0))
         time.sleep(sleep_time)
         
 
