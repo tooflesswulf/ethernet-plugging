@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 import argparse
+import shutil
 
 
 def get_episode(episode_dir):
@@ -58,6 +59,5 @@ if __name__ == '__main__':
     # save images
     os.makedirs(save_img_dir, exist_ok=True)
     for i, img_path in enumerate(tqdm(total_images)):
-        img = Image.open(img_path)
-        save_img_path = os.path.join(save_img_dir, f'{i}.png')
-        img.save(save_img_path)
+        save_img_path = os.path.join(save_img_dir, f'{i:06d}.png')
+        shutil.copy(img_path, save_img_path)
