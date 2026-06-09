@@ -47,7 +47,7 @@ def get_actions(nets, stats, noise_scheduler, num_diffusion_iters, nimages, nage
 
 def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_horizon=16, num_diffusion_iters=100, img_size=128, device='cuda'):
     # home_pose = URPose(-0.125,0.545,0.305,2.44,2.44,0.653, )
-    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633) # low-position (cable easy to see)
+    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633) # low-position (cable easy to see, Yiqi)
     iface = interface.DualSenseInterface(
         home_pose,
         xyzspeed=0.01,
