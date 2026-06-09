@@ -131,8 +131,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Training')
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--device',    type=str,  default='cuda')
-    parser.add_argument('--task',      type=str,  default='ethernet_unplug_red')
-    parser.add_argument('--epochs',    type=int,  default=200)
+    parser.add_argument('--task',      type=str,  default='ethernet_plug_v2_dataset')
+    parser.add_argument('--epochs',    type=int,  default=300)
     return parser.parse_args()
 
 if __name__ == '__main__':
