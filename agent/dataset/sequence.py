@@ -5,7 +5,7 @@ import os, numpy as np
 from collections import namedtuple
 from einops import rearrange, repeat
 import torch
-
+# from agent.utils.utils import get_chunk_actions
 
 Batch = namedtuple("Batch", "actions conditions")
 
@@ -33,18 +33,48 @@ def get_images(dir_path, total_num_steps=None, img_size = 128):
     images = [ np.array(Image.open(os.path.join(dir_path, f'{i}.png')).resize((img_size, img_size))) for i in tqdm(range(N),  desc="loading images to RAM") ]
     return np.array(images)
 
-def normalize(arr: np.ndarray) -> np.ndarray:
+def normalize(arr: np.ndarray, min_val=None, max_val=None) -> np.ndarray:
     """
     Normalize a numpy array to the range [-1, 1] using min/max scaling.
-    If min == max, the array is returned unchanged.
     """
-    min_val = arr.min()
-    max_val = arr.max()
-
-    if min_val == max_val:
-        return arr.copy()
-
+    # CAVEAT: normalize by dimension
+    min_val = arr.min(0) if min_val is None else min_val
+    max_val = arr.max(0) if max_val is None else max_val
+    
     return 2 * (arr - min_val) / (max_val - min_val) - 1
+
+def get_chunk_actions_stats(states, horizon, traj_lengths):
+    def _ep_actions(ep_states, horizon):
+        ep_actions = []
+        indices = np.arange(0, len(ep_states)-horizon+1, dtype=int)
+        for index in indices:
+            meta_pose = ep_states[index]
+            future_poses = ep_states[index+1:index+horizon+1]
+            actions = future_poses - meta_pose 
+            # replace gripper with absolute gripper width 
+            actions[:, -1] = future_poses[:, -1]
+            paddings = horizon - len(actions)
+            if paddings > 0:
+                padded = np.concatenate([actions[-1:]] * paddings)
+                actions = np.concatenate([actions, padded])
+            ep_actions.append(actions)
+        return np.array(ep_actions)
+    ep_start = 0
+    ep_actions, all_actions = [], []
+    for traj_length in traj_lengths:
+        ep_states = states[ep_start: ep_start + traj_length]
+        out = _ep_actions(ep_states, horizon)
+        # print( f"{out.reshape(-1, 7)[::16, -1]}" )
+        ep_actions.append( out )
+        ep_start += traj_length
+        if len(all_actions) == 0:
+            all_actions = out
+        else:
+            all_actions = np.concatenate([all_actions, out])
+    all_actions = all_actions.reshape(-1, all_actions.shape[-1])
+    max_, min_ = all_actions.max(0), all_actions.min(0)
+    # assert False
+    return max_, min_
 
 class StitchedSequenceDataset(torch.utils.data.Dataset):
     """
@@ -89,14 +119,17 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         total_num_steps = np.sum(traj_lengths)
         # actions = pose2actions(dataset['actual_pose'],  dataset['gripper_width'], traj_lengths)
         states = np.concatenate([dataset['pose'], dataset['gripper_width'][:, None] ], axis = -1)
-        
+       
+        action_max, action_min = get_chunk_actions_stats(states[:total_num_steps], horizon_steps, traj_lengths )
+        self.action_max = torch.from_numpy(action_max).float().to(device); self.action_min =  torch.from_numpy(action_min).float().to(device)
+        self.state_max, self.state_min = torch.from_numpy(states[:total_num_steps].max(0)).float().to(device), torch.from_numpy(states[:total_num_steps].min(0)).float().to(device)
         # Set up indices for sampling
         self.indices = self.make_indices(traj_lengths, horizon_steps)
 
         # Extract states and actions up to max_n_episodes
         self.states = (
-            # torch.from_numpy(normalize(states[:total_num_steps])).float().to(device)
             torch.from_numpy(states[:total_num_steps]).float().to(device)
+            # torch.from_numpy(states[:total_num_steps]).float().to(device)
         )  # (total_num_steps, obs_dim)
         # self.actions = (
         #     torch.from_numpy(normalize(actions[:total_num_steps])).float().to(device)
@@ -123,21 +156,25 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         # fix last dimension with absolute gripper width
         gripper = future_states[:, -1] 
         # if > 20, set 0, otherwise set 1
-        gripper = 1-(gripper > 20).float()
+        # gripper = 1-(gripper > 20).float()
         actions[:, -1] = gripper
         if len(actions) < self.horizon_steps:
             padding = self.horizon_steps - len(actions)
             actions = torch.cat(
                 [actions, actions[-1:].repeat(padding, 1)], dim=0
             )  # repeat last action if not enough future states
-
+    
+        actions = normalize(actions, min_val=self.action_min, max_val=self.action_max)
+        # binary gripper
+        m_close, m_open = actions[:, -1]<=0, actions[:, -1]>0
+        actions[:, -1][m_close] = -1; actions[:, -1][m_open] = 1
         states = torch.stack(
             [
                 states[max(num_before_start - t, 0)]
                 for t in reversed(range(self.cond_steps))
             ]
         )  # more recent is at the end, # cond_steps x dim
-       
+        states = normalize(states, min_val=self.state_min, max_val=self.state_max)
         conditions = {"state": states}
 
         images = self.images[(start - num_before_start) : end]

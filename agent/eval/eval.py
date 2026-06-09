@@ -7,10 +7,11 @@ import cv2, time, collections, argparse, os, wandb, torch, torch.nn as nn
 from env import Env, URPose
 from agent.utils.logging import NoOpLogger, setup_logger
 from agent.model.diffusion import build_diffusion_policy
-from agent.utils.utils import load_checkpoint, get_stats, normalize, denormalize, resize_image
+from agent.dataset.sequence import normalize
+from agent.utils.utils import load_checkpoint, get_stats, denormalize, resize_image
 
 def get_actions(nets, stats, noise_scheduler, num_diffusion_iters, nimages, nagent_poses, action_horizon=16, action_dim=7, device='cuda'):
-    B, image_features = 1, nets['vision_encoder'](nimages)
+    B, image_features = 1, nets['vision_encoder'](nimages/255.0)
 
     obs_features = torch.cat([image_features, nagent_poses], dim=-1)
     obs_cond = obs_features.unsqueeze(0).flatten(start_dim=1)
@@ -38,10 +39,15 @@ def get_actions(nets, stats, noise_scheduler, num_diffusion_iters, nimages, nage
 
     # unnormalize action
     naction = naction.detach().to('cpu').numpy()[0]
-    return naction # denormalize(naction, stats['actions'])
+
+    grippers = 1-(naction[:, -1] > 0).astype(float) # (-1, 1) -> (0, 1) -> flip
+    naction = denormalize(naction, stats['actions'])
+    naction[:, -1] = grippers
+    return naction
 
 def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_horizon=16, num_diffusion_iters=100, img_size=128, device='cuda'):
-    home_pose = URPose(-0.125,0.545,0.305,2.44,2.44,0.653, )
+    # home_pose = URPose(-0.125,0.545,0.305,2.44,2.44,0.653, )
+    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633) # low-position (cable easy to see, Yiqi)
     iface = interface.DualSenseInterface(
         home_pose,
         xyzspeed=0.01,
@@ -64,25 +70,30 @@ def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_
         if iface.update(env.dt) == -1:
             break # -1 indicates square is pressed and an error is thrown.
         
-        images = np.stack([resize_image(x['image'], (img_size, img_size)) for x in obs_deque])/255.0 # - 0.5
+        images = np.stack([resize_image(x['image'], (img_size, img_size)) for x in obs_deque])
         agent_poses, agent_grippers = np.stack([x['state']['pose'] for x in obs_deque]), np.stack([ [x['state']['gripper_width']] for x in obs_deque])
+        
         curr_pose, curr_gripper = agent_poses[-1], agent_grippers[-1][0]
+        # print('Raw gripper:', curr_gripper, stats['states']['max'][-1])
         agent_poses = np.concatenate( [agent_poses, agent_grippers], -1)
-        # agent_poses = normalize(agent_poses, stats['states']) # normalize between -1 to 1.
-
+        agent_poses = normalize(agent_poses, min_val=stats['states']['min'], max_val=stats['states']['max']) # normalize between -1 to 1.
+        
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
         nagent_poses = torch.from_numpy(agent_poses).to(device, dtype=torch.float32) # txd
-        
+        # print( nimages.max(), f"{agent_poses[0]}" )
         with torch.no_grad():
             actions = get_actions(nets, stats, noise_scheduler, num_diffusion_iters, nimages, nagent_poses, action_horizon=action_horizon)
-            
+            # print('After-denormalize grippers:', actions[:, -1])
+            # assert False
             start = obs_horizon - 1
             end = start + action_horizon
             actions = actions[start:end] # (action_horizon, action_dim)
 
-            des_grippers_widths = actions[:, -1]
-            # binary des_grippers, given threshold of 0.5. >0.5 is 1, otherwise 0
-            des_grippers = (des_grippers_widths > 0.5).astype(int)
+            des_grippers_widths = actions[:, -1] # np.zeros_like( actions[:, -1] )
+            print('des grippers:', des_grippers_widths)
+            # binary des_grippers, given threshold of 0.5. >0.5 is 1, otherwise -1
+            
+            des_grippers = des_grippers_widths
 
             for i in tqdm(range(len(actions)), desc=f'Open-loop execution'):
                 delta_des_pose, des_gripper = actions[i, :-1], des_grippers[i]
@@ -107,7 +118,7 @@ def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_
     out = cv2.VideoWriter(video_path, fourcc, fps, (w, h))
     for frame in save_frames:
         # convert RGB to BGR for opencv
-        frame_bgr = frame[:, :, ::-1]
+        frame_bgr = frame # [:, :, ::-1]
         out.write(frame_bgr)
     out.release()
 
@@ -121,12 +132,12 @@ def parse_args():
     parser.add_argument('--ckpt_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/ckpts')
     parser.add_argument('--save_dir', type=str, default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/results')
     parser.add_argument('--device',    type=str,  default='cuda')
-    parser.add_argument('--task',      type=str,  default='ethernet_unplug_red')
-    parser.add_argument('--ckptname',    type=str,  default='ckpt_ep_190.pth')
-    parser.add_argument('--ep_id',    type=int,  default=1)
+    parser.add_argument('--task',      type=str,  default='ethernet_unplug_red_topdown')
+    parser.add_argument('--ckptname',    type=str,  default='ckpt_ep_80.pth')
+    parser.add_argument('--ep_id',    type=int,  default=11)
     parser.add_argument('--fps',    type=int,  default=20)
     parser.add_argument('--img_size',    type=int,  default=128)
-    parser.add_argument('--horizon',    type=int,  default=8)
+    parser.add_argument('--horizon',    type=int,  default=16)
     parser.add_argument('--num_diffusion_iters', type=int,  default=100)
     return parser.parse_args()
 
@@ -138,7 +149,7 @@ if __name__ == '__main__':
     dataset_path, ckpt_path = os.path.join(dataset_dir, args.task+'_dataset'),os.path.join(ckpt_dir, args.task, f"h{args.horizon}", args.ckptname) 
     nets, _, _, _, noise_scheduler = build_diffusion_policy(  num_training_steps=0, device=args.device )
     nets = load_checkpoint(nets, ckpt_path, args.device)
-    stats = get_stats(dataset_path)
+    stats = get_stats(dataset_path, horizon=args.horizon)
 
     # create save dir if not exists and corresponding parent 
     os.makedirs(save_dir, exist_ok=True)
