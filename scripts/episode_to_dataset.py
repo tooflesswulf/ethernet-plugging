@@ -30,10 +30,13 @@ if __name__ == '__main__':
     save_dir = path.rstrip('/') + '_dataset' if path.endswith('/') else path + '_dataset'
 
     save_img_dir, save_state_path = os.path.join(save_dir, 'images'), os.path.join(save_dir, 'states.npz')
+
     episodes = 31
     total_images, total_poses, total_widths, total_g_forces, total_forces, lens = [], [], [], [], [], []
-    for ep_id in range(1, episodes + 1):
-        ep_str = f'episode{ep_id:06d}'
+
+    for ep_str in sorted(os.listdir(path)):
+        if not ep_str.startswith('episode'):
+            continue
         episode_path = os.path.join(path, ep_str)
         image_paths, poses, widths, g_forces, forces = get_episode(episode_path)
         total_images += image_paths
@@ -59,5 +62,5 @@ if __name__ == '__main__':
     # save images
     os.makedirs(save_img_dir, exist_ok=True)
     for i, img_path in enumerate(tqdm(total_images)):
-        save_img_path = os.path.join(save_img_dir, f'{i:06d}.png')
+        save_img_path = os.path.join(save_img_dir, f'{i}.png')
         shutil.copy(img_path, save_img_path)
