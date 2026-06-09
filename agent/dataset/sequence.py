@@ -88,7 +88,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         traj_lengths = dataset["traj_length"][:max_n_episodes]  # 1-D array
         total_num_steps = np.sum(traj_lengths)
         # actions = pose2actions(dataset['actual_pose'],  dataset['gripper_width'], traj_lengths)
-        states = np.concatenate([dataset['actual_pose'], dataset['gripper_width'][:, None] ], axis = -1)
+        states = np.concatenate([dataset['pose'], dataset['gripper_width'][:, None] ], axis = -1)
         
         # Set up indices for sampling
         self.indices = self.make_indices(traj_lengths, horizon_steps)
