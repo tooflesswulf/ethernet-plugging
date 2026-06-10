@@ -6,7 +6,6 @@ import wandb
 import torch
 import torch.nn as nn
 
-
 from agent.utils.utils import save_checkpoint
 from agent.utils.logging import NoOpLogger, setup_logger
 from agent.model.diffusion import build_diffusion_policy
@@ -147,9 +146,9 @@ def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
 def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Training')
     parser.add_argument('--use_wandb', action='store_true', default=False)
-    parser.add_argument('--device',    type=str,  default='cuda')
-    parser.add_argument('--task',      type=str,  default='ethernet_plug_v2_dataset')
-    parser.add_argument('--epochs',    type=int,  default=300)
+    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--task', type=str, default='ethernet_plug_v2_dataset')
+    parser.add_argument('--epochs', type=int, default=300)
     parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets')
     parser.add_argument('--ckpt_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/ckpts')
     return parser.parse_args()
@@ -157,5 +156,5 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
-    dataset_path, ckpt_dir = os.path.join(args.data_dir, args.task),os.path.join(args.ckpt_dir, args.task) 
+    dataset_path, ckpt_dir = os.path.join(args.data_dir, args.task), os.path.join(args.ckpt_dir, args.task)
     train(args.task, dataset_path, ckpt_dir, args.epochs, use_wandb=args.use_wandb, device=args.device)
