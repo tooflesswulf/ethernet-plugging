@@ -26,6 +26,8 @@ def main(args):
         cobs = f['camera_obs']
         cdat = {k: np.array(cobs[k]) for k in cobs.keys()}
 
+        rng = np.array(f['metadata/rng'])
+
     smoothed = ewma(rdat['actual_force'][:, 2], alpha=args.alpha)
     delta = args.tx
     delt_r = int(delta * 500)  # Nominal 500Hz
@@ -49,7 +51,7 @@ def main(args):
     ri0 = np.abs(rdat['time'] - t0).argmin()
     gi0 = np.abs(gdat['time'] - t0).argmin()
     img_artist = ax_img.imshow(cdat['image_bgr'][i0][:, :, ::-1])
-    ax_img.set_title(f'Wrist camera')
+    ax_img.set_title(f'Target={rng + 1}')
 
     line_fraw, = ax1.plot(rdat['time'][ri0 - delt_r:ri0], rdat['actual_force'][ri0 - delt_r:ri0, 2])
     line_fsmooth, = ax1.plot(rdat['time'][ri0 - delt_r:ri0], smoothed[ri0 - delt_r:ri0])
@@ -106,7 +108,7 @@ if __name__ == '__main__':
                         help='Path to the .h5 file containing the data to visualize.')
     parser.add_argument('--tx', type=int, default=5,
                         help='Time scale (s) of x-axis in the plots.')
-    parser.add_argument('-a', '--alpha', type=float, default=0.02,
+    parser.add_argument('-a', '--alpha', type=float, default=0.03,
                         help='Smoothing factor for the EWMA of the force signal.')
     args = parser.parse_args()
 

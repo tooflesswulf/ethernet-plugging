@@ -4,6 +4,7 @@ import interface
 import time
 from env import Env, URPose
 import cv2
+import random
 
 GRIP_WIDTH_MM = 8
 GRIP_FORCE_N = 40
@@ -11,7 +12,7 @@ GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 10
 
 
-def main(path=None, id=0, debug=False):
+def main(path=None, id=0, debug=False, meta={}):
     fps = 20  # saving data frequency
     controller_dt = 1 / 100
 
@@ -35,6 +36,7 @@ def main(path=None, id=0, debug=False):
         gwidth=GRIP_WIDTH_MM,
         gspeed=GRIP_SPEED_MMPS,
         gpullback=GRIP_PULLBACK_MM,
+        metadata=meta
     )
 
     # ================================================================
@@ -47,10 +49,13 @@ def main(path=None, id=0, debug=False):
         forcespeed=5.,
     )
 
-    env.reset(home_pose)  # start camera, robot go home, gripper open
+    if 'rng' in meta:
+        print(f"Target port = {meta['rng'] + 1}")
 
+    env.reset(home_pose)  # start camera, robot go home, gripper open
     print("Starting teleoperation loop...")
     env.start()  # start threads
+
     while True:
         t0 = time.perf_counter()
 
@@ -88,6 +93,16 @@ def main(path=None, id=0, debug=False):
     print('Env closed. Exiting.')
 
 
+def create_metadata(args):
+    meta = {}
+    meta['id'] = args.id
+    if args.rng is not None:
+        rng = random.randint(0, args.rng - 1)
+        meta['rng'] = rng
+        print(f'=========== RNG={rng} ===========')
+    return meta
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
     parser.add_argument('--path', type=str,
@@ -96,20 +111,22 @@ if __name__ == "__main__":
     parser.add_argument('--id', type=int, default=None,
                         help='Episode ID (default: next available)')
     parser.add_argument('-d', '--debug', type=bool, action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--rng', type=int, default=None,
+                        help='Generate a random number at the start')
 
     args = parser.parse_args()
 
-    if args.id is not None:
-        id = args.id
-    else:
+    if args.id is None:
         indices = [
             int(d.removeprefix('episode'))
             for d in os.listdir(args.path)
             if d.startswith('episode') and d.removeprefix('episode').isdigit()
         ] if os.path.exists(args.path) else []
-        id = max(indices, default=-1) + 1
-        print(f'Auto-selected episode ID: {id}')
+        args.id = max(indices, default=-1) + 1
+        print(f'Auto-selected episode ID: {args.id}')
 
-    print(f"Saving data to: {args.path}, Episode {id}")
+    meta = create_metadata(args)
+
+    print(f"Saving data to: {args.path}, Episode {args.id}")
     os.makedirs(args.path, exist_ok=True)
-    main(path=args.path, id=id, debug=args.debug)
+    main(path=args.path, id=args.id, debug=args.debug, meta=meta)

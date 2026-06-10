@@ -10,7 +10,7 @@ import time
 import cv2
 import os
 
-from util import URPose, blend, episode_index
+from util import URPose, blend, episode_index, dict2hdf5
 from camera import Camera
 import wsg
 
@@ -59,6 +59,7 @@ class Env:
         gforce=40,
         gspeed=50,
         gpullback=10,
+        metadata={}
     ):
         # ============================================================
         # Internal states
@@ -126,6 +127,7 @@ class Env:
         self.camera_obs: list[CameraObs] = []
         self.save_eps = save_eps
         self.image_idx = 0
+        self.metadata = metadata
 
     def wait_for_obs(self):
         while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
@@ -361,13 +363,14 @@ class Env:
             t0 = time.perf_counter()
             obs = self.get_obs()
 
-            cur_pose = np.r_[obs['state']['actual_pose'], obs['state']['gripper_width']]
-            delta = max(abs(cur_pose - last_pose)) if last_pose is not None else float('inf')
-            if delta < self.save_eps:
-                sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
-                time.sleep(sleep_time)
-                continue
-            last_pose = cur_pose
+            # Do not log if stationary
+            # cur_pose = np.r_[obs['state']['actual_pose'], obs['state']['gripper_width']]
+            # delta = max(abs(cur_pose - last_pose)) if last_pose is not None else float('inf')
+            # if delta < self.save_eps:
+            #     sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
+            #     time.sleep(sleep_time)
+            #     continue
+            # last_pose = cur_pose
 
             im_path = pathlib.Path(image_path) / f'{image_idx:06d}.png'
             cv2.imwrite(im_path, obs['image'])
@@ -391,6 +394,8 @@ class Env:
             force_raw=np.array(force_list),
             gripper_width=np.array(gpos_list),
             gripper_force=np.array(gforce_list),
+            metadata=self.metadata,
+            allow_pickle=True
         )
 
     def save_data(self):
@@ -408,4 +413,8 @@ class Env:
 
             f.create_dataset('camera_obs/time', data=[obs.time for obs in self.camera_obs])
             f.create_dataset('camera_obs/image_bgr', data=[obs.image for obs in self.camera_obs])
+
+            m = f.create_group('metadata')
+            dict2hdf5(m, self.metadata)
+
         print(f'Data saved to {path}')
