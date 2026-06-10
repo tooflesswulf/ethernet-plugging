@@ -239,7 +239,7 @@ class Env:
             self.save_data()
 
     _prev_force_err = 0.
-    force_alpha = 0.02
+    force_alpha = 0.03
     _force_filtered = np.zeros(6)
     def filter_force(self, force):
         self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
