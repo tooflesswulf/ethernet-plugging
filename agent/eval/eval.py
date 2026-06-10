@@ -71,7 +71,7 @@ def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_
             break # -1 indicates square is pressed and an error is thrown.
         
         images = np.stack([resize_image(x['image'], (img_size, img_size)) for x in obs_deque])
-        agent_poses, agent_grippers = np.stack([x['state']['pose'] for x in obs_deque]), np.stack([ [x['state']['gripper_width']] for x in obs_deque])
+        agent_poses, agent_grippers = np.stack([x['state']['actual_pose'] for x in obs_deque]), np.stack([ [x['state']['gripper_width']] for x in obs_deque])
         
         curr_pose, curr_gripper = agent_poses[-1], agent_grippers[-1][0]
         # print('Raw gripper:', curr_gripper, stats['states']['max'][-1])
@@ -123,8 +123,8 @@ def evaluate(nets, noise_scheduler, stats, fps, save_dir, obs_horizon=1, action_
     out.release()
 
     env.close()
-                
-        
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Evaluation.')
     parser.add_argument('--use_wandb', action='store_true', default=False)
@@ -134,6 +134,7 @@ def parse_args():
     parser.add_argument('--device',    type=str,  default='cuda')
     parser.add_argument('--task',      type=str,  default='ethernet_unplug_red_topdown')
     parser.add_argument('--ckptname',    type=str,  default='ckpt_ep_80.pth')
+    parser.add_argument('--ckpt_path', type=str, default='.')
     parser.add_argument('--ep_id',    type=int,  default=11)
     parser.add_argument('--fps',    type=int,  default=20)
     parser.add_argument('--img_size',    type=int,  default=128)
@@ -146,7 +147,8 @@ if __name__ == '__main__':
     dataset_dir = args.dataset_dir
     ckpt_dir = args.ckpt_dir
     save_dir = os.path.join(args.save_dir, args.task, f"h{args.horizon}", f"ep_{args.ep_id}")
-    dataset_path, ckpt_path = os.path.join(dataset_dir, args.task+'_dataset'),os.path.join(ckpt_dir, args.task, f"h{args.horizon}", args.ckptname) 
+    dataset_path, ckpt_path = os.path.join(dataset_dir, args.task+'_dataset'), os.path.join(ckpt_dir, args.task, f"h{args.horizon}", args.ckptname)
+    ckpt_path = args.ckpt_path
     nets, _, _, _, noise_scheduler = build_diffusion_policy(  num_training_steps=0, device=args.device )
     nets = load_checkpoint(nets, ckpt_path, args.device)
     stats = get_stats(dataset_path, horizon=args.horizon)
