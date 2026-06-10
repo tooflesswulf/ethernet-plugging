@@ -14,7 +14,7 @@ def get_episode(episode_dir):
     image_dir = os.path.join(episode_dir, 'images')
     image_N = len(os.listdir(image_dir))
     if image_N != states_N:
-        print(episode_dir)
+        raise ValueError(f"Number of images ({image_N}) does not match number of states ({states_N}) in episode {episode_dir}")
     image_paths = [os.path.join(image_dir, f"{i:06d}.png") for i in range(image_N)]
 
     # Find first index where eef starts moving, after gripper closes
@@ -40,6 +40,7 @@ if __name__ == '__main__':
 
     episodes = 31
     total_images, total_poses, total_widths, total_g_forces, total_forces, lens = [], [], [], [], [], []
+    targ_ixs = []
 
     for ep_str in sorted(os.listdir(path)):
         if not ep_str.startswith('episode'):
@@ -47,13 +48,14 @@ if __name__ == '__main__':
         episode_path = os.path.join(path, ep_str)
         image_paths, poses, widths, g_forces, forces, targ_ix = get_episode(episode_path)
         total_images += image_paths
-        total_poses = poses if len(total_poses) == 0 else np.concatenate([total_poses, poses], 0)
-        total_widths = widths if len(total_widths) == 0 else np.concatenate([total_widths, widths], 0)
-        total_g_forces = g_forces if len(total_g_forces) == 0 else np.concatenate([total_g_forces, g_forces])
-        total_forces = forces if len(total_forces) == 0 else np.concatenate([total_forces, forces])
+        total_poses.extend(poses)
+        total_widths.extend(widths)
+        total_g_forces.extend(g_forces)
+        total_forces.extend(forces)
+        targ_ixs.append(targ_ix)
         lens.append(len(image_paths))
 
-    print(len(total_images), total_poses.shape, total_widths.shape, total_g_forces.shape, total_forces.shape, sum(lens))
+    print(len(total_images), np.array(total_poses).shape, np.array(total_widths).shape, np.array(total_g_forces).shape, np.array(total_forces).shape, sum(lens))
     assert len(total_images) == len(total_poses)
 
     # save states
@@ -64,6 +66,7 @@ if __name__ == '__main__':
         force=total_forces,
         gripper_width=total_widths,
         gripper_force=total_g_forces,
+        targ_ixs=np.array(targ_ixs),
         traj_length=np.array(lens)
     )
     # save images
