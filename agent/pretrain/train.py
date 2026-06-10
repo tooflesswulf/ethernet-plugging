@@ -133,15 +133,11 @@ def parse_args():
     parser.add_argument('--device',    type=str,  default='cuda')
     parser.add_argument('--task',      type=str,  default='ethernet_plug_v2_dataset')
     parser.add_argument('--epochs',    type=int,  default=300)
+    parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets')
+    parser.add_argument('--ckpt_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/ckpts')
     return parser.parse_args()
 
 if __name__ == '__main__':
     args = parse_args()
-    dataset_dir = '/zfsauton/scratch/yiqiw2/100%/datasets'
-    dataset_dir = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset' 
-    ckpt_dir = '/zfsauton/scratch/yiqiw2/100%/ckpts'
-    dataset_path, ckpt_dir = os.path.join(dataset_dir, args.task),os.path.join(ckpt_dir, args.task) 
-   
+    dataset_path, ckpt_dir = os.path.join(args.data_dir, args.task),os.path.join(args.ckpt_dir, args.task) 
     train(args.task, dataset_path, ckpt_dir, args.epochs, use_wandb=args.use_wandb, device=args.device)
-    
-    
