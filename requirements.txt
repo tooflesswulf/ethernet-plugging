@@ -1,5 +1,6 @@
 diffusers
 einops
+h5py
 hidapi
 imageio
 matplotlib
