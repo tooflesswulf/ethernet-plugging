@@ -93,7 +93,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         if end > ep_end:
             # Shouldn't happen because make_indices should ensure we only sample valid start indices, but just in case
             raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
-        ep_hist = self.obs[ep_start: (start + 1)]
 
         # Conditioning observations: current and history states + images
         obs = torch.stack([self.obs[max(start - t, ep_start)]
@@ -102,8 +101,10 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                              for t in reversed(range(self.img_cond_steps))])  # img_cond_steps x H x W x C
         conditions = {'state': obs, 'rgb': rearrange(images, ' T H W C -> T C H W') / 255.0}
 
-        # Actions
-        return DataBatch(self.actions[idx], conditions)
+        batch = DataBatch(self.actions[idx], conditions)
+        if self.transform is not None:
+            batch = self.transform(batch)
+        return batch
 
     def make_indices(self, traj_lengths, horizon_steps):
         """
