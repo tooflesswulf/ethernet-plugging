@@ -1,8 +1,13 @@
 
+import numpy as np
 import torch
 import torch.nn as nn
+from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from agent.dataset.sequence import ActionMode
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
+
+ACTION_MODES = ('absolute', 'local_delta', 'global_delta')
 
 
 class DiffusionPolicy(nn.Module):
@@ -25,12 +30,17 @@ class DiffusionPolicy(nn.Module):
         action_dim=7,
         num_diffusion_iters=100,
         norm_stats: dict | None = None,
+        action_mode: ActionMode = 'local_delta',
+        gripper_width_idx=6,
     ):
         super().__init__()
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
         self.action_dim = action_dim
         self.num_diffusion_iters = num_diffusion_iters
+        # index of gripper_width within the state vector (pose is first in obs_fields),
+        # used to map binary gripper actions back to physical widths via the state stats
+        self.gripper_width_idx = gripper_width_idx
 
         # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
         # work with EMA — performance will tank if you forget to do this!
@@ -57,8 +67,14 @@ class DiffusionPolicy(nn.Module):
         self.register_buffer('action_max', torch.ones(action_dim))
         self.register_buffer('state_min', -torch.ones(state_dim))
         self.register_buffer('state_max', torch.ones(state_dim))
+        # action_mode as a buffer so checkpoints remember how their actions are encoded
+        self.register_buffer('_action_mode_idx', torch.tensor(ACTION_MODES.index(action_mode)))
         if norm_stats is not None:
             self.set_norm_stats(norm_stats)
+
+    @property
+    def action_mode(self) -> str:
+        return ACTION_MODES[int(self._action_mode_idx)]
 
     def set_norm_stats(self, stats: dict):
         """stats: output of agent.utils.utils.compute_norm_stats"""
@@ -136,3 +152,51 @@ class DiffusionPolicy(nn.Module):
                 model_output=noise_pred, timestep=k, sample=naction).prev_sample
 
         return self.unnormalize_actions(naction)
+
+    def integrate_actions(self, actions, curr_pose, curr_gripper_width):
+        """
+        Convert a predicted action chunk into absolute desired poses + gripper widths,
+        inverting the dataset's action encoding (see StitchedSequenceDataset.pose_action):
+
+            absolute:     [tx, ty, tz, rx, ry, rz];           des_i = a_i
+            local_delta:  exp coords [rot, trans] of t0⁻¹tᵢ;  des_i = t0 * exp(a_i)
+            global_delta: exp coords [rot, trans] of tᵢt0⁻¹;  des_i = exp(a_i) * t0
+
+        Args:
+            actions:            (horizon, action_dim) unnormalized actions from
+                                predict_action; last dim is the gripper (+1=open, -1=closed).
+            curr_pose:          (6,) current pose [tx, ty, tz, rx, ry, rz] (rotvec).
+            curr_gripper_width: current physical gripper width, used as fallback when
+                                width stats are unavailable.
+
+        Returns:
+            des_poses:  (horizon, 6) absolute poses [tx, ty, tz, rx, ry, rz].
+            des_widths: (horizon,) desired gripper widths.
+        """
+        if torch.is_tensor(actions):
+            actions = actions.detach().cpu().numpy()
+        actions = np.asarray(actions)
+        curr_pose = np.asarray(curr_pose, dtype=float)
+        pose_actions, g_actions = actions[:, :6], actions[:, -1]
+
+        if self.action_mode == 'absolute':
+            des_poses = pose_actions.copy()
+        else:
+            t0 = Tf.from_components(curr_pose[:3], R.from_rotvec(curr_pose[3:]))
+            if self.action_mode == 'local_delta':
+                des_tfs = [t0 * Tf.from_exp_coords(a) for a in pose_actions]
+            else:  # global_delta
+                des_tfs = [Tf.from_exp_coords(a) * t0 for a in pose_actions]
+            des_poses = np.array([
+                np.concatenate([t.translation, t.rotation.as_rotvec()]) for t in des_tfs])
+
+        # Map binary gripper actions to physical widths using the state stats
+        # (gripper_width is a state dim, so its min/max are the closed/open widths).
+        w_closed = float(self.state_min[self.gripper_width_idx])
+        w_open = float(self.state_max[self.gripper_width_idx])
+        if w_open == w_closed:  # stats not set (e.g. untrained policy): hold current width
+            des_widths = np.full(len(g_actions), curr_gripper_width, dtype=float)
+        else:
+            des_widths = np.where(g_actions > 0, w_open, w_closed)
+
+        return des_poses, des_widths
