@@ -33,15 +33,18 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=f"pretrain-{task}-relact")
-    dataset = StitchedSequenceDataset(dataset_path, horizon_steps=16, device=device)
-    val_dataset = StitchedSequenceDataset(dataset_path, horizon_steps=16, max_n_episodes=1, device=device)
+    obs_fields = ['pose', 'gripper_width', 'force', 'gripper_force', 'targ_ixs']
+    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, device=device)
+    val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                          horizon_steps=16, max_n_episodes=1, device=device)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=64,
         num_workers=0,  # since all data are in ram, worker=0 is fine. multi-worker causing issue.
         shuffle=True,
     )
-    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=64)
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=64,
+                                                 state_dim=dataset.obs_dim, action_dim=dataset.act_dim)
 
     # Normalization stats from the training set; stored as buffers inside the
     # policy so they're saved in the checkpoint for un-normalizing at eval time.
