@@ -1,5 +1,6 @@
 
 from collections import namedtuple
+from typing import Literal
 from PIL import Image
 from tqdm import tqdm
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
@@ -11,6 +12,7 @@ import os
 # from agent.utils.utils import get_chunk_actions
 
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
+ActionMode = Literal['absolute', 'local_delta', 'global_delta']
 
 
 def get_images(dir_path, total_num_steps=None, img_size=128):
@@ -44,6 +46,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         img_cond_steps=1,
         max_n_episodes=10000,
         obs_fields=['pose', 'gripper_width'],
+        action_mode: ActionMode = 'local_delta',
         transform=None,
         device="cuda:0",
     ):
@@ -52,6 +55,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.cond_steps = cond_steps  # states (proprio, etc.)
         self.img_cond_steps = img_cond_steps
         self.device = device
+        self.action_mode = action_mode
         self.transform = transform
 
         self.max_n_episodes = max_n_episodes
@@ -63,86 +67,107 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         dataset = np.load(state_path, allow_pickle=False)  # only np arrays
         traj_lengths = dataset['traj_length'][:max_n_episodes]  # 1-D array
         total_num_steps = np.sum(traj_lengths)
-        states = np.c_[*[dataset[key] for key in obs_fields]]  # Concat along columns, (total_num_steps, obs_dim)
+        obs = np.c_[*[dataset[key] for key in obs_fields]]  # Concat along columns, (total_num_steps, obs_dim)
 
         # Set up indices for sampling
         self.indices = self.make_indices(traj_lengths, horizon_steps)
 
         # Extract states and actions up to max_n_episodes
-        self.states = torch.from_numpy(states[:total_num_steps]).float().to(device)  # (total_num_steps, obs_dim)
-        self.images = torch.from_numpy(get_images(img_dir, total_num_steps)).to(device)  # (total_num_steps, H, W, C)
+        self.poses = dataset['pose'][:total_num_steps]  # (N, 6)
+        self.g_widths = dataset['gripper_width'][:total_num_steps]  # (N,)
+        self.obs = torch.from_numpy(obs[:total_num_steps]).float().to(device)  # (N, obs_dim)
+        self.images = torch.from_numpy(get_images(img_dir, total_num_steps)).to(device)  # (N, H, W, C)
+        self._precompute_actions()  # precompute all actions for faster sampling during training
+
+        self.g_thr = (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
+
+    def __len__(self):
+        return len(self.indices)
 
     def __getitem__(self, idx):
         """
         repeat states/images if using history observation at the beginning of the episode
         """
-        start, num_before_start, traj_end = self.indices[idx]
-        end = start + self.horizon_steps
-        states = self.states[(start - num_before_start): (start + 1)]
-        # actions = self.actions[start:end] # horizon x dim
+        start, ep_start, ep_end = self.indices[idx]
+        end = min(start + self.horizon_steps, ep_end)
+        if end > ep_end:
+            # Shouldn't happen because make_indices should ensure we only sample valid start indices, but just in case
+            raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
+        ep_hist = self.obs[ep_start: (start + 1)]
 
-        # Delta action:
-        # s_t - s_0 (delta between current state and meta state), with absolute gripper
-        _end = min(traj_end, end + 1)
-        future_states = self.states[(start + 1): _end]
-        actions = future_states - self.states[start]
-        # fix last dimension with absolute gripper width
-        gripper = future_states[:, -1]
-        # if > 20, set 0, otherwise set 1
-        # gripper = 1-(gripper > 20).float()
-        actions[:, -1] = gripper
-        if len(actions) < self.horizon_steps:
-            padding = self.horizon_steps - len(actions)
-            actions = torch.cat(
-                [actions, actions[-1:].repeat(padding, 1)], dim=0
-            )  # repeat last action if not enough future states
+        # Conditioning observations: current and history states + images
+        obs = torch.stack([self.obs[max(start - t, ep_start)]
+                          for t in reversed(range(self.cond_steps))])  # more recent is at the end, # cond_steps x dim
+        images = torch.stack([self.images[max(start - t, ep_start)]
+                             for t in reversed(range(self.img_cond_steps))])  # img_cond_steps x H x W x C
+        conditions = {'state': obs, 'rgb': rearrange(images, ' T H W C -> T C H W') / 255.0}
 
-        actions = normalize(actions, min_val=self.action_min, max_val=self.action_max)
-        # binary gripper
-        m_close, m_open = actions[:, -1] <= 0, actions[:, -1] > 0
-        actions[:, -1][m_close] = -1
-        actions[:, -1][m_open] = 1
-        states = torch.stack(
-            [
-                states[max(num_before_start - t, 0)]
-                for t in reversed(range(self.cond_steps))
-            ]
-        )  # more recent is at the end, # cond_steps x dim
-        states = normalize(states, min_val=self.state_min, max_val=self.state_max)
-        conditions = {"state": states}
-
-        images = self.images[(start - num_before_start): end]
-        images = torch.stack(
-            [
-                images[max(num_before_start - t, 0)]
-                for t in reversed(range(self.img_cond_steps))
-            ]
-        )  # img_cond_steps x H x W x C
-
-        conditions["rgb"] = rearrange(images, ' T H W C -> T C H W') / 255.0  # - 0.5
-        batch = DataBatch(actions, conditions)
-        return batch
+        # Actions
+        return DataBatch(self.actions[idx], conditions)
 
     def make_indices(self, traj_lengths, horizon_steps):
         """
         makes indices for sampling from dataset;
-        each index maps to a datapoint, also save the number of steps before it within the same trajectory
-
-        Returns list[(start_index, num_before_start, traj_end_index)], where
+        each index maps to a datapoint and its bounds within the same trajectory.
+        Returns list[(start_index, traj_start_index, traj_end_index)]
         """
         indices = []
-        cur_traj_index = 0
+        traj_start = 0
         for traj_length in traj_lengths:
-            max_start = cur_traj_index + traj_length - horizon_steps
-            traj_end = cur_traj_index + traj_length
-            indices += [
-                (i, i - cur_traj_index, traj_end) for i in range(cur_traj_index, max_start + 1)
-            ]
-            cur_traj_index += traj_length
-        return indices
+            max_start = traj_start + traj_length - horizon_steps
+            traj_end = traj_start + traj_length
+            indices += [(i, traj_start, traj_end) for i in range(traj_start, max_start + 1)]
+            traj_start += traj_length
+        return np.array(indices)
 
-    def __len__(self):
-        return len(self.indices)
+    def _precompute_actions(self):
+        actions = []
+        for i in tqdm(range(len(self)), desc='precomputing actions'):
+            start, ep_start, ep_end = self.indices[i]
+            end = min(start + self.horizon_steps, ep_end)
+            if end > ep_end:
+                # TODO: replication pad if end out of ep_end
+                raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
+
+            g_width = self.g_widths[start:end]
+            poses = self.poses[start:end]
+
+            g_action = self.gripper_action(g_width, threshold=self.g_thr)
+            pose_action = self.pose_action(poses)
+            actions.append(np.c_[pose_action, g_action])
+        self.actions = np.array(actions)
+        return self.actions
+
+    def gripper_action(self, g_widths, threshold=20):
+        """
+        Binary gripper predictions. 1=open, -1=closed
+        """
+        return 2 * (g_widths > threshold).astype(int).reshape(-1, 1) - 1
+
+    def _pose_action_absolute(self, poses):
+        return poses
+
+    def _pose_action_local_delta(self, poses):
+        transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
+        t0 = transforms[0]
+        deltas = [t0.inv() * t for t in transforms]
+        return np.array([delta.as_exp_coords() for delta in deltas])
+
+    def _pose_action_global_delta(self, poses):
+        transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
+        t0 = transforms[0]
+        deltas = [t * t0.inv() for t in transforms]
+        return np.array([delta.as_exp_coords() for delta in deltas])
+
+    def pose_action(self, poses):
+        if self.action_mode == 'absolute':
+            return self._pose_action_absolute(poses)
+        elif self.action_mode == 'local_delta':
+            return self._pose_action_local_delta(poses)
+        elif self.action_mode == 'global_delta':
+            return self._pose_action_global_delta(poses)
+        else:
+            raise ValueError(f"Invalid action_mode: {self.action_mode}")
 
 
 if __name__ == '__main__':
