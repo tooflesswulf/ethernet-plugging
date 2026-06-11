@@ -48,8 +48,8 @@ def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
     # Normalization stats from the training set; stored as buffers inside the
     # policy so they're saved in the checkpoint for un-normalizing at eval time.
     norm_stats = compute_norm_stats(dataset)
-    policy = DiffusionPolicy(action_horizon=16, state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
-                             norm_stats=norm_stats).to(device)
+    policy = DiffusionPolicy(action_horizon=16, norm_stats=norm_stats,
+                             state_dim=dataset.obs_dim, action_dim=dataset.act_dim).to(device)
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
     lr_scheduler = get_scheduler(
