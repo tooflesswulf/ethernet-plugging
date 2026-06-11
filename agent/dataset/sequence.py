@@ -146,15 +146,18 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         return 2 * (g_widths > threshold).astype(int).reshape(-1, 1) - 1
 
     def _pose_action_absolute(self, poses):
+        # Returns (N, 6): [tx, ty, tz, rx, ry, rz]
         return poses
 
     def _pose_action_local_delta(self, poses):
+        # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
         transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
         t0 = transforms[0]
         deltas = [t0.inv() * t for t in transforms]
         return np.array([delta.as_exp_coords() for delta in deltas])
 
     def _pose_action_global_delta(self, poses):
+        # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
         transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
         t0 = transforms[0]
         deltas = [t * t0.inv() for t in transforms]
