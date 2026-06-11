@@ -77,9 +77,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.g_widths = dataset['gripper_width'][:total_num_steps]  # (N,)
         self.obs = torch.from_numpy(obs[:total_num_steps]).float().to(device)  # (N, obs_dim)
         self.images = torch.from_numpy(get_images(img_dir, total_num_steps)).to(device)  # (N, H, W, C)
-        self._precompute_actions()  # precompute all actions for faster sampling during training
 
         self.g_thr = (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
+        self._precompute_actions()  # precompute all actions for faster sampling during training
 
     def __len__(self):
         return len(self.indices)
