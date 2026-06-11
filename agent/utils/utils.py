@@ -73,7 +73,7 @@ def load_checkpoint(
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    nets.load_state_dict(state_dict)
+    nets.load_state_dict(state_dict, strict=False)
     nets.to(device)
 
     print(f"[Checkpoint] Loaded from {ckpt_path}")
