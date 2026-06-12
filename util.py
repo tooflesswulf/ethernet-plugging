@@ -66,3 +66,11 @@ def episode_index(data_dir, prefix='ep'):
     ]
     return max(ixs, default=0) + 1
 
+def dict2hdf5(h5group, data: dict):
+    for key, value in data.items():
+        if isinstance(value, dict):
+            subgroup = h5group.create_group(str(key))
+            dict2hdf5(subgroup, data)
+        else:
+            h5group.create_dataset(str(key), data=value)
+
