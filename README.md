@@ -3,7 +3,7 @@
 ## Environment setup
 
 ```
-conda create -n realrobot python=3.10
+conda create -n realrobot python=3.11
 pip install hidapi scipy ur-rtde robosuite opencv-python imageio matplotlib einops wandb
 ```
 
