@@ -190,13 +190,7 @@ class DiffusionPolicy(nn.Module):
             des_poses = np.array([
                 np.concatenate([t.translation, t.rotation.as_rotvec()]) for t in des_tfs])
 
-        # Map binary gripper actions to physical widths using the state stats
-        # (gripper_width is a state dim, so its min/max are the closed/open widths).
-        w_closed = float(self.state_min[self.gripper_width_idx])
-        w_open = float(self.state_max[self.gripper_width_idx])
-        if w_open == w_closed:  # stats not set (e.g. untrained policy): hold current width
-            des_widths = np.full(len(g_actions), curr_gripper_width, dtype=float)
-        else:
-            des_widths = np.where(g_actions > 0, w_open, w_closed)
+        # Map gripper action (-1 -> 1, 1 -> 0)
+        des_gripper = np.where(g_actions > 0, 0, 1)
 
-        return des_poses, des_widths
+        return des_poses, des_gripper

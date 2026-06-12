@@ -204,6 +204,8 @@ class Env:
         # ============================================================
         # Home / open gripper
         # ============================================================
+        if self.gripper.gripstate().value != 0:  # IDLE
+            self.gripper.stop().wait()
         g = self.gripper.home()
         g.ack.wait()
 

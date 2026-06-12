@@ -16,6 +16,11 @@ from agent.utils.logging import NoOpLogger, setup_logger
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import load_checkpoint, resize_image
 
+GRIP_WIDTH_MM = 8
+GRIP_FORCE_N = 40
+GRIP_SPEED_MMPS = 50
+GRIP_PULLBACK_MM = 10
+
 
 def get_actions(policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, curr_gripper_width):
     """
@@ -23,14 +28,40 @@ def get_actions(policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, c
     nagent_poses: (T, state_dim) raw/unnormalized
     Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,)) ready to execute.
     """
+
     conditions = {
         'rgb': (nimages / 255.0).unsqueeze(0),  # (1, T, C, H, W)
         'state': nagent_poses.unsqueeze(0),     # (1, T, state_dim); policy normalizes internally
     }
     naction = policy.predict_action(conditions, num_inference_steps=num_diffusion_iters)
     naction = naction.detach().to('cpu').numpy()[0]
+
     # integrate deltas (per the policy's action_mode) into absolute poses + widths
     return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
+
+
+def wait_for_circle(env, iface):
+    freq = 250
+    while True:
+        flag = iface.update(1 / freq)
+        if flag == -1:
+            raise RuntimeError('Square pressed, exiting.')
+
+        des_pose = URPose(*iface.target_pose)
+        des_gripper = iface.gripper_state
+        obs = env.step(
+            des_pose=des_pose,
+            des_gripper_state=des_gripper,
+            des_zforce=iface.target_zforce,
+            adaptive_mode=iface.adaptive_mode,
+        )
+        if des_gripper == 1:
+            break
+        time.sleep(1 / 250)
+
+    time.sleep(0.1)
+    env.gripper.wait_idle()
+    time.sleep(1)
 
 
 def evaluate(policy, fps, save_dir, obs_horizon=1, action_horizon=16, num_diffusion_iters=100, img_size=128, device='cuda'):
@@ -47,23 +78,35 @@ def evaluate(policy, fps, save_dir, obs_horizon=1, action_horizon=16, num_diffus
         camera_crop_mode=1,
         dataset_path=None,
         save_interval=1.0 / fps,
+        gforce=GRIP_FORCE_N,
+        gwidth=GRIP_WIDTH_MM,
+        gspeed=GRIP_SPEED_MMPS,
+        gpullback=GRIP_PULLBACK_MM,
     )
     env.reset(home_pose)
     env.start()  # start threads
+
+    target_ix = 0
+    g_thr = 15
+
+    wait_for_circle(env, iface)
     print("Starting evaluation loop...")
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
     save_frames = []
     while True:
-        if iface.update(env.dt) == -1:
+        if iface.update(.1) == -1:
             break  # -1 indicates square is pressed and an error is thrown.
 
         images = np.stack([resize_image(x['image'], (img_size, img_size)) for x in obs_deque])
-        agent_poses, agent_grippers = np.stack([x['state']['actual_pose'] for x in obs_deque]), np.stack([
-            [x['state']['gripper_width']] for x in obs_deque])
+        agent_poses = np.stack([x['state']['actual_pose'] for x in obs_deque])
+        agent_gwidth = np.stack([[x['state']['gripper_width']] for x in obs_deque])
+        agent_force = np.stack([x['state']['actual_force'] for x in obs_deque])
+        agent_gforce = np.stack([[x['state']['gripper_force']] for x in obs_deque])
 
-        curr_pose, curr_gripper = agent_poses[-1], agent_grippers[-1][0]
+        curr_pose, curr_gripper = agent_poses[-1], agent_gwidth[-1][0]
         # raw observations: normalization happens inside the policy
-        agent_poses = np.concatenate([agent_poses, agent_grippers], -1)
+        # agent_poses = np.c_[agent_poses, agent_gwidth, agent_force, agent_gforce, target_ix]
+        agent_poses = np.c_[agent_poses, agent_gwidth, target_ix]
 
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
         nagent_poses = torch.from_numpy(agent_poses).to(device, dtype=torch.float32)  # txd
