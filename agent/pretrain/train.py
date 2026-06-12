@@ -131,16 +131,17 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Training')
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--device',    type=str,  default='cuda')
-    parser.add_argument('--task',      type=str,  default='ethernet_unplug_red')
+    parser.add_argument('--task',      type=str,  default='ethernet_unplug_red_topdown')
+    parser.add_argument('--dataset_dir',    type=str,  default='/zfsauton/scratch/yiqiw2/100%/datasets')
     parser.add_argument('--epochs',    type=int,  default=200)
     return parser.parse_args()
 
 if __name__ == '__main__':
     args = parse_args()
-    dataset_dir = '/zfsauton/scratch/yiqiw2/100%/datasets'
-    dataset_dir = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset' 
+    # dataset_dir = '/zfsauton/scratch/yiqiw2/100%/datasets'
+    # dataset_dir = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset' 
     ckpt_dir = '/zfsauton/scratch/yiqiw2/100%/ckpts'
-    dataset_path, ckpt_dir = os.path.join(dataset_dir, args.task),os.path.join(ckpt_dir, args.task) 
+    dataset_path, ckpt_dir = os.path.join(args.dataset_dir, args.task),os.path.join(ckpt_dir, args.task) 
    
     train(args.task, dataset_path, ckpt_dir, args.epochs, use_wandb=args.use_wandb, device=args.device)
     
