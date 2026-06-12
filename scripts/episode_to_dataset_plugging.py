@@ -52,10 +52,11 @@ if __name__ == '__main__':
         total_widths.extend(widths)
         total_g_forces.extend(g_forces)
         total_forces.extend(forces)
-        targ_ixs.append(targ_ix)
+        targ_ixs.extend([targ_ix] * len(image_paths))
         lens.append(len(image_paths))
 
-    print(len(total_images), np.array(total_poses).shape, np.array(total_widths).shape, np.array(total_g_forces).shape, np.array(total_forces).shape, sum(lens))
+    print(len(total_images), np.array(total_poses).shape, np.array(total_widths).shape,
+          np.array(total_g_forces).shape, np.array(total_forces).shape, sum(lens))
     assert len(total_images) == len(total_poses)
 
     # save states

@@ -5,6 +5,7 @@ hidapi
 imageio
 matplotlib
 opencv-python
+pyrealsense2
 robosuite
 scipy
 tqdm
