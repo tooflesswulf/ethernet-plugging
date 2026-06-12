@@ -14,7 +14,7 @@ import torch.nn as nn
 from env import Env, URPose
 from agent.utils.logging import NoOpLogger, setup_logger
 from agent.model.policy import DiffusionPolicy
-from agent.utils.utils import load_checkpoint, resize_image
+from agent.utils.utils import resize_image
 
 GRIP_WIDTH_MM = 8
 GRIP_FORCE_N = 40
@@ -64,7 +64,13 @@ def wait_for_circle(env, iface):
     time.sleep(1)
 
 
-def evaluate(policy, fps, save_dir, obs_horizon=1, action_horizon=16, num_diffusion_iters=100, img_size=128, device='cuda'):
+def evaluate(policy, log_dir=None, fps=20, device='cuda'):
+    # network-specific parameters come from the loaded checkpoint
+    obs_horizon = policy.obs_horizon
+    action_horizon = policy.action_horizon
+    num_diffusion_iters = policy.num_diffusion_iters
+    img_size = policy.img_size
+
     # home_pose = URPose(-0.125,0.545,0.305,2.44,2.44,0.653, )
     home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see, Yiqi)
     iface = interface.DualSenseInterface(
@@ -76,7 +82,7 @@ def evaluate(policy, fps, save_dir, obs_horizon=1, action_horizon=16, num_diffus
         robot_ip="192.168.0.100",
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,
-        dataset_path=None,
+        dataset_path=log_dir,  # None disables robot data logging
         save_interval=1.0 / fps,
         gforce=GRIP_FORCE_N,
         gwidth=GRIP_WIDTH_MM,
@@ -132,63 +138,38 @@ def evaluate(policy, fps, save_dir, obs_horizon=1, action_horizon=16, num_diffus
                 save_frames.append(obs['image'].astype(np.uint8))
 
     # save video
-    video_path = os.path.join(save_dir, 'evaluation_video.mp4')
-    # create mp4 from a list of HxWxC images
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    h, w, c = save_frames[0].shape
+    if log_dir is not None and save_frames:
+        video_path = os.path.join(log_dir, 'evaluation_video.mp4')
+        # create mp4 from a list of HxWxC images
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        h, w, c = save_frames[0].shape
 
-    out = cv2.VideoWriter(video_path, fourcc, fps, (w, h))
-    for frame in save_frames:
-        # convert RGB to BGR for opencv
-        frame_bgr = frame  # [:, :, ::-1]
-        out.write(frame_bgr)
-    out.release()
+        out = cv2.VideoWriter(video_path, fourcc, fps, (w, h))
+        for frame in save_frames:
+            # convert RGB to BGR for opencv
+            frame_bgr = frame  # [:, :, ::-1]
+            out.write(frame_bgr)
+        out.release()
+        print(f"Saved evaluation video → {video_path}")
     env.close()
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Evaluation.')
-    parser.add_argument('--use_wandb', action='store_true', default=False)
-    parser.add_argument('--dataset_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets')
-    parser.add_argument('--ckpt_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/ckpts')
-    parser.add_argument('--save_dir', type=str, default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/results')
+    parser.add_argument('--ckpt', type=str, required=True, help='path to checkpoint file')
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--task', type=str, default='ethernet_unplug_red_topdown')
-    parser.add_argument('--ckptname', type=str, default='ckpt_ep_80.pth')
-    parser.add_argument('--ckpt_path', type=str, default='.')
-    parser.add_argument('--ep_id', type=int, default=11)
-    parser.add_argument('--fps', type=int, default=20)
-    parser.add_argument('--img_size', type=int, default=128)
-    parser.add_argument('--horizon', type=int, default=16)
-    parser.add_argument('--num_diffusion_iters', type=int, default=100)
-    parser.add_argument('--state_dim', type=int, default=7)
-    parser.add_argument('--action_dim', type=int, default=7)
+    parser.add_argument('--log_dir', type=str, default=None,
+                        help='where to save robot log data + evaluation video (None disables logging)')
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     args = parse_args()
-    dataset_dir = args.dataset_dir
-    ckpt_dir = args.ckpt_dir
-    save_dir = os.path.join(args.save_dir, args.task, f"h{args.horizon}", f"ep_{args.ep_id}")
-    dataset_path, ckpt_path = os.path.join(
-        dataset_dir, args.task + '_dataset'), os.path.join(ckpt_dir, args.task, f"h{args.horizon}", args.ckptname)
-    ckpt_path = args.ckpt_path
-    # Normalization stats live in the checkpoint as buffers — no dataset access needed at eval time.
-    policy = DiffusionPolicy(
-        action_horizon=args.horizon,
-        state_dim=args.state_dim,
-        action_dim=args.action_dim,
-        num_diffusion_iters=args.num_diffusion_iters,
-    )
-    policy = load_checkpoint(policy, ckpt_path, args.device)
+    # Architecture config, weights, and normalization stats all come from the checkpoint.
+    policy = DiffusionPolicy.from_checkpoint(args.ckpt, args.device)
     policy.eval()
 
-    # create save dir if not exists and corresponding parent
-    os.makedirs(save_dir, exist_ok=True)
+    if args.log_dir is not None:
+        os.makedirs(args.log_dir, exist_ok=True)
 
-    evaluate(policy, args.fps, save_dir,
-             num_diffusion_iters=args.num_diffusion_iters,
-             img_size=args.img_size,
-             action_horizon=args.horizon,
-             device=args.device)
+    evaluate(policy, log_dir=args.log_dir, device=args.device)

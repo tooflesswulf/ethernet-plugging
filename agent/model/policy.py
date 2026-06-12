@@ -28,19 +28,29 @@ class DiffusionPolicy(nn.Module):
         vision_feature_dim=512,
         state_dim=7,
         action_dim=7,
+        img_size=128,
         num_diffusion_iters=100,
         norm_stats: dict | None = None,
         action_mode: ActionMode = 'local_delta',
-        gripper_width_idx=6,
     ):
         super().__init__()
+        # Architecture/config args; saved alongside the weights by save_checkpoint so
+        # from_checkpoint can rebuild the policy without the caller knowing the dims.
+        self.config = dict(
+            obs_horizon=obs_horizon,
+            action_horizon=action_horizon,
+            vision_feature_dim=vision_feature_dim,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            img_size=img_size,
+            num_diffusion_iters=num_diffusion_iters,
+            action_mode=action_mode,
+        )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
         self.action_dim = action_dim
+        self.img_size = img_size
         self.num_diffusion_iters = num_diffusion_iters
-        # index of gripper_width within the state vector (pose is first in obs_fields),
-        # used to map binary gripper actions back to physical widths via the state stats
-        self.gripper_width_idx = gripper_width_idx
 
         # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
         # work with EMA — performance will tank if you forget to do this!
@@ -75,6 +85,21 @@ class DiffusionPolicy(nn.Module):
     @property
     def action_mode(self) -> str:
         return ACTION_MODES[int(self._action_mode_idx)]
+
+    @classmethod
+    def from_checkpoint(cls, ckpt_path, device='cpu'):
+        """
+        Rebuild a policy entirely from a checkpoint: architecture config, weights,
+        and normalization stats all come from the file.
+        """
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        assert 'config' in checkpoint, (
+            f"Checkpoint {ckpt_path} has no 'config' entry; it predates config-saving. "
+            "Construct DiffusionPolicy with explicit dims and use load_checkpoint instead.")
+        policy = cls(**checkpoint['config'])
+        policy.load_state_dict(checkpoint['model_state_dict'])
+        print(f"[Checkpoint] Loaded policy from {ckpt_path} (config: {checkpoint['config']})")
+        return policy.to(device)
 
     def set_norm_stats(self, stats: dict):
         """stats: output of agent.utils.utils.compute_norm_stats"""
@@ -192,5 +217,4 @@ class DiffusionPolicy(nn.Module):
 
         # Map gripper action (-1 -> 1, 1 -> 0)
         des_gripper = np.where(g_actions > 0, 0, 1)
-
         return des_poses, des_gripper
