@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torchvision
 
+
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -27,6 +28,7 @@ class Downsample1d(nn.Module):
 
     def forward(self, x):
         return self.conv(x)
+
 
 class Upsample1d(nn.Module):
     def __init__(self, dim):
@@ -57,11 +59,11 @@ class Conv1dBlock(nn.Module):
 
 class ConditionalResidualBlock1D(nn.Module):
     def __init__(self,
-            in_channels,
-            out_channels,
-            cond_dim,
-            kernel_size=3,
-            n_groups=8):
+                 in_channels,
+                 out_channels,
+                 cond_dim,
+                 kernel_size=3,
+                 n_groups=8):
         super().__init__()
 
         self.blocks = nn.ModuleList([
@@ -96,8 +98,8 @@ class ConditionalResidualBlock1D(nn.Module):
 
         embed = embed.reshape(
             embed.shape[0], 2, self.out_channels, 1)
-        scale = embed[:,0,...]
-        bias = embed[:,1,...]
+        scale = embed[:, 0, ...]
+        bias = embed[:, 1, ...]
         out = scale * out + bias
 
         out = self.blocks[1](out)
@@ -107,13 +109,13 @@ class ConditionalResidualBlock1D(nn.Module):
 
 class ConditionalUnet1D(nn.Module):
     def __init__(self,
-        input_dim,
-        global_cond_dim,
-        diffusion_step_embed_dim=256,
-        down_dims=[256,512,1024],
-        kernel_size=5,
-        n_groups=8
-        ):
+                 input_dim,
+                 global_cond_dim,
+                 diffusion_step_embed_dim=256,
+                 down_dims=[256, 512, 1024],
+                 kernel_size=5,
+                 n_groups=8
+                 ):
         """
         input_dim: Dim of actions.
         global_cond_dim: Dim of global conditioning applied with FiLM
@@ -169,7 +171,7 @@ class ConditionalUnet1D(nn.Module):
             is_last = ind >= (len(in_out) - 1)
             up_modules.append(nn.ModuleList([
                 ConditionalResidualBlock1D(
-                    dim_out*2, dim_in, cond_dim=cond_dim,
+                    dim_out * 2, dim_in, cond_dim=cond_dim,
                     kernel_size=kernel_size, n_groups=n_groups),
                 ConditionalResidualBlock1D(
                     dim_in, dim_in, cond_dim=cond_dim,
@@ -192,9 +194,9 @@ class ConditionalUnet1D(nn.Module):
         )
 
     def forward(self,
-            sample: torch.Tensor,
-            timestep: Union[torch.Tensor, float, int],
-            global_cond=None):
+                sample: torch.Tensor,
+                timestep: Union[torch.Tensor, float, int],
+                global_cond=None):
         """
         x: (B,T,input_dim)
         timestep: (B,) or int, diffusion step
@@ -202,7 +204,7 @@ class ConditionalUnet1D(nn.Module):
         output: (B,T,input_dim)
         """
         # (B,T,C)
-        sample = sample.moveaxis(-1,-2)
+        sample = sample.moveaxis(-1, -2)
         # (B,C,T)
 
         # 1. time
@@ -242,11 +244,12 @@ class ConditionalUnet1D(nn.Module):
         x = self.final_conv(x)
 
         # (B,C,T)
-        x = x.moveaxis(-1,-2)
+        x = x.moveaxis(-1, -2)
         # (B,T,C)
         return x
 
-def get_resnet(name:str, weights=None, **kwargs) -> nn.Module:
+
+def get_resnet(name: str, weights=None, **kwargs) -> nn.Module:
     """
     name: resnet18, resnet34, resnet50
     weights: "IMAGENET1K_V1", None
@@ -276,8 +279,8 @@ def replace_submodules(
         return func(root_module)
 
     bn_list = [k.split('.') for k, m
-        in root_module.named_modules(remove_duplicate=True)
-        if predicate(m)]
+               in root_module.named_modules(remove_duplicate=True)
+               if predicate(m)]
     for *parent, k in bn_list:
         parent_module = root_module
         if len(parent) > 0:
@@ -293,14 +296,15 @@ def replace_submodules(
             setattr(parent_module, k, tgt_module)
     # verify that all modules are replaced
     bn_list = [k.split('.') for k, m
-        in root_module.named_modules(remove_duplicate=True)
-        if predicate(m)]
+               in root_module.named_modules(remove_duplicate=True)
+               if predicate(m)]
     assert len(bn_list) == 0
     return root_module
 
+
 def replace_bn_with_gn(
-    root_module: nn.Module,
-    features_per_group: int=16) -> nn.Module:
+        root_module: nn.Module,
+        features_per_group: int = 16) -> nn.Module:
     """
     Relace all BatchNorm layers with GroupNorm.
     """
@@ -308,7 +312,7 @@ def replace_bn_with_gn(
         root_module=root_module,
         predicate=lambda x: isinstance(x, nn.BatchNorm2d),
         func=lambda x: nn.GroupNorm(
-            num_groups=x.num_features//features_per_group,
+            num_groups=x.num_features // features_per_group,
             num_channels=x.num_features)
     )
     return root_module
