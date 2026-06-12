@@ -73,25 +73,11 @@ def load_checkpoint(
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    nets.load_state_dict(state_dict, strict=False)
+    nets.load_state_dict(state_dict)
     nets.to(device)
 
     print(f"[Checkpoint] Loaded from {ckpt_path}")
     return nets
-
-
-def get_stats(dataset_path, horizon, max_n_episodes=10000):
-
-    state_path = os.path.join(dataset_path, 'states.npz')
-    dataset = np.load(state_path, allow_pickle=False)  # only np arrays
-    traj_lengths = dataset["traj_length"][:max_n_episodes]  # 1-D array
-    states = np.concatenate([dataset['pose'], dataset['gripper_width'][:, None]], axis=-1)
-    action_max, action_min = get_chunk_actions_stats(states[:sum(traj_lengths)], horizon, traj_lengths)
-
-    return {
-        'actions': {'min': action_min, 'max': action_max},
-        'states': {'min': states.min(0), 'max': states.max(0)},
-    }
 
 
 def compute_norm_stats(dataset) -> dict:

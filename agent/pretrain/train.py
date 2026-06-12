@@ -33,7 +33,8 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=f"pretrain-{task}-relact")
-    obs_fields = ['pose', 'gripper_width', 'force', 'gripper_force', 'targ_ixs']
+    # obs_fields = ['pose', 'gripper_width', 'force', 'gripper_force', 'targ_ixs']
+    obs_fields = ['pose', 'gripper_width', 'targ_ixs']
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, device=device)
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                           horizon_steps=16, max_n_episodes=1, device=device)
