@@ -6,14 +6,14 @@ from env import Env, URPose
 import cv2
 import random
 
-GRIP_WIDTH_MM = 8
+GRIP_WIDTH_MM = 8 # 10 # 8
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 10
+GRIP_PULLBACK_MM = 10 # 20 # 10
 
 
 def main(path=None, id=0, debug=False, meta={}):
-    fps = 20  # saving data frequency
+    fps = 10  # saving data frequency
     controller_dt = 1 / 100
 
     # Home pose
@@ -106,11 +106,11 @@ def create_metadata(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
     parser.add_argument('--path', type=str,
-                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_yiqi_test',
+                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_plugin_yiqi',
                         help='Base dataset directory')
     parser.add_argument('--id', type=int, default=None,
                         help='Episode ID (default: next available)')
-    parser.add_argument('-d', '--debug', type=bool, action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('-d', '--debug', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--rng', type=int, default=None,
                         help='Generate a random number at the start')
 
