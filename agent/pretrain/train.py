@@ -33,7 +33,7 @@ def batch_to_device(batch, device="cuda:0"):
 def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
     # obs_fields = ['pose', 'gripper_width', 'force', 'gripper_force', 'targ_ixs']
-    obs_fields = ['pose', 'gripper_width', 'targ_ixs']
+    obs_fields = ['pose', 'gripper_width']
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, device=device)
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                           horizon_steps=16, max_n_episodes=1, device=device)
@@ -120,7 +120,7 @@ def parse_args():
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--epochs', type=int, default=150)
-    parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets')
+    parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets/')
     parser.add_argument('--ckpt_dir', type=str, default='logs')
     return parser.parse_args()
 
