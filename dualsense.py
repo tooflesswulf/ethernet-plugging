@@ -74,7 +74,7 @@ DUALSENSE_STICK_Neutral = 128
 DUALSENSE_Trigger_Neutral = 0
 
 
-def scale_to_control(x, axis_scale=128, min_v=-1.0, max_v=1.0):
+def scale_to_control(x, axis_scale=128, min_v=-1.0, max_v=1.0, deadzone=5):
     """
     Normalize raw HID readings to target range.
 
@@ -87,6 +87,8 @@ def scale_to_control(x, axis_scale=128, min_v=-1.0, max_v=1.0):
     Returns:
         float: Clipped, scaled input from HID
     """
+    if abs(x) < deadzone:
+        return 0.0
     x = x / axis_scale
     x = min(max(x, min_v), max_v)
     return x
@@ -282,10 +284,8 @@ class DualSense(Device):
         print_command("Move RX/RY right joystick", "rotate arm about x/y axis, namely roll/pitch")
         print_command("Press R2 Trigger with or without R1", "rotate arm about z axis, namely yaw")
         print_command("Square button", "reset simulation")
-        print_command("Circle button (hold)", "close gripper")
-        print_command("Triangle button", "toggle arm/base mode (if applicable)")
-        print_command("Left/Right Direction Pad", "switch active arm (if multi-armed robot)")
-        print_command("Up/Down Direction Pad", "switch active robot (if multi-robot environment)")
+        print_command("Circle button", "toggle gripper")
+        print_command("Triangle button", "toggle z-force mode")
         print_command("Square", "quit")
         print("")
 
@@ -482,6 +482,19 @@ class DualSense(Device):
         drotation = np.clip(drotation, -1, 1)
 
         return dpos, drotation
+
+    last_triangle = False
+    last_circle = False
+
+    def input2action(self):
+        act = super().input2action()
+        if act is None:
+            return None
+        act['right_gripper'] = self.state.Circle and not self.last_circle
+        act['toggle_zforce'] = self.state.Triangle and not self.last_triangle
+        self.last_circle = self.state.Circle
+        self.last_triangle = self.state.Triangle
+        return act
 
 
 def parse_usb_report(state_bytes: bytearray) -> DSState:

@@ -1,0 +1,13 @@
+diffusers
+einops
+h5py
+hidapi
+imageio
+matplotlib
+opencv-python
+pyrealsense2
+robosuite
+scipy
+tqdm
+ur-rtde
+wandb

@@ -1,5 +1,3 @@
-import os, cv2, copy, time, threading
-import imageio, shutil
 from collections import namedtuple
 from typing import Literal
 import rtde_control
@@ -8,17 +6,16 @@ import numpy as np
 import threading
 import pathlib
 import h5py
-import copy
 import time
 import cv2
 import os
 
-from util import URPose, blend, episode_index
+from util import URPose, blend, episode_index, dict2hdf5
 from camera import Camera
 import wsg
 
 
-class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force'))):
+class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
     pass
 
 
@@ -51,28 +48,43 @@ class Env:
         servo_frequency=500,
         gripper_query_frequency=250,
         max_position_step=(0.008, 0.008, 0.008),
-        max_orientation_step=0.02,
+        max_orientation_step=0.05,
         lookahead_time=0.1,
         servo_gain=500,
         obs_mode: Literal['latest', 'mean'] = 'latest',
-        dataset_path = None,
-        save_interval = 0.1,
-        save_eps = 1e-3,
+        dataset_path=None,
+        save_interval=0.1,
+        save_eps=1e-3,
+        gwidth=20,
+        gforce=40,
+        gspeed=50,
+        gpullback=10,
+        metadata={}
     ):
         # ============================================================
         # Internal states
         # ============================================================
         self.t0 = None
-        self.open_width = 35
+        self.open_width = gwidth + gpullback
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
         self.gripper_state = 0  # 0=open, 1=closed
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
+        self.des_zforce = 0.
+        self.adaptive_mode = False
+
+        # ============================================================
+        # Control parameters
+        # ============================================================
+        self.g_force = gforce
+        self.g_width = gwidth
+        self.g_speed = gspeed
+        self.g_pullback = gpullback
 
         # ============================================================
         # Camera
         # ============================================================
         self.camera_crop_mode = camera_crop_mode
-        
+
         # ============================================================
         # Robot interfaces
         # ============================================================
@@ -115,7 +127,8 @@ class Env:
         self.camera_obs: list[CameraObs] = []
         self.save_eps = save_eps
         self.image_idx = 0
-          
+        self.metadata = metadata
+
     def wait_for_obs(self):
         while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
             time.sleep(0.01)
@@ -126,8 +139,9 @@ class Env:
             obs = {
                 'image': self.camera_obs[-1].image,
                 'state': {
-                    'pose': self.robot_obs[-1].actual_pose,
-                    'force': self.robot_obs[-1].actual_force,
+                    'actual_pose': self.robot_obs[-1].actual_pose,
+                    'actual_force': self.robot_obs[-1].actual_force,
+                    'filtered_force': self.robot_obs[-1].filtered_force,
                     'gripper_width': self.gripper_obs[-1].gripper_width,
                     'gripper_force': self.gripper_obs[-1].gripper_force,
                 }
@@ -137,9 +151,11 @@ class Env:
         elif self.obs_mode == 'mean':
             raise NotImplementedError("Mean obs mode not implemented yet")
 
-    def step(self, des_pose, des_gripper_state):
+    def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False):
         self.des_pose = des_pose
         self.des_gripper_state = des_gripper_state
+        self.des_zforce = des_zforce
+        self.adaptive_mode = adaptive_mode
         return self.get_obs()
 
     def start(self):
@@ -154,7 +170,7 @@ class Env:
         self.threads = [
             threading.Thread(target=self._control_loop, daemon=True,),
             threading.Thread(target=self._camera_loop, daemon=True,),
-            threading.Thread(target=self._gripper_loop, daemon=True,) ]
+            threading.Thread(target=self._gripper_loop, daemon=True,)]
         if self.dataset_path is not None:
             self.threads.append(threading.Thread(target=self._logger_loop, daemon=True,))
 
@@ -188,6 +204,8 @@ class Env:
         # ============================================================
         # Home / open gripper
         # ============================================================
+        if self.gripper.gripstate().value != 0:  # IDLE
+            self.gripper.stop().wait()
         g = self.gripper.home()
         g.ack.wait()
 
@@ -203,7 +221,7 @@ class Env:
         # ============================================================
         # Move gripper to default open width
         # ============================================================
-        g = self.gripper.move(position=self.open_width, speed=50)
+        g = self.gripper.move(position=self.open_width, speed=self.g_speed)
         g.finished.wait()
         self.gripper_state = 0
 
@@ -224,13 +242,22 @@ class Env:
         if self.dataset_path is not None:
             self.save_data()
 
+    _prev_force_err = 0.
+    force_alpha = 0.03
+    _force_filtered = np.zeros(6)
+    def filter_force(self, force):
+        self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
+        return self._force_filtered
+
+
     def _control_loop(self):
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
             actual_pose = URPose(*self.recv.getActualTCPPose())
             actual_force = URPose(*self.recv.getActualTCPForce())
+            filtered_force = URPose(*self.filter_force(actual_force))
             self.robot_obs.append(RobotObs(time=time.time() - self.t0,
-                                  actual_pose=actual_pose, actual_force=actual_force))
+                                  actual_pose=actual_pose, actual_force=actual_force, filtered_force=filtered_force))
 
             des_pose = self.des_pose
             des_gripper_state = self.des_gripper_state
@@ -241,10 +268,10 @@ class Env:
             # ----------------------------
             if gripper_state != des_gripper_state:
                 if gripper_state == 0:
-                    self.gripper.grip(force=40, width=20, speed=50)
+                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed)
                     self.gripper_state = 1
                 else:
-                    self.gripper.release(pullback=10, speed=50)
+                    self.gripper.release(pullback=self.g_pullback, speed=self.g_speed)
                     self.gripper_state = 0
 
             # ----------------------------
@@ -256,6 +283,39 @@ class Env:
                 self.max_position_step,
                 self.max_orientation_step,
             )
+
+            # ----------------------------
+            # adaptive z-force control
+            # ----------------------------
+            if self.adaptive_mode:
+                fz = filtered_force.z  # base-frame z force (N)
+                force_err = fz - self.des_zforce
+                d_force_err = (force_err - self._prev_force_err) / self.dt
+                self._prev_force_err = force_err
+
+                kp = .001
+                kd = .00001
+
+                force_z_offset = (
+                    kp * force_err
+                    + kd * d_force_err
+                )
+                # print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f}')
+                # if np.abs(force_z_offset) > self.max_position_step[2]:
+                # print('EXCEEDED SPEED LIMIT?')
+                # force_z_offset = np.clip(force_z_offset, -self.max_position_step[2], self.max_position_step[2])
+
+                command = URPose(
+                    command.x,
+                    command.y,
+                    actual_pose.z + force_z_offset,
+                    command.rx,
+                    command.ry,
+                    command.rz,
+                )
+            else:
+                self._force_z_offset = 0.
+                self._prev_force_err = 0.
 
             self.ctrl.servoL(
                 command,
@@ -286,34 +346,40 @@ class Env:
             sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
             # print('============ QUERY RESOLVED ================')
             time.sleep(sleep_dur)
-            
+
     def _logger_loop(self):
         image_path = self.epi_path / 'images'
+        time_list = []
         pose_list = []
         force_list = []
+        filt_force_list = []
         gpos_list = []
         gforce_list = []
         self.wait_for_obs()  # Ensure we have at least one obs before starting logging
-        
+
         last_pose = None
 
         image_idx = 0
+        tinit = time.time()
         while not self.stop_flag:
             t0 = time.perf_counter()
             obs = self.get_obs()
-            
-            cur_pose = np.r_[obs['state']['pose'], obs['state']['gripper_width']]
-            delta = max( abs(cur_pose - last_pose) ) if last_pose is not None else float('inf')
-            if delta < self.save_eps:
-                sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
-                time.sleep(sleep_time)
-                continue
-            last_pose = cur_pose
+
+            # Do not log if stationary
+            # cur_pose = np.r_[obs['state']['actual_pose'], obs['state']['gripper_width']]
+            # delta = max(abs(cur_pose - last_pose)) if last_pose is not None else float('inf')
+            # if delta < self.save_eps:
+            #     sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
+            #     time.sleep(sleep_time)
+            #     continue
+            # last_pose = cur_pose
 
             im_path = pathlib.Path(image_path) / f'{image_idx:06d}.png'
             cv2.imwrite(im_path, obs['image'])
-            pose_list.append(obs['state']['pose'])
-            force_list.append(obs['state']['force'])
+            time_list.append(time.time() - tinit)
+            pose_list.append(obs['state']['actual_pose'])
+            force_list.append(obs['state']['actual_force'])
+            filt_force_list.append(obs['state']['filtered_force'])
             gpos_list.append(obs['state']['gripper_width'])
             gforce_list.append(obs['state']['gripper_force'])
             image_idx += 1
@@ -324,10 +390,14 @@ class Env:
         # IMPORTANT: logger must exit via stop_flag for data to be saved
         np.savez_compressed(
             self.epi_path / 'states.npz',
+            time=np.array(time_list),
             pose=np.array(pose_list),
-            force=np.array(force_list),
+            force=np.array(filt_force_list),
+            force_raw=np.array(force_list),
             gripper_width=np.array(gpos_list),
             gripper_force=np.array(gforce_list),
+            metadata=self.metadata,
+            allow_pickle=True
         )
 
     def save_data(self):
@@ -345,4 +415,8 @@ class Env:
 
             f.create_dataset('camera_obs/time', data=[obs.time for obs in self.camera_obs])
             f.create_dataset('camera_obs/image_bgr', data=[obs.image for obs in self.camera_obs])
+
+            m = f.create_group('metadata')
+            dict2hdf5(m, self.metadata)
+
         print(f'Data saved to {path}')
