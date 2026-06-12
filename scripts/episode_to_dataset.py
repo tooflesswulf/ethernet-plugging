@@ -31,7 +31,6 @@ if __name__ == '__main__':
 
     save_img_dir, save_state_path = os.path.join(save_dir, 'images'), os.path.join(save_dir, 'states.npz')
 
-    episodes = 31
     total_images, total_poses, total_widths, total_g_forces, total_forces, lens = [], [], [], [], [], []
 
     for ep_str in sorted(os.listdir(path)):
