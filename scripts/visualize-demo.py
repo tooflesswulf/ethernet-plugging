@@ -26,7 +26,7 @@ def main(args):
         cobs = f['camera_obs']
         cdat = {k: np.array(cobs[k]) for k in cobs.keys()}
 
-        rng = np.array(f['metadata/rng'])
+        # rng = np.array(f['metadata/rng'])
 
     smoothed = ewma(rdat['actual_force'][:, 2], alpha=args.alpha)
     delta = args.tx
@@ -51,7 +51,7 @@ def main(args):
     ri0 = np.abs(rdat['time'] - t0).argmin()
     gi0 = np.abs(gdat['time'] - t0).argmin()
     img_artist = ax_img.imshow(cdat['image_bgr'][i0][:, :, ::-1])
-    ax_img.set_title(f'Target={rng + 1}')
+    ax_img.set_title(f'Pickup Desk')
 
     line_fraw, = ax1.plot(rdat['time'][ri0 - delt_r:ri0], rdat['actual_force'][ri0 - delt_r:ri0, 2])
     line_fsmooth, = ax1.plot(rdat['time'][ri0 - delt_r:ri0], smoothed[ri0 - delt_r:ri0])
