@@ -1,10 +1,9 @@
-import numpy as np
 from tqdm import tqdm
+import numpy as np
 import argparse
-import os
-import wandb
-import torch
+import pathlib
 import torch.nn as nn
+import torch
 
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
@@ -31,8 +30,8 @@ def batch_to_device(batch, device="cuda:0"):
     return type(batch)(*vals)
 
 
-def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
-    logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=f"pretrain-{task}-relact")
+def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
+    logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
     # obs_fields = ['pose', 'gripper_width', 'force', 'gripper_force', 'targ_ixs']
     obs_fields = ['pose', 'gripper_width', 'targ_ixs']
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, device=device)
@@ -117,16 +116,32 @@ def train(task, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Training')
+    parser.add_argument('--name', type=str, default=None)
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--task', type=str, default='ethernet_plug_v2_dataset')
     parser.add_argument('--epochs', type=int, default=150)
     parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets')
-    parser.add_argument('--ckpt_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/ckpts')
+    parser.add_argument('--ckpt_dir', type=str, default='logs')
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     args = parse_args()
-    dataset_path, ckpt_dir = os.path.join(args.data_dir, args.task), os.path.join(args.ckpt_dir, args.task)
-    train(args.task, dataset_path, ckpt_dir, args.epochs, use_wandb=args.use_wandb, device=args.device)
+    if args.name is None:
+        args.name = pathlib.Path(args.ckpt_dir).stem
+        print('Name not given. Assuming name for logging and wandb:', args.name)
+    dataset_path = pathlib.Path(args.data_dir)
+    ckpt_path = pathlib.Path(args.ckpt_dir)
+
+    # if the ckpt_path already exists, save to a subdirectory with the name of the run (e.g. logs/pretrain-ethernet-unplug-red-topdown)
+    if ckpt_path.exists():
+        print(f'Checkpoint directory {ckpt_path} already exists. Saving to {ckpt_path / args.name}..')
+        ckpt_path = ckpt_path / args.name
+
+        # if the new ckpt_path also exists, raise an error to avoid overwriting existing checkpoints
+        if ckpt_path.exists():
+            print(f'Checkpoint directory {ckpt_path} already exists. Please specify a different name or delete the existing directory.')
+            exit(1)
+
+    print('Saving checkpoints to:', ckpt_path)
+    train(args.name, dataset_path, ckpt_path, args.epochs, use_wandb=args.use_wandb, device=args.device)
