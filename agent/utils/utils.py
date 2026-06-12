@@ -31,6 +31,10 @@ def save_checkpoint(
     save_path = Path(save_path)
     save_path.mkdir(parents=True, exist_ok=True)
 
+    # Architecture config (e.g. DiffusionPolicy.config) so checkpoints are
+    # self-describing and loadable via DiffusionPolicy.from_checkpoint.
+    config = getattr(nets, 'config', None)
+
     if epoch is not None:
         # --- Mid-training checkpoint ---
         # Deep-copy nets so we can apply EMA to the copy without touching
@@ -39,7 +43,7 @@ def save_checkpoint(
         ema.copy_to(nets_copy.parameters())
 
         filename = save_path / f"ckpt_ep_{epoch}.pth"
-        torch.save({"epoch": epoch, "model_state_dict": nets_copy.state_dict()}, filename)
+        torch.save({"epoch": epoch, "config": config, "model_state_dict": nets_copy.state_dict()}, filename)
         print(f"[Checkpoint] Epoch {epoch} saved → {filename}")
 
     else:
@@ -48,7 +52,7 @@ def save_checkpoint(
         ema.copy_to(nets.parameters())
 
         filename = save_path / f"ckpt_final.pth"
-        torch.save({"model_state_dict": nets.state_dict()}, filename)
+        torch.save({"config": config, "model_state_dict": nets.state_dict()}, filename)
         print(f"[Checkpoint] Final model saved → {filename}")
 
 
