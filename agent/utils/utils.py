@@ -3,9 +3,11 @@ import torch
 from PIL import Image
 import torch.nn as nn
 from pathlib import Path
-import os, copy, numpy as np
+import os
+import copy
+import numpy as np
 from diffusers.training_utils import EMAModel
-from agent.dataset.sequence import pose2actions, get_chunk_actions_stats
+
 
 def save_checkpoint(
     nets: nn.ModuleDict,
@@ -29,6 +31,10 @@ def save_checkpoint(
     save_path = Path(save_path)
     save_path.mkdir(parents=True, exist_ok=True)
 
+    # Architecture config (e.g. DiffusionPolicy.config) so checkpoints are
+    # self-describing and loadable via DiffusionPolicy.from_checkpoint.
+    config = getattr(nets, 'config', None)
+
     if epoch is not None:
         # --- Mid-training checkpoint ---
         # Deep-copy nets so we can apply EMA to the copy without touching
@@ -37,7 +43,7 @@ def save_checkpoint(
         ema.copy_to(nets_copy.parameters())
 
         filename = save_path / f"ckpt_ep_{epoch}.pth"
-        torch.save({"epoch": epoch, "model_state_dict": nets_copy.state_dict()}, filename)
+        torch.save({"epoch": epoch, "config": config, "model_state_dict": nets_copy.state_dict()}, filename)
         print(f"[Checkpoint] Epoch {epoch} saved → {filename}")
 
     else:
@@ -46,9 +52,10 @@ def save_checkpoint(
         ema.copy_to(nets.parameters())
 
         filename = save_path / f"ckpt_final.pth"
-        torch.save({"model_state_dict": nets.state_dict()}, filename)
+        torch.save({"config": config, "model_state_dict": nets.state_dict()}, filename)
         print(f"[Checkpoint] Final model saved → {filename}")
-    
+
+
 def load_checkpoint(
     nets: nn.ModuleDict,
     ckpt_path: str | Path,
@@ -76,18 +83,51 @@ def load_checkpoint(
     print(f"[Checkpoint] Loaded from {ckpt_path}")
     return nets
 
-def get_stats(dataset_path, horizon, max_n_episodes=10000 ):
-    
-    state_path = os.path.join(dataset_path, 'states.npz')
-    dataset = np.load(state_path, allow_pickle=False)  # only np arrays
-    traj_lengths = dataset["traj_length"][:max_n_episodes]  # 1-D array
-    states = np.concatenate([dataset['pose'], dataset['gripper_width'][:, None] ], axis = -1)
-    action_max, action_min = get_chunk_actions_stats(states[:sum(traj_lengths)], horizon, traj_lengths )
 
+def compute_norm_stats(dataset) -> dict:
+    """
+    Compute min/max normalization statistics from a StitchedSequenceDataset.
+
+    Stats are computed over the precomputed action chunks (so they reflect
+    the dataset's action_mode: absolute/local_delta/global_delta) and over
+    the stitched observation array.
+
+    Args:
+        dataset: A StitchedSequenceDataset with .actions (num_samples, horizon,
+                 action_dim) and .obs (N, obs_dim) populated.
+
+    Returns:
+        {'actions': {'min': (action_dim,), 'max': (action_dim,)},
+         'states':  {'min': (obs_dim,),    'max': (obs_dim,)}}
+    """
+    actions = np.asarray(dataset.actions)
+    flat_actions = actions.reshape(-1, actions.shape[-1])
+    obs = dataset.obs.detach().cpu().numpy()
     return {
-        'actions': {'min': action_min, 'max': action_max},
-        'states':  {'min': states.min(0), 'max': states.max(0)},
+        'actions': {'min': flat_actions.min(0), 'max': flat_actions.max(0)},
+        'states': {'min': obs.min(0), 'max': obs.max(0)},
     }
+
+
+def normalize(arr: np.ndarray, stats: dict) -> np.ndarray:
+    """
+    Normalize a numpy array to [-1, 1] using precomputed min/max stats.
+    Dimensions where max == min are left unchanged.
+
+    Args:
+        arr:   Array to normalize.
+        stats: Dict with keys 'min' and 'max' (scalars or arrays matching arr).
+
+    Returns:
+        Normalized array with same shape as input.
+    """
+    min_val = np.array(stats['min'])
+    max_val = np.array(stats['max'])
+
+    range_val = max_val - min_val
+    safe_range = np.where(range_val == 0, 1.0, range_val)
+
+    return np.where(range_val == 0, arr, 2 * (arr - min_val) / safe_range - 1)
 
 
 def denormalize(arr: np.ndarray, stats: dict) -> np.ndarray:
@@ -107,12 +147,12 @@ def denormalize(arr: np.ndarray, stats: dict) -> np.ndarray:
 
     range_val = max_val - min_val
 
-    denormalized = ((arr + 1) / 2 )* range_val + min_val
+    denormalized = ((arr + 1) / 2) * range_val + min_val
 
     return denormalized
+
 
 def resize_image(np_array, new_size=(128, 128)):
     img = Image.fromarray(np_array)
     img = img.resize(new_size, )
     return np.array(img)
-

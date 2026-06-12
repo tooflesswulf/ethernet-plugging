@@ -110,7 +110,7 @@ if __name__ == "__main__":
                         help='Base dataset directory')
     parser.add_argument('--id', type=int, default=None,
                         help='Episode ID (default: next available)')
-    parser.add_argument('-d', '--debug', type=bool, action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('-d', '--debug', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--rng', type=int, default=None,
                         help='Generate a random number at the start')
 
