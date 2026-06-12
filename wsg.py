@@ -183,6 +183,11 @@ class WSG:
 
         return out
 
+    def wait_idle(self):
+        if self._pending_action is None:
+            return
+        self._pending_action[1]['fin'].wait()
+
     def home(self):
         return self.send(b'HOME()\n')
 
@@ -212,6 +217,9 @@ class WSG:
 
     def position(self):
         return self.send(b'POS?\n')
+
+    def gripstate(self):
+        return self.send(b'GRIPSTATE?\n')
 
     def set_pwt(self, value):
         return self.send(f'PWT={value}\n'.encode())
