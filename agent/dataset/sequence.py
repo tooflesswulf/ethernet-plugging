@@ -1,25 +1,24 @@
-
+from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
+import torchvision.transforms.functional as F
 from collections import namedtuple
 from typing import Literal
 from PIL import Image
 from tqdm import tqdm
-from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from einops import rearrange, repeat
 import numpy as np
 import torch
 import pathlib
-import os
-# from agent.utils.utils import get_chunk_actions
+import h5py
 
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta']
 
 
-def get_images(dir_path, total_num_steps=None, img_size=128):
-    N = len(os.listdir(dir_path)) if total_num_steps is None else min(len(os.listdir(dir_path)), total_num_steps)
+def get_images(image_list, img_size=128):
+    # N = len(os.listdir(dir_path)) if total_num_steps is None else min(len(os.listdir(dir_path)), total_num_steps)
     images = []
-    for i in tqdm(range(N), desc="loading images to RAM"):
-        img = Image.open(os.path.join(dir_path, f'{i}.png')).resize((img_size, img_size))
+    for img_path in tqdm(image_list, desc="loading images to RAM"):
+        img = Image.open(img_path).resize((img_size, img_size))
         images.append(np.array(img))
     return np.array(images)
 
@@ -62,25 +61,44 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.dataset_path = pathlib.Path(dataset_path)
 
         # Load dataset to device
-        img_dir = self.dataset_path / 'images'
-        state_path = self.dataset_path / 'states.npz'
-        dataset = np.load(state_path, allow_pickle=False)  # only np arrays
-        traj_lengths = dataset['traj_length'][:max_n_episodes]  # 1-D array
-        total_num_steps = np.sum(traj_lengths)
-        obs = np.c_[*[dataset[key] for key in obs_fields]]  # Concat along columns, (total_num_steps, obs_dim)
+        need_resize = False
+        with h5py.File(self.dataset_path / 'dataset.h5', 'r') as f:
+            traj_lengths = f['metadata/length'][:max_n_episodes]  # 1-D array
+            total_num_steps = np.sum(traj_lengths)
 
-        # Set up indices for sampling
+            # Observations
+            all_obs = []
+            for key in obs_fields:
+                if key.startswith('metadata/'):
+                    # Metadata fields need to be expanded to per-timestep values for easier indexing later (e.g. rng)
+                    meta_vals = np.array(f[key][:max_n_episodes])
+                    vals_rep = [np.repeat(val[None], traj_len, axis=0)
+                                for val, traj_len in zip(meta_vals, traj_lengths)]
+                    all_obs.append(np.concatenate(vals_rep, axis=0))
+                else:
+                    all_obs.append(f[key][:total_num_steps])
+            all_obs = np.c_[*all_obs]
+
+            # Actions
+            poses = np.array(f['pose'][:total_num_steps])  # (N, 6)
+            g_widths = np.array(f['gripper_width'][:total_num_steps])  # (N,)
+
+            if f['images'].attrs['stored_as'] == 'image':
+                need_resize = True
+                image_list = np.array(f['images'][:total_num_steps]).transpose(0, 3, 1, 2)  # (N, C, H, W)
+            elif f['images'].attrs['stored_as'] == 'filepath':
+                image_path_list = [self.dataset_path / im.decode() for im in f['images'][:total_num_steps]]
+                image_list = get_images(image_path_list).transpose(0, 3, 1, 2)  # (N, C, H, W)
+
+        # Store dataset in memory for fast sampling during training
         self.indices = self.make_indices(traj_lengths, horizon_steps)
+        self.obs = torch.from_numpy(all_obs).float().to(device)  # (N, obs_dim)
+        self.images = torch.from_numpy(image_list).to(device)  # (N, C, H, W)
+        if need_resize:
+            self.images = F.resize(self.images, size=(128, 128))
+        self._precompute_actions(poses, g_widths)
 
-        # Extract states and actions up to max_n_episodes
-        self.poses = dataset['pose'][:total_num_steps]  # (N, 6)
-        self.g_widths = dataset['gripper_width'][:total_num_steps]  # (N,)
-        self.obs = torch.from_numpy(obs[:total_num_steps]).float().to(device)  # (N, obs_dim)
-        self.images = torch.from_numpy(get_images(img_dir, total_num_steps)).to(device)  # (N, H, W, C)
         self.obs_dim = self.obs.shape[1]
-
-        self.g_thr = (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
-        self._precompute_actions()  # precompute all actions for faster sampling during training
         self.act_dim = self.actions.shape[-1]
 
     def __len__(self):
@@ -101,7 +119,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                           for t in reversed(range(self.cond_steps))])  # more recent is at the end, # cond_steps x dim
         images = torch.stack([self.images[max(start - t, ep_start)]
                              for t in reversed(range(self.img_cond_steps))])  # img_cond_steps x H x W x C
-        conditions = {'state': obs, 'rgb': rearrange(images, ' T H W C -> T C H W') / 255.0}
+        conditions = {'state': obs, 'rgb': images / 255.0}
 
         batch = DataBatch(self.actions[idx], conditions)
         if self.transform is not None:
@@ -123,7 +141,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             traj_start += traj_length
         return np.array(indices)
 
-    def _precompute_actions(self):
+    def _precompute_actions(self, poses, g_widths):
+        g_thr = (np.amax(g_widths) + np.amin(g_widths)) / 2  # threshold for binary gripper action
+
         actions = []
         for i in tqdm(range(len(self)), desc='precomputing actions'):
             start, ep_start, ep_end = self.indices[i]
@@ -132,11 +152,11 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 # TODO: replication pad if end out of ep_end
                 raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
 
-            g_width = self.g_widths[start:end]
-            poses = self.poses[start:end]
+            g_width = g_widths[start:end]
+            pose = poses[start:end]
 
-            g_action = self.gripper_action(g_width, threshold=self.g_thr)
-            pose_action = self.pose_action(poses)
+            g_action = self.gripper_action(g_width, threshold=g_thr)
+            pose_action = self.pose_action(pose)
             actions.append(np.c_[pose_action, g_action])
         self.actions = np.array(actions)
         return self.actions
@@ -177,10 +197,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
 
 if __name__ == '__main__':
-    task = 'ethernet_unplug'
-    dataset_dir = '/zfsauton/scratch/yiqiw2/100%/datasets'
-    dataset_path = os.path.join(dataset_dir, task)
-    dataset = StitchedSequenceDataset(dataset_path)
+    dataset_dir = '/home/albertxu/data/ethernet_plug_v3_dataset'
+    dataset = StitchedSequenceDataset(dataset_dir, obs_fields=['pose', 'gripper_width', 'metadata/rng'])
 
     for _ in dataset:
+        print(_.actions.shape, _.conditions['state'].shape, _.conditions['rgb'].shape)
         break
