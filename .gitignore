@@ -1,8 +1,7 @@
 .vscode/
 __pycache__/
 wandb/
-logs/
-logs_plugin_local_delta/
+logs*/
 
 *.mp4
 .DS_Store

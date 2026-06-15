@@ -9,7 +9,7 @@ import random
 GRIP_WIDTH_MM = 8  # 10 # 8
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 10  # 20 # 10
+GRIP_PULLBACK_MM = 5  # 20 # 10
 
 
 class TeleopMetadata:
@@ -104,8 +104,8 @@ def main(path=None, meta: TeleopMetadata = None, debug=False):
 
         # print(f"pos: {obs['state']['gripper_width']:7.2f} mm | force: {obs['state']['gripper_force']:7.2f} N" +
         #       f" | eef force: [{ff.x:5.2f}, {ff.y:5.2f}, {ff.z:5.2f}, {ff.rx:5.2f}, {ff.ry:5.2f}, {ff.rz:5.2f}]", end='\r')
-        print(
-            f"mode: {iface.adaptive_mode}, des zforce: {iface.target_zforce:7.2f} N | eef zforce: {obs['state']['filtered_force'].z:7.2f} N", end='\r')
+        # print(f"mode: {iface.adaptive_mode}, des zforce: {iface.target_zforce:7.2f} N | eef zforce: {obs['state']['filtered_force'].z:7.2f} N", end='\r')
+        print(f"g_width: {obs['state']['gripper_width']:7.2f}", end='\r')
 
         cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)
@@ -129,7 +129,7 @@ if __name__ == "__main__":
     meta.add_args(parser)
     args = parser.parse_args()
 
-    if args.id is None:
+    if args.id is None and not args.debug:
         indices = [
             int(d.removeprefix('episode'))
             for d in os.listdir(args.path)
@@ -139,6 +139,7 @@ if __name__ == "__main__":
         print(f'Auto-selected episode ID: {args.id}')
 
     meta.store_args(args)
-    print(f"Saving data to: {args.path}, Episode {args.id}")
+    if not args.debug:
+        print(f"Saving data to: {args.path}, Episode {args.id}")
     os.makedirs(args.path, exist_ok=True)
     main(path=args.path, debug=args.debug, meta=meta)

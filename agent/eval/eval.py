@@ -19,7 +19,7 @@ from agent.utils.utils import resize_image
 GRIP_WIDTH_MM = 8
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 10
+GRIP_PULLBACK_MM = 5
 
 
 def get_actions(policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, curr_gripper_width):
@@ -40,22 +40,23 @@ def get_actions(policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, c
     return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
 
 
-def wait_for_circle(env, iface, disable=False):
+def wait_for_circle(env, iface, close_gripper=False):
     freq = 250
     print('Waiting the circle ...')
-    while True and not disable:
+    while True:
         flag = iface.update(1 / freq)
         if flag == -1:
             raise RuntimeError('Square pressed, exiting.')
 
         des_pose = URPose(*iface.target_pose)
         des_gripper = iface.gripper_state
-        obs = env.step(
-            des_pose=des_pose,
-            des_gripper_state=des_gripper,
-            des_zforce=iface.target_zforce,
-            adaptive_mode=iface.adaptive_mode,
-        )
+        if close_gripper:
+            obs = env.step(
+                des_pose=des_pose,
+                des_gripper_state=des_gripper,
+                des_zforce=iface.target_zforce,
+                adaptive_mode=iface.adaptive_mode,
+            )
         if des_gripper == 1:
             break
         time.sleep(1 / 250)
@@ -93,7 +94,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
     env.reset(home_pose)
     env.start()  # start threads
 
-    wait_for_circle(env, iface, disable=False)
+    wait_for_circle(env, iface, close_gripper=True)
     print("Starting evaluation loop...")
 
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
@@ -136,6 +137,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
                 sleep_time = 0.2
                 time.sleep(sleep_time)
                 save_frames.append(obs['image'].astype(np.uint8))
+            obs_deque.append(env.get_obs())
 
     # save video
     if log_dir is not None and save_frames:
