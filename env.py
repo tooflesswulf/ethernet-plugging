@@ -300,10 +300,6 @@ class Env:
                     kp * force_err
                     + kd * d_force_err
                 )
-                # print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f}')
-                # if np.abs(force_z_offset) > self.max_position_step[2]:
-                # print('EXCEEDED SPEED LIMIT?')
-                # force_z_offset = np.clip(force_z_offset, -self.max_position_step[2], self.max_position_step[2])
 
                 command = URPose(
                     command.x,
