@@ -1,4 +1,3 @@
 
 python agent/eval/eval.py \
-    --dataset_dir '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset' \
-    --ckpt_dir '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ckpts' 
+    --ckpt '//home/atkesonlab4/Desktop/YiqiProject/100%_Project/ckpts/yiqi_plugin_umi/h16/ckpt_ep_90.pth' 

@@ -95,7 +95,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
     target_ix = 0
     g_thr = 15
 
-    wait_for_circle(env, iface)
+    # wait_for_circle(env, iface)
     print("Starting evaluation loop...")
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
     save_frames = []
@@ -112,7 +112,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
         curr_pose, curr_gripper = agent_poses[-1], agent_gwidth[-1][0]
         # raw observations: normalization happens inside the policy
         # agent_poses = np.c_[agent_poses, agent_gwidth, agent_force, agent_gforce, target_ix]
-        agent_poses = np.c_[agent_poses, agent_gwidth, target_ix]
+        agent_poses = np.c_[agent_poses, agent_gwidth]
 
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
         nagent_poses = torch.from_numpy(agent_poses).to(device, dtype=torch.float32)  # txd
@@ -133,7 +133,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
                 )
 
                 obs_deque.append(obs)
-                sleep_time = 0.1
+                sleep_time = 0.2
                 time.sleep(sleep_time)
                 save_frames.append(obs['image'].astype(np.uint8))
 
