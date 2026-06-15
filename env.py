@@ -65,7 +65,7 @@ class Env:
         # Internal states
         # ============================================================
         self.t0 = None
-        self.open_width = gwidth + gpullback
+        self.open_width = gwidth + 2*gpullback
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
         self.gripper_state = 0  # 0=open, 1=closed
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
