@@ -1,3 +1,4 @@
+from scipy.spatial.transform import Rotation as R, Slerp
 from collections import namedtuple
 from typing import Literal
 import rtde_control
@@ -10,7 +11,7 @@ import time
 import cv2
 import os
 
-from util import URPose, blend, episode_index, dict2hdf5
+from util import URPose, blend, slerp, episode_index, dict2hdf5
 from camera import Camera
 import wsg
 
@@ -45,6 +46,7 @@ class Env:
         robot_ip="192.168.0.100",  # could be 101 or 100 depending on your setup
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,  # crop on the right half of the image to focus on the workspace
+        control_frequency=20,
         servo_frequency=500,
         gripper_query_frequency=250,
         max_position_step=(0.008, 0.008, 0.008),
@@ -71,6 +73,7 @@ class Env:
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
         self.des_zforce = 0.
         self.adaptive_mode = False
+        self.last_step_t = time.perf_counter()
 
         # ============================================================
         # Control parameters
@@ -98,6 +101,7 @@ class Env:
         # ============================================================
         # Servo parameters
         # ============================================================
+        self.input_frequency = control_frequency
         self.servo_frequency = servo_frequency
         self.dt = 1.0 / servo_frequency
         self.max_position_step = np.array(max_position_step)
@@ -152,6 +156,9 @@ class Env:
             raise NotImplementedError("Mean obs mode not implemented yet")
 
     def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False):
+        self.last_step_t = time.perf_counter()
+        self.last_step_end = self.des_pose
+
         self.des_pose = des_pose
         self.des_gripper_state = des_gripper_state
         self.des_zforce = des_zforce
@@ -214,6 +221,7 @@ class Env:
         # ============================================================
         self.ctrl.moveL(home_pose, 0.1, 0.1)
         self.des_pose = home_pose  # Ensure robot doesn't move after homing
+        self.last_step_t = -1
 
         # Wait for gripper homing to finish
         g.finished.wait()
@@ -242,22 +250,66 @@ class Env:
         if self.dataset_path is not None:
             self.save_data()
 
-    _prev_force_err = 0.
+    def init_period(self):
+        self.period_init = time.perf_counter()
+
+    def wait_period(self):
+        """
+        Waits for a time corresponding to `input_frequency`. Expects `init_period()` to be called at the top of the loop.
+        """
+        delta = time.perf_counter() - self.period_init
+        sleep_time = max(0, 1/self.input_frequency - delta)
+        time.sleep(sleep_time)
+
+    def interpolate(self):
+        t = time.perf_counter() - self.last_step_t
+        perc = min(1, t * self.input_frequency)
+
+        actual_pose = self.last_step_end
+        des_pose = self.des_pose
+
+        interp_position = (
+            actual_pose.x + perc * (des_pose.x - actual_pose.x),
+            actual_pose.y + perc * (des_pose.y - actual_pose.y),
+            actual_pose.z + perc * (des_pose.z - actual_pose.z),
+        )
+        R1 = R.from_rotvec([actual_pose.rx, actual_pose.ry, actual_pose.rz])
+        R2 = R.from_rotvec([des_pose.rx, des_pose.ry, des_pose.rz])
+        delta_theta = (R1.inv() * R2).magnitude()
+        if delta_theta < 1e-6:
+            interp_orientation = R1.as_rotvec()
+        else:
+            interp_orientation = slerp(R1, R2, perc).as_rotvec()
+        return URPose(*interp_position, *interp_orientation)
+
     force_alpha = 0.03
     _force_filtered = np.zeros(6)
-
     def filter_force(self, force):
         self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
         return self._force_filtered
 
+    _prev_force_err = 0.
+    def zforce_pid(self, actual_pose, filtered_force):
+        kp = .001
+        kd = .00001
+        fz = filtered_force.z
+        force_err = fz - self.des_zforce
+        d_force_err = (force_err - self._prev_force_err) / self.dt
+        self._prev_force_err = force_err
+
+        zdes = actual_pose.z + kp * force_err + kd * d_force_err
+        return zdes
+
     def _control_loop(self):
+        debug = []
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
             actual_pose = URPose(*self.recv.getActualTCPPose())
             actual_force = URPose(*self.recv.getActualTCPForce())
             filtered_force = URPose(*self.filter_force(actual_force))
             self.robot_obs.append(RobotObs(time=time.time() - self.t0,
-                                  actual_pose=actual_pose, actual_force=actual_force, filtered_force=filtered_force))
+                                  actual_pose=actual_pose, actual_force=actual_force,
+                                  filtered_force=filtered_force))
 
             des_pose = self.des_pose
             des_gripper_state = self.des_gripper_state
@@ -277,6 +329,10 @@ class Env:
             # ----------------------------
             # blend + servo
             # ----------------------------
+            if self.last_step_t > 0:
+                # Received at least 1 input
+                des_pose = self.interpolate()
+            debug.append([[*des_pose], [*actual_pose]])
             command = blend(
                 actual_pose,
                 des_pose,
@@ -288,29 +344,8 @@ class Env:
             # adaptive z-force control
             # ----------------------------
             if self.adaptive_mode:
-                fz = filtered_force.z  # base-frame z force (N)
-                force_err = fz - self.des_zforce
-                d_force_err = (force_err - self._prev_force_err) / self.dt
-                self._prev_force_err = force_err
-
-                kp = .001
-                kd = .00001
-
-                force_z_offset = (
-                    kp * force_err
-                    + kd * d_force_err
-                )
-
-                command = URPose(
-                    command.x,
-                    command.y,
-                    actual_pose.z + force_z_offset,
-                    command.rx,
-                    command.ry,
-                    command.rz,
-                )
+                command = command._replace(z=self.zforce_pid(actual_pose, filtered_force))
             else:
-                self._force_z_offset = 0.
                 self._prev_force_err = 0.
 
             self.ctrl.servoL(
@@ -323,6 +358,7 @@ class Env:
             )
 
             self.ctrl.waitPeriod(t_start)
+        np.save('debuug.npy', debug)
 
     def _camera_loop(self):
         while not self.stop_flag:
