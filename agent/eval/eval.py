@@ -50,18 +50,17 @@ def wait_for_circle(env, iface, disable=False):
 
         des_pose = URPose(*iface.target_pose)
         des_gripper = iface.gripper_state
-        # obs = env.step(
-        #     des_pose=des_pose,
-        #     des_gripper_state=des_gripper,
-        #     des_zforce=iface.target_zforce,
-        #     adaptive_mode=iface.adaptive_mode,
-        # )
+        obs = env.step(
+            des_pose=des_pose,
+            des_gripper_state=des_gripper,
+            des_zforce=iface.target_zforce,
+            adaptive_mode=iface.adaptive_mode,
+        )
         if des_gripper == 1:
             break
         time.sleep(1 / 250)
 
     time.sleep(0.1)
-
     env.gripper.wait_idle()
     time.sleep(1)
 
@@ -113,7 +112,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
         curr_pose, curr_gripper = obs_state[-1], agent_gwidth[-1][0]
         # raw observations: normalization happens inside the policy
         # agent_poses = np.c_[agent_poses, agent_gwidth, agent_force, agent_gforce, target_ix]
-        obs_state = np.c_[obs_state, agent_gwidth]
+        obs_state = np.c_[obs_state, agent_gwidth, agent_force]
 
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
         nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)  # txd
