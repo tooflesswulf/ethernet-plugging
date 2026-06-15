@@ -34,7 +34,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
     action_mode = 'umi'
     obs_fields = ['pose', 'gripper_width']
-    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16,  action_mode=action_mode, device=device)
+    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, action_mode=action_mode, device=device)
   
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                           horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
