@@ -108,21 +108,21 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
 
         images = np.stack([resize_image(x['image'], (img_size, img_size), flip_channel=True) for x in obs_deque])
         
-        agent_poses = np.stack([x['state']['actual_pose'] for x in obs_deque])
+        obs_state = np.stack([x['state']['actual_pose'] for x in obs_deque])
         agent_gwidth = np.stack([[x['state']['gripper_width']] for x in obs_deque])
         agent_force = np.stack([x['state']['actual_force'] for x in obs_deque])
         agent_gforce = np.stack([[x['state']['gripper_force']] for x in obs_deque])
 
-        curr_pose, curr_gripper = agent_poses[-1], agent_gwidth[-1][0]
+        curr_pose, curr_gripper = obs_state[-1], agent_gwidth[-1][0]
         # raw observations: normalization happens inside the policy
         # agent_poses = np.c_[agent_poses, agent_gwidth, agent_force, agent_gforce, target_ix]
-        agent_poses = np.c_[agent_poses, agent_gwidth]
+        obs_state = np.c_[obs_state, agent_gwidth]
 
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
-        nagent_poses = torch.from_numpy(agent_poses).to(device, dtype=torch.float32)  # txd
+        nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)  # txd
         with torch.no_grad():
             des_poses, des_widths = get_actions(
-                policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, curr_gripper)
+                policy, num_diffusion_iters, nimages, nobs_state, curr_pose, curr_gripper)
             start = obs_horizon - 1
             end = start + action_horizon
             des_poses, des_widths = des_poses[start:end], des_widths[start:end]
