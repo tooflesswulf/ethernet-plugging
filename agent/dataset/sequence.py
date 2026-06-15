@@ -159,7 +159,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         return np.array([delta.as_exp_coords() for delta in deltas])
     
     def _pose_action_umi(self, poses):
-        # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
+        # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and rotation
         delta_xyz = poses[1:, :3] - poses[:1, :3]; rotations = [ R.from_rotvec(rxyz) for rxyz in poses[:, 3:] ]
         delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
      
