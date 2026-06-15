@@ -40,26 +40,27 @@ def get_actions(policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, c
     return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
 
 
-def wait_for_circle(env, iface):
+def wait_for_circle(env, iface, disable=False):
     freq = 250
-    while True:
+    while True and not disable:
         flag = iface.update(1 / freq)
         if flag == -1:
             raise RuntimeError('Square pressed, exiting.')
 
         des_pose = URPose(*iface.target_pose)
         des_gripper = iface.gripper_state
-        obs = env.step(
-            des_pose=des_pose,
-            des_gripper_state=des_gripper,
-            des_zforce=iface.target_zforce,
-            adaptive_mode=iface.adaptive_mode,
-        )
+        # obs = env.step(
+        #     des_pose=des_pose,
+        #     des_gripper_state=des_gripper,
+        #     des_zforce=iface.target_zforce,
+        #     adaptive_mode=iface.adaptive_mode,
+        # )
         if des_gripper == 1:
             break
         time.sleep(1 / 250)
 
     time.sleep(0.1)
+    
     env.gripper.wait_idle()
     time.sleep(1)
 
@@ -95,7 +96,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
     target_ix = 0
     g_thr = 15
 
-    # wait_for_circle(env, iface)
+    wait_for_circle(env, iface, disable=False)
     print("Starting evaluation loop...")
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
     save_frames = []
