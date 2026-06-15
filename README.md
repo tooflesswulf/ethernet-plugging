@@ -122,7 +122,7 @@ Navigate to the **Move** panel (top-left, Local mode only). Two options:
 
 ## Teleoperation & Training
 ### Teleoperation
-First, edit `teleoperation.py:TeleopMetadata` to customize the logged teleoperation data (e.g. generate a random target port). Then teleoperate the robot with `teleoperation.py --path /path/to/data/dir`.
+First, edit `teleoperation.py:TeleopMetadata` to customize the logged teleoperation data (e.g. generate a random target port). Also make sure the gripper settings `GRIP_*` are suited for the demonstration. Then teleoperate the robot with `teleoperation.py --path /path/to/data/dir`.
 
 After collecting all the data episodes, collect them into one dataset using `scripts/rawdata_to_dataset.py`. If the raw data was named `ethernet_plugging`, this will save a new dataset named `ethernet_plugging_dataset`.
 ```
@@ -136,3 +136,6 @@ options:
 
 ### Training
 Train using `python agent/pretrain/train.py`. The action mode & observation fields can be changed by editing the strings at the top of `train()`.
+
+### Evaluation
+`python agent/eval/eval.py --ckpt path/to/file.ckpt`. Make sure `obs_state` includes the right fields in the right order, and the `GRIP_*` settings match the teleoperation data.
