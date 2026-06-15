@@ -119,3 +119,23 @@ Navigate to the **Move** panel (top-left, Local mode only). Two options:
 | **Screen controls**      | Use the virtual buttons on the left side of the screen                                                     |
 | **Freedrive (screen)**   | Click **Freedrive** at the bottom → panel appears on the right → press & hold, then move the robot by hand |
 | **Freedrive (physical)** | Press & hold the physical button on the back-top of the teach pendant, then move the robot by hand         |
+
+## Teleoperation & Training
+### Teleoperation
+First, edit `teleoperation.py:TeleopMetadata` to customize the logged teleoperation data (e.g. generate a random target port). Also make sure the gripper settings `GRIP_*` are suited for the demonstration. Then teleoperate the robot with `teleoperation.py --path /path/to/data/dir`.
+
+After collecting all the data episodes, collect them into one dataset using `scripts/rawdata_to_dataset.py`. If the raw data was named `ethernet_plugging`, this will save a new dataset named `ethernet_plugging_dataset`.
+```
+options:
+  -h, --help                    show this help message and exit
+  --path PATH                   Base dataset directory
+  --framerate FRAMERATE         Framerate to sample the raw data at
+  --alpha ALPHA, -a ALPHA       Smoothing factor for force exponential filter
+  --h5_images, --no-h5_images   Whether to save images in the HDF5 file (can make it very large)
+```
+
+### Training
+Train using `python agent/pretrain/train.py`. The action mode & observation fields can be changed by editing the strings at the top of `train()`.
+
+### Evaluation
+`python agent/eval/eval.py --ckpt path/to/file.ckpt`. Make sure `obs_state` includes the right fields in the right order, and the `GRIP_*` settings match the teleoperation data.
