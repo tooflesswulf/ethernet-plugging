@@ -210,16 +210,16 @@ class DiffusionPolicy(nn.Module):
             des_poses = pose_actions.copy()
         elif self.action_mode == "umi":
             curr_pos = curr_pose[:3]
-            curr_rot = R.from_rotvec(curr_pose[3:])
-            
+            curr_euler = (R.from_rotvec(curr_pose[3:]) .as_euler("xyz") )
 
             des_poses = []
             for a in pose_actions:
                 delta_pos = a[:3]
-                delta_rot = a[3:]
+                delta_euler = a[3:]
 
                 pos = curr_pos + delta_pos
-                rot = R.from_rotvec(delta_rot) * curr_rot
+                euler = curr_euler + delta_euler
+                rot =  R.from_euler("xyz", euler).as_rotvec()
 
                 des_poses.append(
                     np.concatenate([pos, rot.as_rotvec()])
