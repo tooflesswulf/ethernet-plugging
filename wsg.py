@@ -1,6 +1,7 @@
 import socket
 import atexit
 import threading
+import enum
 
 from promise import Promise
 
@@ -8,6 +9,17 @@ from promise import Promise
 Remaining TODO:
 - impl & handle AUTOSEND()
 '''
+
+
+class GripperState(enum.Enum):
+    IDLE = 0
+    GRASPING = 1
+    NO_PART = 2
+    PART_LOST = 3
+    HOLDING = 4
+    RELEASING = 5
+    POSITIONING = 6
+    ERROR = 7
 
 
 class ActionResult:
