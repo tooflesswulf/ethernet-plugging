@@ -164,7 +164,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
         delta_eulers = eulers[1:] - eulers[:1]
         # wrap to [-pi, pi]
-        delta_euler = (delta_euler + np.pi) % (2 * np.pi) - np.pi
+        delta_euler = (delta_eulers + np.pi) % (2 * np.pi) - np.pi
         delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
         return np.concatenate( [delta_umi, delta_umi[-1:]] ) # poor decision here, pad by 1 by repeating last one.
 
