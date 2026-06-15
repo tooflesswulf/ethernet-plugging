@@ -61,7 +61,7 @@ def wait_for_circle(env, iface, disable=False):
         time.sleep(1 / 250)
 
     time.sleep(0.1)
-    
+
     env.gripper.wait_idle()
     time.sleep(1)
 
@@ -94,12 +94,9 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
     env.reset(home_pose)
     env.start()  # start threads
 
-    target_ix = 0
-    g_thr = 15
-
     wait_for_circle(env, iface, disable=False)
     print("Starting evaluation loop...")
-  
+
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
     save_frames = []
     while True:
@@ -107,7 +104,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
             break  # -1 indicates square is pressed and an error is thrown.
 
         images = np.stack([resize_image(x['image'], (img_size, img_size), flip_channel=True) for x in obs_deque])
-        
+
         obs_state = np.stack([x['state']['actual_pose'] for x in obs_deque])
         agent_gwidth = np.stack([[x['state']['gripper_width']] for x in obs_deque])
         agent_force = np.stack([x['state']['actual_force'] for x in obs_deque])
