@@ -32,11 +32,12 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
-
+    action_mode = 'umi'
     obs_fields = ['pose', 'gripper_width']
-    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, device=device)
+    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16,  action_mode=action_mode, device=device)
+  
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
-                                          horizon_steps=16, max_n_episodes=1, device=device)
+                                          horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=128,
