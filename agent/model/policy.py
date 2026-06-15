@@ -7,7 +7,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from agent.dataset.sequence import ActionMode
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
 
-ACTION_MODES = ('absolute', 'local_delta', 'global_delta')
+ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
 
 
 class DiffusionPolicy(nn.Module):
@@ -77,6 +77,7 @@ class DiffusionPolicy(nn.Module):
         self.register_buffer('action_max', torch.ones(action_dim))
         self.register_buffer('state_min', -torch.ones(state_dim))
         self.register_buffer('state_max', torch.ones(state_dim))
+
         # action_mode as a buffer so checkpoints remember how their actions are encoded
         self.register_buffer('_action_mode_idx', torch.tensor(ACTION_MODES.index(action_mode)))
         if norm_stats is not None:
@@ -99,6 +100,7 @@ class DiffusionPolicy(nn.Module):
         policy = cls(**checkpoint['config'])
         policy.load_state_dict(checkpoint['model_state_dict'])
         print(f"[Checkpoint] Loaded policy from {ckpt_path} (config: {checkpoint['config']})")
+   
         return policy.to(device)
 
     def set_norm_stats(self, stats: dict):
@@ -206,6 +208,24 @@ class DiffusionPolicy(nn.Module):
 
         if self.action_mode == 'absolute':
             des_poses = pose_actions.copy()
+        elif self.action_mode == "umi":
+            curr_pos = curr_pose[:3]
+            curr_euler = (R.from_rotvec(curr_pose[3:]) .as_euler("xyz") )
+
+            des_poses = []
+            for a in pose_actions:
+                delta_pos = a[:3]
+                delta_euler = a[3:]
+
+                pos = curr_pos + delta_pos
+                euler = curr_euler + delta_euler
+                rot =  R.from_euler("xyz", euler).as_rotvec()
+
+                des_poses.append(
+                    np.concatenate([pos, rot.as_rotvec()])
+                )
+
+            des_poses = np.asarray(des_poses)
         else:
             t0 = Tf.from_components(curr_pose[:3], R.from_rotvec(curr_pose[3:]))
             if self.action_mode == 'local_delta':

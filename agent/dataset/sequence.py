@@ -11,7 +11,7 @@ import pathlib
 import h5py
 
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
-ActionMode = Literal['absolute', 'local_delta', 'global_delta']
+ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
 
 def get_images(image_list, img_size=128):
@@ -177,6 +177,16 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         t0 = transforms[0]
         deltas = [t0.inv() * t for t in transforms]
         return np.array([delta.as_exp_coords() for delta in deltas])
+    
+    def _pose_action_umi(self, poses):
+        # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
+        delta_xyz = poses[1:, :3] - poses[:1, :3]; eulers = np.array([ R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:] ])
+        # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
+        delta_eulers = eulers[1:] - eulers[:1]
+        # wrap to [-pi, pi]
+        delta_euler = (delta_eulers + np.pi) % (2 * np.pi) - np.pi
+        delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
+        return np.concatenate( [delta_umi, delta_umi[-1:]] ) # poor decision here, pad by 1 by repeating last one.
 
     def _pose_action_global_delta(self, poses):
         # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
@@ -192,6 +202,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             return self._pose_action_local_delta(poses)
         elif self.action_mode == 'global_delta':
             return self._pose_action_global_delta(poses)
+        elif self.action_mode == 'umi':
+            return self._pose_action_umi(poses)
         else:
             raise ValueError(f"Invalid action_mode: {self.action_mode}")
 

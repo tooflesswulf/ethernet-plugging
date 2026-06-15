@@ -2,6 +2,7 @@
 __pycache__/
 wandb/
 logs/
+logs_plugin_local_delta/
 
 *.mp4
 .DS_Store

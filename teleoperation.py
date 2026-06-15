@@ -36,7 +36,7 @@ class TeleopMetadata:
 
 
 def main(path=None, meta: TeleopMetadata = None, debug=False):
-    fps = 10  # saving data frequency
+    fps = 20 # 10  # saving data frequency
     controller_dt = 1 / 100
 
     # Home pose
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     meta = TeleopMetadata()
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
     parser.add_argument('--path', type=str,
-                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_plugin_yiqi',
+                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_pluginv2_yiqi',
                         help='Base dataset directory')
     parser.add_argument('--id', type=int, default=None,
                         help='Episode ID (default: next available)')
