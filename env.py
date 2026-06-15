@@ -301,7 +301,6 @@ class Env:
         return zdes
 
     def _control_loop(self):
-        debug = []
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
             actual_pose = URPose(*self.recv.getActualTCPPose())
@@ -332,7 +331,6 @@ class Env:
             if self.last_step_t > 0:
                 # Received at least 1 input
                 des_pose = self.interpolate()
-            debug.append([[*des_pose], [*actual_pose]])
             command = blend(
                 actual_pose,
                 des_pose,
@@ -358,7 +356,6 @@ class Env:
             )
 
             self.ctrl.waitPeriod(t_start)
-        np.save('debuug.npy', debug)
 
     def _camera_loop(self):
         while not self.stop_flag:
