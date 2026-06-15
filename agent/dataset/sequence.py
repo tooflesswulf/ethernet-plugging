@@ -160,10 +160,12 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
     
     def _pose_action_umi(self, poses):
         # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
-        delta_xyz = poses[1:, :3] - poses[:1, :3]; rotations = [ R.from_rotvec(rxyz) for rxyz in poses[:, 3:] ]
-        delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
-     
-        delta_umi = np.concatenate([delta_xyz, delta_rotations], -1)
+        delta_xyz = poses[1:, :3] - poses[:1, :3]; eulers = [ R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:] ]
+        # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
+        delta_eulers = eulers[1:] - eulers[:1]
+        # wrap to [-pi, pi]
+        delta_euler = (delta_euler + np.pi) % (2 * np.pi) - np.pi
+        delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
         return np.concatenate( [delta_umi, delta_umi[-1:]] ) # poor decision here, pad by 1 by repeating last one.
 
     def _pose_action_global_delta(self, poses):
