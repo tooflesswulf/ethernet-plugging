@@ -53,9 +53,12 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
         gripper_force = np.array(f['gripper_obs/gripper_force'])
 
         it = np.array(f['camera_obs/time'])
-        images = np.array(f['camera_obs/image_bgr'])
+        images = np.array(f['camera_obs/image_bgr'])[..., ::-1]  # convert BGR to RGB
 
-        meta = hdf52dict(f['metadata'])
+        if 'metadata' in f:
+            meta = hdf52dict(f['metadata'])
+        else:
+            meta = {}
 
     force_smoothed = ewma(actual_force, alpha=alpha)
 
