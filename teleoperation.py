@@ -17,6 +17,7 @@ class TeleopMetadata:
     Class to add demonstration metadata (e.g. target port) to be saved alongside the episode data.
     Edit this class to add custom fields & CLI arguments as needed.
     """
+
     def __init__(self):
         self.data = {}
 
@@ -36,7 +37,7 @@ class TeleopMetadata:
 
 
 def main(path=None, meta: TeleopMetadata = None, debug=False):
-    fps = 20 # 10  # saving data frequency
+    fps = 20  # 10  # saving data frequency
     control_freq = 20
     controller_dt = 1 / control_freq
 
@@ -112,7 +113,6 @@ def main(path=None, meta: TeleopMetadata = None, debug=False):
         cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)
         env.wait_period()
-
 
     env.close()
     print('Env closed. Exiting.')

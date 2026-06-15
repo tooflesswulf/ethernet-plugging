@@ -67,7 +67,7 @@ class Env:
         # Internal states
         # ============================================================
         self.t0 = None
-        self.open_width = gwidth + 2*gpullback
+        self.open_width = gwidth + 2 * gpullback
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
         self.gripper_state = 0  # 0=open, 1=closed
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
@@ -258,7 +258,7 @@ class Env:
         Waits for a time corresponding to `input_frequency`. Expects `init_period()` to be called at the top of the loop.
         """
         delta = time.perf_counter() - self.period_init
-        sleep_time = max(0, 1/self.input_frequency - delta)
+        sleep_time = max(0, 1 / self.input_frequency - delta)
         time.sleep(sleep_time)
 
     def interpolate(self):
@@ -284,11 +284,13 @@ class Env:
 
     force_alpha = 0.03
     _force_filtered = np.zeros(6)
+
     def filter_force(self, force):
         self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
         return self._force_filtered
 
     _prev_force_err = 0.
+
     def zforce_pid(self, actual_pose, filtered_force):
         kp = .001
         kd = .00001
