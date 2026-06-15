@@ -222,7 +222,7 @@ class DiffusionPolicy(nn.Module):
                 rot =  R.from_euler("xyz", euler).as_rotvec()
 
                 des_poses.append(
-                    np.concatenate([pos, rot.as_rotvec()])
+                    np.concatenate([pos, rot])
                 )
 
             des_poses = np.asarray(des_poses)
