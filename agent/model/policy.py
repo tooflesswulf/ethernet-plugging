@@ -6,6 +6,8 @@ from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from agent.dataset.sequence import ActionMode
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
+from agent.model.diffusion import build_encoder
+from agent.model.vit import RandomShiftsAug
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
 
@@ -28,14 +30,20 @@ class DiffusionPolicy(nn.Module):
         vision_feature_dim=512,
         state_dim=7,
         action_dim=7,
-        img_size=128,
+        img_size=96,
         num_diffusion_iters=100,
         norm_stats: dict | None = None,
         action_mode: ActionMode = 'local_delta',
+        encoder_type='vit',
+        augment=True
     ):
         super().__init__()
         # Architecture/config args; saved alongside the weights by save_checkpoint so
         # from_checkpoint can rebuild the policy without the caller knowing the dims.
+        vision_encoder, vision_feature_dim = build_encoder(encoder_type, (3,img_size, img_size ))
+        self.augment = augment
+        if augment:
+            self.aug = RandomShiftsAug(4)
         self.config = dict(
             obs_horizon=obs_horizon,
             action_horizon=action_horizon,
@@ -45,6 +53,8 @@ class DiffusionPolicy(nn.Module):
             img_size=img_size,
             num_diffusion_iters=num_diffusion_iters,
             action_mode=action_mode,
+            encoder_type=encoder_type,
+            augment=augment
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
@@ -52,9 +62,6 @@ class DiffusionPolicy(nn.Module):
         self.img_size = img_size
         self.num_diffusion_iters = num_diffusion_iters
 
-        # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
-        # work with EMA — performance will tank if you forget to do this!
-        vision_encoder = replace_bn_with_gn(get_resnet('resnet18'))
         noise_pred_net = ConditionalUnet1D(
             input_dim=action_dim,
             global_cond_dim=(vision_feature_dim + state_dim) * obs_horizon,
@@ -138,7 +145,10 @@ class DiffusionPolicy(nn.Module):
         images = conditions['rgb'].float()
         states = self.normalize_states(conditions['state'].float())
         # BxTxCxHxW -> (B T)xCxHxW -> (B T) x d -> BxTxd
-        image_features = self.nets['vision_encoder'](images.flatten(end_dim=1)).reshape(*images.shape[:2], -1)
+        flatten_images = images.flatten(end_dim=1)
+        if self.training and self.augment:
+            flatten_images = self.aug(flatten_images)
+        image_features = self.nets['vision_encoder'](flatten_images).reshape(*images.shape[:2], -1)
         obs_features = torch.cat([image_features, states], dim=-1)
         return obs_features.flatten(start_dim=1)
 

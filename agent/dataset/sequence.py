@@ -48,6 +48,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         obs_fields=['pose', 'gripper_width'],
         action_mode: ActionMode = 'local_delta',
         transform=None,
+        img_size=96,
         device="cuda:0",
     ):
         assert img_cond_steps <= cond_steps, 'consider using more cond_steps than img_cond_steps'
@@ -57,7 +58,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.device = device
         self.action_mode = action_mode
         self.transform = transform
-
+        self.img_size = img_size
         self.max_n_episodes = max_n_episodes
         self.dataset_path = pathlib.Path(dataset_path)
 
@@ -76,10 +77,11 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.poses = dataset['pose'][:total_num_steps]  # (N, 6)
         self.g_widths = dataset['gripper_width'][:total_num_steps]  # (N,)
         self.obs = torch.from_numpy(obs[:total_num_steps]).float().to(device)  # (N, obs_dim)
-        self.images = torch.from_numpy(get_images(img_dir, total_num_steps)).to(device)  # (N, H, W, C)
+        self.images = torch.from_numpy(get_images(img_dir, total_num_steps, img_size=img_size)).to(device)  # (N, H, W, C)
         self.obs_dim = self.obs.shape[1]
 
-        self.g_thr = (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
+        self.g_thr = 12 # (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
+        
         self._precompute_actions()  # precompute all actions for faster sampling during training
         self.act_dim = self.actions.shape[-1]
 
@@ -160,7 +162,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
     
     def _pose_action_umi(self, poses):
         # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
-        delta_xyz = poses[1:, :3] - poses[:1, :3]; eulers = np.array([ R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:] ])
+        delta_xyz = poses[1:, :3] - poses[:1, :3]
+        eulers = np.array([ R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:] ])
         # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
         delta_eulers = eulers[1:] - eulers[:1]
         # wrap to [-pi, pi]

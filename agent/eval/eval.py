@@ -93,9 +93,6 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
     env.reset(home_pose)
     env.start()  # start threads
 
-    target_ix = 0
-    g_thr = 15
-
     wait_for_circle(env, iface, disable=False)
     print("Starting evaluation loop...")
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1

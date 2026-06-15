@@ -32,15 +32,16 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
-    action_mode = 'umi'
+    img_size = 96
+    action_mode = 'local_delta'
     obs_fields = ['pose', 'gripper_width']
-    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, action_mode=action_mode, device=device)
+    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, action_mode=action_mode, img_size=img_size, device='cpu')
   
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
-                                          horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
+                                          horizon_steps=16, max_n_episodes=1, action_mode=action_mode, img_size=img_size, device='cpu')
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=128,
+        batch_size=64,
         num_workers=0,  # since all data are in ram, worker=0 is fine. multi-worker causing issue.
         shuffle=True,
     )
@@ -50,7 +51,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
     # policy so they're saved in the checkpoint for un-normalizing at eval time.
     norm_stats = compute_norm_stats(dataset)
     policy = DiffusionPolicy(action_horizon=16, norm_stats=norm_stats,
-                             state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
+                             state_dim=dataset.obs_dim, action_dim=dataset.act_dim, img_size=img_size,
                              action_mode=dataset.action_mode).to(device)
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
@@ -124,7 +125,6 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets/')
     parser.add_argument('--ckpt_dir', type=str, default='logs')
     return parser.parse_args()
-
 
 if __name__ == '__main__':
     args = parse_args()

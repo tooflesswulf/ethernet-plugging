@@ -6,7 +6,33 @@ from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
+from agent.model.vit import VitEncoder, VitEncoderConfig
 
+def build_encoder(
+    encoder_type='resnet',
+    obs_shape = [3, 128, 128],
+):
+    if encoder_type == 'resnet':
+        vision_feature_dim = 512 
+
+        # construct ResNet18 encoder
+        # if you have multiple camera views, use seperate encoder weights for each view.
+        vision_encoder = get_resnet('resnet18')  # output dim of 512 for each
+
+        # IMPORTANT!
+        # replace all BatchNorm with GroupNorm to work with EMA
+        # performance will tank if you forget to do this!
+        vision_encoder = replace_bn_with_gn(vision_encoder)
+    else:
+        vision_encoder = VitEncoder(
+            obs_shape,
+            VitEncoderConfig(),
+            num_channel=obs_shape[0],
+            img_h=obs_shape[1],
+            img_w=obs_shape[2],
+        )
+        vision_feature_dim = vision_encoder.repr_dim
+    return vision_encoder, vision_feature_dim
 
 def build_diffusion_policy(
     # train parameters
@@ -17,21 +43,15 @@ def build_diffusion_policy(
     num_diffusion_iters=100,
     # model parameters
     obs_horizon=1,
-    vision_feature_dim=512,
+    encoder_type='resnet',
+    obs_shape = [3, 128, 128],
     state_dim=7,
     action_dim=7,
     device=None
 ):
-    # construct ResNet18 encoder
-    # if you have multiple camera views, use seperate encoder weights for each view.
-    vision_encoder = get_resnet('resnet18')  # output dim of 512 for each
-
-    # IMPORTANT!
-    # replace all BatchNorm with GroupNorm to work with EMA
-    # performance will tank if you forget to do this!
-    vision_encoder = replace_bn_with_gn(vision_encoder)
+    vision_encoder, vision_feature_dim = build_encoder(encoder_type, obs_shape)
+    
     obs_dim = vision_feature_dim + state_dim
-
     # create network object
     noise_pred_net = ConditionalUnet1D(
         input_dim=action_dim,
