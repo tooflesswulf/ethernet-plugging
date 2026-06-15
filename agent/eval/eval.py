@@ -35,7 +35,7 @@ def get_actions(policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, c
     }
     naction = policy.predict_action(conditions, num_inference_steps=num_diffusion_iters)
     naction = naction.detach().to('cpu').numpy()[0]
-
+    
     # integrate deltas (per the policy's action_mode) into absolute poses + widths
     return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
 
@@ -94,7 +94,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
     env.reset(home_pose)
     env.start()  # start threads
 
-    wait_for_circle(env, iface, close_gripper=True)
+    wait_for_circle(env, iface, close_gripper=False)
     print("Starting evaluation loop...")
 
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
@@ -113,7 +113,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
         curr_pose, curr_gripper = obs_state[-1], agent_gwidth[-1][0]
         # raw observations: normalization happens inside the policy
         # agent_poses = np.c_[agent_poses, agent_gwidth, agent_force, agent_gforce, target_ix]
-        obs_state = np.c_[obs_state, agent_gwidth, agent_force]
+        obs_state = np.c_[obs_state, agent_gwidth]
 
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
         nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)  # txd
