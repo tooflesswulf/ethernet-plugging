@@ -4,7 +4,7 @@
 
 ```
 conda create -n realrobot python=3.11
-pip install hidapi scipy ur-rtde robosuite opencv-python imageio matplotlib einops wandb
+pip install -r requirements.txt
 ```
 
 Realsense: https://github.com/realsenseai/librealsense/blob/master/doc/installation.md#install-dependencies
@@ -14,11 +14,10 @@ for hidapi:
 
 To read dualsense joystick via hidapi without sudo previlege, see: https://askubuntu.com/questions/978552/how-do-i-make-libusb-work-as-non-root
 
-For deep learning, install latest version of torch and torchvision. For diffusion, install diffusers
+For deep learning, install latest version of torch and torchvision. 
 
 ```
 pip3 install torch torchvision
-pip install diffusers
 ```
 
 Lastly, add this line to ~/.bashrc

@@ -32,14 +32,14 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
-    # obs_fields = ['pose', 'gripper_width', 'force', 'gripper_force', 'targ_ixs']
+
     obs_fields = ['pose', 'gripper_width']
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, device=device)
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                           horizon_steps=16, max_n_episodes=1, device=device)
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=64,
+        batch_size=128,
         num_workers=0,  # since all data are in ram, worker=0 is fine. multi-worker causing issue.
         shuffle=True,
     )
@@ -131,17 +131,17 @@ if __name__ == '__main__':
         args.name = pathlib.Path(args.ckpt_dir).stem
         print('Name not given. Assuming name for logging and wandb:', args.name)
     dataset_path = pathlib.Path(args.data_dir)
-    ckpt_path = pathlib.Path(args.ckpt_dir)
+    ckpt_path = pathlib.Path(args.ckpt_dir) / args.name
 
     # if the ckpt_path already exists, save to a subdirectory with the name of the run (e.g. logs/pretrain-ethernet-unplug-red-topdown)
     if ckpt_path.exists():
-        print(f'Checkpoint directory {ckpt_path} already exists. Saving to {ckpt_path / args.name}..')
-        ckpt_path = ckpt_path / args.name
+        print(f'Checkpoint directory {ckpt_path} already exists. Saving to {ckpt_path }..')
 
         # if the new ckpt_path also exists, raise an error to avoid overwriting existing checkpoints
         if ckpt_path.exists():
-            print(f'Checkpoint directory {ckpt_path} already exists. Please specify a different name or delete the existing directory.')
-            exit(1)
+            print(f'Checkpoint directory {ckpt_path} already exists. OVERWRITE.')
+            # print(f'Checkpoint directory {ckpt_path} already exists. Please specify a different name or delete the existing directory.')
+            # exit(1)
 
     print('Saving checkpoints to:', ckpt_path)
     train(args.name, dataset_path, ckpt_path, args.epochs, use_wandb=args.use_wandb, device=args.device)

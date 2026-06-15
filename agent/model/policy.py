@@ -7,7 +7,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from agent.dataset.sequence import ActionMode
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
 
-ACTION_MODES = ('absolute', 'local_delta', 'global_delta')
+ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
 
 
 class DiffusionPolicy(nn.Module):
