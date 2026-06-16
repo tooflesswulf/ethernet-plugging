@@ -139,7 +139,7 @@ def evaluate(policy, log_dir=None, control_freq=20, device='cuda'):
                 obs_deque.append(obs)
                 save_frames.append(obs['image'].astype(np.uint8))
                 env.wait_period()
-            time.sleep(.5)
+            # time.sleep(.5)
             obs_deque.append(env.get_obs())
 
     env.close()
