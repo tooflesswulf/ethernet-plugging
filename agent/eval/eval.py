@@ -68,7 +68,7 @@ def wait_for_circle(env, iface, close_gripper=False):
     time.sleep(1)
 
 
-def evaluate(policy, log_dir=None, fps=20, device='cuda'):
+def evaluate(policy, log_dir=None, control_freq=20, device='cuda'):
     # network-specific parameters come from the loaded checkpoint
     obs_horizon = policy.obs_horizon
     action_horizon = policy.action_horizon
@@ -87,7 +87,8 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,
         dataset_path=log_dir,  # None disables robot data logging
-        save_interval=1.0 / fps,
+        save_interval=1.0 / 20.,
+        control_frequency=control_freq,
         gforce=GRIP_FORCE_N,
         gwidth=GRIP_WIDTH_MM,
         gspeed=GRIP_SPEED_MMPS,
@@ -96,7 +97,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
     env.reset(home_pose)
     env.start()  # start threads
 
-    wait_for_circle(env, iface, close_gripper=False)
+    wait_for_circle(env, iface, close_gripper=True)
     print("Starting evaluation loop...")
 
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
@@ -127,8 +128,8 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
             des_poses, des_widths = des_poses[start:end], des_widths[start:end]
             print('des grippers:', des_widths)
 
-            for i in tqdm(range(len(des_poses)), desc=f'Open-loop execution'):
-                t0 = time.perf_counter()
+            for i in tqdm(range(1, len(des_poses)), desc=f'Open-loop execution'):
+                env.init_period()
                 des_pose = URPose(*des_poses[i])  # already absolute: deltas integrated by the policy
                 obs = env.step(
                     des_pose=des_pose,
@@ -136,16 +137,16 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
                 )
 
                 obs_deque.append(obs)
-                sleep_time = 0.2
-                time.sleep(sleep_time)
                 save_frames.append(obs['image'].astype(np.uint8))
+                env.wait_period()
+            time.sleep(.5)
             obs_deque.append(env.get_obs())
 
     env.close()
-    _save_video(save_frames, log_dir, fps)
+    _save_video(save_frames, log_dir)
 
 
-def _save_video(save_frames, log_dir, fps):
+def _save_video(save_frames, log_dir, fps=20):
     if log_dir is None or not save_frames:
         return
     video_path = os.path.join(log_dir, 'evaluation_video.mp4')
@@ -158,7 +159,7 @@ def _save_video(save_frames, log_dir, fps):
     print(f"Saved evaluation video → {video_path}")
 
 
-def evaluate_realtime(policy, log_dir=None, fps=20, control_freq=20, device='cuda',
+def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
                       weight_decay=2.0):
     """
     Real-time action chunking evaluation.
@@ -187,7 +188,7 @@ def evaluate_realtime(policy, log_dir=None, fps=20, control_freq=20, device='cud
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,
         dataset_path=log_dir,  # None disables robot data logging
-        save_interval=1.0 / fps,
+        save_interval=1.0 / 20.,
         control_frequency=control_freq,
         gforce=GRIP_FORCE_N,
         gwidth=GRIP_WIDTH_MM,
@@ -309,4 +310,4 @@ if __name__ == '__main__':
             device=args.device,
         )
     else:
-        evaluate(policy, log_dir=args.log_dir, device=args.device)
+        evaluate(policy, log_dir=args.log_dir, control_freq=args.control_freq, device=args.device)
