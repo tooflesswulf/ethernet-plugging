@@ -17,6 +17,7 @@ class TeleopMetadata:
     Class to add demonstration metadata (e.g. target port) to be saved alongside the episode data.
     Edit this class to add custom fields & CLI arguments as needed.
     """
+
     def __init__(self):
         self.data = {}
 
@@ -36,8 +37,9 @@ class TeleopMetadata:
 
 
 def main(path=None, meta: TeleopMetadata = None, debug=False):
-    fps = 20 # 10  # saving data frequency
-    controller_dt = 1 / 100
+    fps = 20  # 10  # saving data frequency
+    control_freq = 20
+    controller_dt = 1 / control_freq
 
     # Home pose
     # ================================================================
@@ -56,6 +58,7 @@ def main(path=None, meta: TeleopMetadata = None, debug=False):
         gripper_ip="192.168.0.20",
         camera_crop_mode=1,
         dataset_path=dataset_path,
+        control_frequency=control_freq,
         save_interval=1.0 / fps,
         gforce=GRIP_FORCE_N,
         gwidth=GRIP_WIDTH_MM,
@@ -80,7 +83,7 @@ def main(path=None, meta: TeleopMetadata = None, debug=False):
     env.start()  # start threads
 
     while True:
-        t0 = time.perf_counter()
+        env.init_period()
 
         # ========================================================
         # Read joystick input
@@ -109,9 +112,7 @@ def main(path=None, meta: TeleopMetadata = None, debug=False):
 
         cv2.imshow('RGB', obs['image'])
         cv2.waitKey(1)
-
-        sleep_time = max(0, controller_dt - (time.perf_counter() - t0))
-        time.sleep(sleep_time)
+        env.wait_period()
 
     env.close()
     print('Env closed. Exiting.')
