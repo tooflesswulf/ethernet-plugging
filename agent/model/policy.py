@@ -32,6 +32,8 @@ class DiffusionPolicy(nn.Module):
         num_diffusion_iters=100,
         norm_stats: dict | None = None,
         action_mode: ActionMode = 'local_delta',
+        encoder_type='resnet',
+        augment=True,
     ):
         super().__init__()
         # Architecture/config args; saved alongside the weights by save_checkpoint so
@@ -45,6 +47,8 @@ class DiffusionPolicy(nn.Module):
             img_size=img_size,
             num_diffusion_iters=num_diffusion_iters,
             action_mode=action_mode,
+            encoder_type=encoder_type,
+            augment=augment
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
