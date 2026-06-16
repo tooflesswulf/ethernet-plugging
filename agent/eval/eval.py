@@ -86,6 +86,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
         camera_crop_mode=1,
         dataset_path=log_dir,  # None disables robot data logging
         save_interval=1.0 / fps,
+        control_frequency=10,
         gforce=GRIP_FORCE_N,
         gwidth=GRIP_WIDTH_MM,
         gspeed=GRIP_SPEED_MMPS,
@@ -126,7 +127,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
             print('des grippers:', des_widths)
 
             for i in tqdm(range(len(des_poses)), desc=f'Open-loop execution'):
-                t0 = time.perf_counter()
+                env.init_period()
                 des_pose = URPose(*des_poses[i])  # already absolute: deltas integrated by the policy
                 obs = env.step(
                     des_pose=des_pose,
@@ -134,8 +135,9 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
                 )
 
                 obs_deque.append(obs)
-                sleep_time = 0.2
-                time.sleep(sleep_time)
+                env.wait_period()
+                # sleep_time = 0.2
+                # time.sleep(sleep_time)
                 save_frames.append(obs['image'].astype(np.uint8))
             obs_deque.append(env.get_obs())
 
