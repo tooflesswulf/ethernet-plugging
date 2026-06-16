@@ -91,13 +91,13 @@ class RealtimeActionChunkingBuffer:
         max_chunks:   hard cap on retained chunks (oldest dropped first).
     """
 
-    def __init__(self, action_dt, weight_decay=2.0, max_age=2.0, max_chunks=32):
+    def __init__(self, action_dt, weight_decay=2.0, max_chunks=32):
         self.action_dt = float(action_dt)
         self.weight_decay = float(weight_decay)
-        self.max_age = float(max_age)
         self.max_chunks = int(max_chunks)
 
         self._chunks: list[_Chunk] = []
+        self._chunk_count: int = 0
         self._lock = threading.Lock()
 
     def add_chunk(self, t_obs, des_poses, des_widths):
@@ -109,6 +109,7 @@ class RealtimeActionChunkingBuffer:
             self._chunks.sort(key=lambda c: c.t_obs, reverse=True)
             if len(self._chunks) > self.max_chunks:
                 self._chunks = self._chunks[:self.max_chunks]
+            self._chunk_count += 1
 
     def get_action(self, t_query):
         """
@@ -123,7 +124,7 @@ class RealtimeActionChunkingBuffer:
             # prune expired / stale chunks while we hold the lock
             self._chunks = [
                 c for c in self._chunks
-                if c.t_end > t_query and (t_query - c.t_obs) <= self.max_age
+                if c.t_end > t_query
             ]
             chunks = list(self._chunks)
 
