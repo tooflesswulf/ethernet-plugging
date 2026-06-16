@@ -197,7 +197,7 @@ def evaluate_realtime(policy, log_dir=None, fps=20, control_freq=20, device='cud
     env.reset(home_pose)
     env.start()  # start threads
 
-    wait_for_circle(env, iface, close_gripper=False)
+    wait_for_circle(env, iface, close_gripper=True)
     print("Starting real-time chunked evaluation loop...")
 
     buffer = RealtimeActionChunkingBuffer(action_dt=control_dt, weight_decay=weight_decay)
@@ -245,11 +245,15 @@ def evaluate_realtime(policy, log_dir=None, fps=20, control_freq=20, device='cud
                 break
             time.sleep(control_dt)
 
+        start_timing = time.time()
         last_action = None
         while not stop_event.is_set():
             env.init_period()
             if iface.update(control_dt) == -1:
                 break  # -1 indicates square is pressed.
+
+            pred_freq = buffer._chunk_count / (time.time() - start_timing)
+            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}')
 
             action = buffer.get_action(time.perf_counter())
             if action is None:
