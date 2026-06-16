@@ -285,7 +285,7 @@ def parse_args():
                         help='where to save robot log data + evaluation video (None disables logging)')
     parser.add_argument('--mode', type=str, default='openloop', choices=['realtime', 'openloop'],
                         help='realtime: async chunking buffer; openloop: predict-then-execute chunk')
-    parser.add_argument('--control_freq', type=int, default=20,
+    parser.add_argument('--control_freq', type=int, default=10,
                         help='control/command frequency (Hz) for the real-time loop')
     parser.add_argument('--weight_decay', type=float, default=2.0,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
