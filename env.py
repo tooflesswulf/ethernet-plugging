@@ -228,6 +228,8 @@ class Env:
 
         # Wait for gripper homing to finish
         g.finished.wait()
+        g = self.gripper.home()
+        g.wait()
 
         # ============================================================
         # Move gripper to default open width

@@ -97,7 +97,7 @@ def evaluate(policy, log_dir=None, control_freq=20, device='cuda'):
     env.reset(home_pose)
     env.start()  # start threads
 
-    wait_for_circle(env, iface, close_gripper=True)
+    wait_for_circle(env, iface, close_gripper=False)
     print("Starting evaluation loop...")
 
     obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
@@ -198,7 +198,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
     env.reset(home_pose)
     env.start()  # start threads
 
-    wait_for_circle(env, iface, close_gripper=True)
+    wait_for_circle(env, iface, close_gripper=False)
     print("Starting real-time chunked evaluation loop...")
 
     buffer = RealtimeActionChunkingBuffer(action_dt=control_dt, weight_decay=weight_decay)
