@@ -143,7 +143,7 @@ def evaluate(policy, log_dir=None, fps=20, device='cuda'):
 
     # save video
     if log_dir is not None and save_frames:
-        video_path = os.path.join(log_dir, 'evaluation_video.mp4')
+        video_path = os.path.join(env.epi_path, 'evaluation_video.mp4')
         # create mp4 from a list of HxWxC images
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         h, w, c = save_frames[0].shape
