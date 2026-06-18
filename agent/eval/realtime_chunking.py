@@ -52,7 +52,7 @@ class _Chunk:
         """
         times = self.times
         if t_query >= times[-1]:
-            return None
+            return self.poses[-1].copy(), float(self.widths[-1])
         if t_query <= times[0]:
             return self.poses[0].copy(), float(self.widths[0])
 
@@ -95,10 +95,19 @@ class RealtimeActionChunkingBuffer:
         self.action_dt = float(action_dt)
         self.weight_decay = float(weight_decay)
         self.max_chunks = int(max_chunks)
+        self.rm_age = -np.log(.1) / weight_decay
 
         self._chunks: list[_Chunk] = []
         self._chunk_count: int = 0
         self._lock = threading.Lock()
+        self._logs = []
+
+    def dolog(self, chunk, obs_state, time):
+        self._logs.append({
+            'chunk': chunk,
+            'obs': obs_state,
+            't': time  # Time of chunk add
+        })
 
     def add_chunk(self, t_obs, des_poses, des_widths):
         """Insert a freshly predicted chunk anchored at observation time ``t_obs``."""
@@ -110,6 +119,7 @@ class RealtimeActionChunkingBuffer:
             if len(self._chunks) > self.max_chunks:
                 self._chunks = self._chunks[:self.max_chunks]
             self._chunk_count += 1
+        return chunk
 
     def get_action(self, t_query):
         """
@@ -124,7 +134,7 @@ class RealtimeActionChunkingBuffer:
             # prune expired / stale chunks while we hold the lock
             self._chunks = [
                 c for c in self._chunks
-                if c.t_end > t_query
+                if c.t_end > t_query #or t_query - c.t_obs < self.rm_age
             ]
             chunks = list(self._chunks)
 

@@ -209,7 +209,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
         """As-fast-as-possible inference; anchors each chunk at its observation time."""
         obs_deque = collections.deque(maxlen=obs_horizon)
         while not stop_event.is_set():
-            t_obs = time.perf_counter()  # observation time the chunk is anchored to
+            t_obs = time.time()  # observation time the chunk is anchored to
             obs_deque.append(env.get_obs())
             if len(obs_deque) < obs_horizon:
                 continue
@@ -233,7 +233,13 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
             # the executable chunk starts at index obs_horizon-1, which aligns with t_obs
             start = obs_horizon - 1
             end = start + action_horizon
-            buffer.add_chunk(t_obs, des_poses[start:end], des_grips[start:end])
+            chnk = buffer.add_chunk(t_obs, des_poses[start:end], des_grips[start:end])
+            buffer.dolog(chnk, obs_state, time.time())
+        
+        import pickle
+        pickle.dump(buffer._logs, open('bedug-rca.pkl', 'wb'))
+        pickle.dump((env.t0, env.robot_obs), open('bedrug-robs.pkl', 'wb'))
+        print('Saved debug thingy')
 
     pred_thread = threading.Thread(target=prediction_loop, daemon=True)
     pred_thread.start()
@@ -248,6 +254,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
 
         start_timing = time.time()
         last_action = None
+        action_logs = []
         while not stop_event.is_set():
             env.init_period()
             if iface.update(control_dt) == -1:
@@ -256,10 +263,11 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
             pred_freq = buffer._chunk_count / (time.time() - start_timing)
             print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}')
 
-            action = buffer.get_action(time.perf_counter())
+            action = buffer.get_action(time.time())
             if action is None:
                 action = last_action  # hold last command through a prediction stall
             else:
+                action_logs.append((time.time(), action))
                 des_pose, des_grip = action
                 obs = env.step(
                     des_pose=URPose(*des_pose),  # absolute, recency-weighted average
@@ -268,6 +276,8 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
                 save_frames.append(obs['image'].astype(np.uint8))
                 last_action = action
             env.wait_period()
+        import pickle
+        pickle.dump(action_logs, open('bedug-acts.pkl', 'wb'))
 
     finally:
         stop_event.set()
@@ -287,7 +297,7 @@ def parse_args():
                         help='realtime: async chunking buffer; openloop: predict-then-execute chunk')
     parser.add_argument('--control_freq', type=int, default=10,
                         help='control/command frequency (Hz) for the real-time loop')
-    parser.add_argument('--weight_decay', type=float, default=2.0,
+    parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
     return parser.parse_args()
 
