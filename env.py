@@ -216,8 +216,11 @@ class Env:
         # ============================================================
         # Home / open gripper
         # ============================================================
-        if self.gripper.gripstate().value != wsg.GripperState.IDLE:
+        if self.gripper.gripstate().value != wsg.GripperState.IDLE.value:
             self.gripper.stop().wait()
+            while self.gripper.gripstate().value != wsg.GripperState.IDLE.value:
+                time.sleep(.1)
+
         g = self.gripper.home()
         g.ack.wait()
 
@@ -230,6 +233,8 @@ class Env:
 
         # Wait for gripper homing to finish
         g.finished.wait()
+        g = self.gripper.home()
+        g.wait()
 
         # ============================================================
         # Move gripper to default open width
