@@ -6,7 +6,7 @@ from env import Env, URPose
 import cv2
 import random
 
-GRIP_WIDTH_MM = 8  # 10 # 8
+GRIP_WIDTH_MM = 10  # 10 # 8
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 5  # 20 # 10
@@ -38,7 +38,7 @@ class TeleopMetadata:
 
 def main(path=None, meta: TeleopMetadata = None, debug=False):
     fps = 20  # 10  # saving data frequency
-    control_freq = 20
+    control_freq = 100
     controller_dt = 1 / control_freq
 
     # Home pose
@@ -122,7 +122,7 @@ if __name__ == "__main__":
     meta = TeleopMetadata()
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
     parser.add_argument('--path', type=str,
-                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_pluginv2_yiqi',
+                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_plugin_unplug',
                         help='Base dataset directory')
     parser.add_argument('--id', type=int, default=None,
                         help='Episode ID (default: next available)')
