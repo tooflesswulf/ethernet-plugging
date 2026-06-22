@@ -8,64 +8,18 @@ import threading
 import collections
 import argparse
 import os
-import wandb
 import torch
-import torch.nn as nn
 
 from env import Env, URPose
-from agent.utils.logging import NoOpLogger, setup_logger
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
+from agent.utils.robot_utils import get_actions, wait_for_circle
 
 GRIP_WIDTH_MM = 8
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 5
-
-
-def get_actions(policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, curr_gripper_width):
-    """
-    nimages:      (T, C, H, W) in [0, 255]
-    nagent_poses: (T, state_dim) raw/unnormalized
-    Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,)) ready to execute.
-    """
-
-    conditions = {
-        'rgb': (nimages / 255.0).unsqueeze(0),  # (1, T, C, H, W)
-        'state': nagent_poses.unsqueeze(0),     # (1, T, state_dim); policy normalizes internally
-    }
-    naction = policy.predict_action(conditions, num_inference_steps=num_diffusion_iters)
-    naction = naction.detach().to('cpu').numpy()[0]
-
-    # integrate deltas (per the policy's action_mode) into absolute poses + widths
-    return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
-
-
-def wait_for_circle(env, iface, close_gripper=False):
-    freq = 250
-    print('Waiting the circle ...')
-    while True:
-        flag = iface.update(1 / freq)
-        if flag == -1:
-            raise RuntimeError('Square pressed, exiting.')
-
-        des_pose = URPose(*iface.target_pose)
-        des_gripper = iface.gripper_state
-        if close_gripper:
-            obs = env.step(
-                des_pose=des_pose,
-                des_gripper_state=des_gripper,
-                des_zforce=iface.target_zforce,
-                adaptive_mode=iface.adaptive_mode,
-            )
-        if des_gripper == 1:
-            break
-        time.sleep(1 / 250)
-
-    time.sleep(0.1)
-    env.gripper.wait_idle()
-    time.sleep(1)
 
 
 def evaluate(policy, log_dir=None, control_freq=20, device='cuda'):
@@ -121,8 +75,7 @@ def evaluate(policy, log_dir=None, control_freq=20, device='cuda'):
         nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
         nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)  # txd
         with torch.no_grad():
-            des_poses, des_widths = get_actions(
-                policy, num_diffusion_iters, nimages, nobs_state, curr_pose, curr_gripper)
+            des_poses, des_widths = get_actions(policy, nimages, nobs_state, curr_pose, curr_gripper)
             start = obs_horizon - 1
             end = start + action_horizon
             des_poses, des_widths = des_poses[start:end], des_widths[start:end]
@@ -227,15 +180,14 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
                 torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
             nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)
             with torch.no_grad():
-                des_poses, des_grips = get_actions(
-                    policy, num_diffusion_iters, nimages, nobs_state, curr_pose, curr_gripper)
+                des_poses, des_grips = get_actions(policy, nimages, nobs_state, curr_pose, curr_gripper)
 
             # the executable chunk starts at index obs_horizon-1, which aligns with t_obs
             start = obs_horizon - 1
             end = start + action_horizon
             chnk = buffer.add_chunk(t_obs, des_poses[start:end], des_grips[start:end])
             buffer.dolog(chnk, obs_state, time.time())
-        
+
         import pickle
         pickle.dump(buffer._logs, open('bedug-rca.pkl', 'wb'))
         pickle.dump((env.t0, env.robot_obs), open('bedrug-robs.pkl', 'wb'))

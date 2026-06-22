@@ -168,7 +168,7 @@ class DiffusionPolicy(nn.Module):
         return nn.functional.mse_loss(noise_pred, noise)
 
     @torch.no_grad()
-    def predict_action(self, conditions, num_inference_steps=None):
+    def predict_action(self, conditions):
         """
         Run reverse diffusion and return UNNORMALIZED actions (B, action_horizon, action_dim).
         """
