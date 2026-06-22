@@ -236,10 +236,11 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
             chnk = buffer.add_chunk(t_obs, des_poses[start:end], des_grips[start:end])
             buffer.dolog(chnk, obs_state, time.time())
         
-        import pickle
-        pickle.dump(buffer._logs, open('debug/bedug-rca.pkl', 'wb'))
-        pickle.dump((env.t0, env.robot_obs), open('debug/bedrug-robs.pkl', 'wb'))
-        print('Saved debug thingy')
+        if False:
+            import pickle
+            pickle.dump(buffer._logs, open('debug/bedug-rca.pkl', 'wb'))
+            pickle.dump((env.t0, env.robot_obs), open('debug/bedrug-robs.pkl', 'wb'))
+            print('Saved debug thingy')
 
     pred_thread = threading.Thread(target=prediction_loop, daemon=True)
     pred_thread.start()
@@ -276,8 +277,10 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
                 save_frames.append(obs['image'].astype(np.uint8))
                 last_action = action
             env.wait_period()
-        import pickle
-        pickle.dump(action_logs, open('debug/bedug-acts.pkl', 'wb'))
+
+        if False:
+            import pickle
+            pickle.dump(action_logs, open('debug/bedug-acts.pkl', 'wb'))
 
     finally:
         stop_event.set()
