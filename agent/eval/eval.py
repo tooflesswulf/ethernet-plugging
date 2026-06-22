@@ -237,8 +237,8 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
             buffer.dolog(chnk, obs_state, time.time())
         
         import pickle
-        pickle.dump(buffer._logs, open('bedug-rca.pkl', 'wb'))
-        pickle.dump((env.t0, env.robot_obs), open('bedrug-robs.pkl', 'wb'))
+        pickle.dump(buffer._logs, open('debug/bedug-rca.pkl', 'wb'))
+        pickle.dump((env.t0, env.robot_obs), open('debug/bedrug-robs.pkl', 'wb'))
         print('Saved debug thingy')
 
     pred_thread = threading.Thread(target=prediction_loop, daemon=True)
@@ -261,7 +261,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
                 break  # -1 indicates square is pressed.
 
             pred_freq = buffer._chunk_count / (time.time() - start_timing)
-            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}')
+            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}', end='\r')
 
             action = buffer.get_action(time.time())
             if action is None:
@@ -277,7 +277,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
                 last_action = action
             env.wait_period()
         import pickle
-        pickle.dump(action_logs, open('bedug-acts.pkl', 'wb'))
+        pickle.dump(action_logs, open('debug/bedug-acts.pkl', 'wb'))
 
     finally:
         stop_event.set()
