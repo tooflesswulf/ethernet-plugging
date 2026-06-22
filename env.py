@@ -156,8 +156,13 @@ class Env:
             raise NotImplementedError("Mean obs mode not implemented yet")
 
     def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False):
-        self.last_step_t = time.perf_counter()
-        self.last_step_end = self.des_pose
+        if self.adaptive_mode and not adaptive_mode:
+            # Transitioning adaptive -> position
+            self.last_step_t = time.perf_counter()
+            self.last_step_end = des_pose
+        else:
+            self.last_step_t = time.perf_counter()
+            self.last_step_end = self.des_pose
 
         self.des_pose = des_pose
         self.des_gripper_state = des_gripper_state
@@ -292,7 +297,7 @@ class Env:
     _prev_force_err = 0.
 
     def zforce_pid(self, actual_pose, filtered_force):
-        kp = .001
+        kp = .0007
         kd = .00001
         fz = filtered_force.z
         force_err = fz - self.des_zforce
@@ -324,7 +329,8 @@ class Env:
                     self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed)
                     self.gripper_state = 1
                 else:
-                    self.gripper.release(pullback=self.g_pullback, speed=self.g_speed)
+                    cur_width = self.gripper_obs[-1].gripper_width
+                    self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed)
                     self.gripper_state = 0
 
             # ----------------------------
