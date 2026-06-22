@@ -1,10 +1,8 @@
 import argparse
 import os
 import interface
-import time
 from env import Env, URPose
 import cv2
-import random
 
 GRIP_WIDTH_MM = 8  # 10 # 8
 GRIP_FORCE_N = 40
