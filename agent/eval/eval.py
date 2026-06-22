@@ -235,7 +235,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
             end = start + action_horizon
             chnk = buffer.add_chunk(t_obs, des_poses[start:end], des_grips[start:end])
             buffer.dolog(chnk, obs_state, time.time())
-        
+
         if False:
             import pickle
             pickle.dump(buffer._logs, open('debug/bedug-rca.pkl', 'wb'))
