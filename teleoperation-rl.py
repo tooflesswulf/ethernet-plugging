@@ -131,3 +131,33 @@ def eval_with_teleop(policy, log_dir=None, control_freq=20, device='cuda', weigh
         stop_event.set()
         pred_thread.join(timeout=5.0)
     env.close()
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Diffusion Policy Evaluation.')
+    parser.add_argument('--ckpt', type=str, required=True, help='path to checkpoint file')
+    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--log_dir', type=str, default=None,
+                        help='where to save robot log data + evaluation video (None disables logging)')
+    parser.add_argument('--control_freq', type=int, default=10,
+                        help='control/command frequency (Hz) for the real-time loop')
+    parser.add_argument('--weight_decay', type=float, default=0.5,
+                        help='recency-weighting rate (1/s) for ensembling overlapping chunks')
+    return parser.parse_args()
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    # Architecture config, weights, and normalization stats all come from the checkpoint.
+    policy = DiffusionPolicy.from_checkpoint(args.ckpt, args.device)
+    policy.eval()
+
+    if args.log_dir is not None:
+        os.makedirs(args.log_dir, exist_ok=True)
+
+    eval_with_teleop(
+        policy,
+        log_dir=args.log_dir,
+        control_freq=args.control_freq,
+        weight_decay=args.weight_decay,
+        device=args.device,
+    )
