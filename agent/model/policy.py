@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from diffusers import DDIMScheduler
 from agent.dataset.sequence import ActionMode
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
 
@@ -30,6 +30,7 @@ class DiffusionPolicy(nn.Module):
         action_dim=7,
         img_size=128,
         num_diffusion_iters=100,
+        num_inference_steps=10,
         norm_stats: dict | None = None,
         action_mode: ActionMode = 'local_delta',
         encoder_type='resnet',
@@ -68,12 +69,13 @@ class DiffusionPolicy(nn.Module):
             'noise_pred_net': noise_pred_net,
         })
 
-        self.noise_scheduler = DDPMScheduler(
+        self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_diffusion_iters,
             beta_schedule='squaredcos_cap_v2',  # squared cosine works the best
             clip_sample=True,  # clip output to [-1,1] to improve stability
             prediction_type='epsilon',  # network predicts noise
         )
+        self.noise_scheduler.set_timesteps(num_inference_steps)
 
         # Normalization stats as buffers: saved in state_dict, moved with .to(device).
         # Defaults are the identity transform ([-1, 1] range).
@@ -175,7 +177,6 @@ class DiffusionPolicy(nn.Module):
         device = obs_cond.device
 
         naction = torch.randn((B, self.action_horizon, self.action_dim), device=device)
-        self.noise_scheduler.set_timesteps(num_inference_steps or self.num_diffusion_iters)
         for k in self.noise_scheduler.timesteps:
             noise_pred = self.nets['noise_pred_net'](
                 sample=naction, timestep=k, global_cond=obs_cond)
