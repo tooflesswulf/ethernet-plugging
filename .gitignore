@@ -4,4 +4,6 @@ wandb/
 logs*/
 
 *.mp4
+*.pkl
 .DS_Store
+.ipynb_checkpoints/
