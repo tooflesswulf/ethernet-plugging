@@ -16,7 +16,7 @@ from agent.utils.utils import resize_image
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import get_actions, wait_for_circle
 
-GRIP_WIDTH_MM = 8
+GRIP_WIDTH_MM = 10 #  8
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 5
@@ -96,7 +96,7 @@ def evaluate(policy, log_dir=None, control_freq=20, device='cuda'):
             obs_deque.append(env.get_obs())
 
     env.close()
-    _save_video(save_frames, log_dir)
+    _save_video(save_frames, env.epi_path)
 
 
 def _save_video(save_frames, log_dir, fps=20):
@@ -188,10 +188,11 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
             chnk = buffer.add_chunk(t_obs, des_poses[start:end], des_grips[start:end])
             buffer.dolog(chnk, obs_state, time.time())
 
-        import pickle
-        pickle.dump(buffer._logs, open('bedug-rca.pkl', 'wb'))
-        pickle.dump((env.t0, env.robot_obs), open('bedrug-robs.pkl', 'wb'))
-        print('Saved debug thingy')
+        if False:
+            import pickle
+            pickle.dump(buffer._logs, open('debug/bedug-rca.pkl', 'wb'))
+            pickle.dump((env.t0, env.robot_obs), open('debug/bedrug-robs.pkl', 'wb'))
+            print('Saved debug thingy')
 
     pred_thread = threading.Thread(target=prediction_loop, daemon=True)
     pred_thread.start()
@@ -213,7 +214,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
                 break  # -1 indicates square is pressed.
 
             pred_freq = buffer._chunk_count / (time.time() - start_timing)
-            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}')
+            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}', end='\r')
 
             action = buffer.get_action(time.time())
             if action is None:
@@ -228,8 +229,10 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
                 save_frames.append(obs['image'].astype(np.uint8))
                 last_action = action
             env.wait_period()
-        import pickle
-        pickle.dump(action_logs, open('bedug-acts.pkl', 'wb'))
+
+        if False:
+            import pickle
+            pickle.dump(action_logs, open('debug/bedug-acts.pkl', 'wb'))
 
     finally:
         stop_event.set()
