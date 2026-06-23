@@ -18,7 +18,7 @@ from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 
-GRIP_WIDTH_MM = 8
+GRIP_WIDTH_MM = 10 #  8
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 5
@@ -143,7 +143,7 @@ def evaluate(policy, log_dir=None, control_freq=20, device='cuda'):
             obs_deque.append(env.get_obs())
 
     env.close()
-    _save_video(save_frames, log_dir)
+    _save_video(save_frames, env.epi_path)
 
 
 def _save_video(save_frames, log_dir, fps=20):
