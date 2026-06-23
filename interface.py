@@ -111,7 +111,7 @@ class DualSenseInterface:
 
         # Orientation: compose delta Euler (ZYX) onto current rotation vector
         drx, dry, drz = delta[3:] * self.speed[3:] * dt
-        R_cur = R.from_rotvec(self.targ_pose[3:])
+        R_cur = R.from_rotvec(des_pose[3:])
         R_delta = R.from_euler('ZYX', [drz, dry, drx])
         new_des_ori = (R_cur * R_delta).as_rotvec()
         return np.r_[new_des_pos, new_des_ori]

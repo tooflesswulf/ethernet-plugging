@@ -19,7 +19,7 @@ from agent.utils.utils import resize_image
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import get_actions, wait_for_circle
 
-GRIP_WIDTH_MM = 8  # 10 # 8
+GRIP_WIDTH_MM = 10  # 10 # 8
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 5  # 20 # 10
