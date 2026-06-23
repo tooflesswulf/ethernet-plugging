@@ -123,7 +123,7 @@ def eval_with_teleop(policy, log_dir=None, control_freq=20, device='cuda', weigh
                 last_action = action
 
             pred_freq = buffer._chunk_count / (time.time() - start_timing)
-            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}')
+            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}', end='\r')
 
             env.wait_period()
 
