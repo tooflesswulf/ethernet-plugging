@@ -8,15 +8,16 @@ class DualSenseInterface:
     gripper_state = 0
     adaptive_mode = False
 
-    def __init__(self, start_pose, xyzspeed=0.1, rpyspeed=1.0, forcespeed=1.0):
+    def __init__(self, start_pose, xyzspeed=0.1, rpyspeed=1.0, forcespeed=1.0, enable_zadaptive=True):
         self.env = make("Lift", robots="Panda")
         self.dualsense = DualSense(self.env)
         self.dualsense.start_control()
 
         self.targ_pose = np.array(start_pose)
         self.targ_zforce = 0.
-        self.speed = np.r_[xyzspeed, xyzspeed, xyzspeed, rpyspeed, rpyspeed, 2*rpyspeed]
+        self.speed = np.r_[xyzspeed, xyzspeed, xyzspeed, rpyspeed, rpyspeed, 2 * rpyspeed]
         self.zfspeed = forcespeed
+        self.enable_zadaptive = enable_zadaptive
 
     @property
     def target_pose(self):
@@ -46,9 +47,10 @@ class DualSenseInterface:
         if act is None:
             print('Act is None, skipping update')
             return -1
+        self.act = act
         if act['right_gripper']:
             self.gripper_state = 1 - self.gripper_state
-        if act['toggle_zforce']:
+        if self.enable_zadaptive and act['toggle_zforce']:
             if self.adaptive_mode:
                 self.adaptive_mode = False
                 self.deactivate_adaptive_mode()
@@ -99,3 +101,17 @@ class DualSenseInterface:
 
     def store_obs(self, obs):
         self.latest_obs = obs
+
+    def residual_action(self, des_pose, dt):
+        delta = self.act['right_delta'] * 5
+
+        # Position: simple addition
+        dpos = delta[:3] * self.speed[:3] * dt
+        new_des_pos = des_pose[:3] + dpos
+
+        # Orientation: compose delta Euler (ZYX) onto current rotation vector
+        drx, dry, drz = delta[3:] * self.speed[3:] * dt
+        R_cur = R.from_rotvec(des_pose[3:])
+        R_delta = R.from_euler('ZYX', [drz, dry, drx])
+        new_des_ori = (R_cur * R_delta).as_rotvec()
+        return np.r_[new_des_pos, new_des_ori]
