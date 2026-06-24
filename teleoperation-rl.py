@@ -50,9 +50,9 @@ def eval_with_teleop(policy, log_dir=None, control_freq=20, device='cuda', weigh
         gpullback=GRIP_PULLBACK_MM,
     )
     env.reset(home_pose)
+    wait_for_circle(env, iface, close_gripper=False)
     env.start()  # start threads
 
-    wait_for_circle(env, iface, close_gripper=False)
     print('Starting real-time chunked evaluation loop...')
 
     buffer = RealtimeActionChunkingBuffer(action_dt=control_dt, weight_decay=weight_decay)
@@ -123,7 +123,7 @@ def eval_with_teleop(policy, log_dir=None, control_freq=20, device='cuda', weigh
                 last_action = action
 
             pred_freq = buffer._chunk_count / (time.time() - start_timing)
-            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}')
+            print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}', end='\r')
 
             env.wait_period()
 
