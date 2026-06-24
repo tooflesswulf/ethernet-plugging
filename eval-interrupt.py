@@ -6,6 +6,7 @@ import threading
 import collections
 import argparse
 import os
+import cv2
 import torch
 
 from env import Env, URPose
@@ -109,6 +110,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
         start_timing = time.time()
         last_action = None
         action_logs = []
+        undo_action_buffer = []
 
         while not stop_event.is_set():
             env.init_period()
@@ -117,19 +119,42 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
 
             pred_freq = buffer._chunk_count / (time.time() - start_timing)
             print(f'INFO: buffer size={len(buffer._chunks)}, nn freq={pred_freq:7.3f}', end='\r')
+            if iface.dualsense.state.DpadLeft and len(undo_action_buffer) == 0:
+                print('\nINTERRUPTED!')
 
-            action = buffer.get_action(time.time())
-            if action is None:
-                action = last_action  # hold last command through a prediction stall
+                # Got interrupt signal; populate undo_action_buffer with some sequence
+                undo_action_buffer = [act for t, act in action_logs[-60:]]
+                action_logs = action_logs[:-60]
+                print(f'action log size', len(action_logs))
+
+                # Add some xy noise to undo buffer? 1cm stdev
+                vec = .001 * np.random.normal(size=2)
+                print(f'Adding {vec}')
+                vec = np.r_[vec, 0, 0, 0, 0]
+                tt = np.linspace(0, 1, len(undo_action_buffer))[::-1]
+                undo_action_buffer = [(act + t * vec, grip) for t, (act, grip) in zip(tt, undo_action_buffer)]
+
+            if len(undo_action_buffer) > 0:
+                action = undo_action_buffer.pop()
+                if len(undo_action_buffer) == 0:
+                    # Finished undoing actions. Empty pred buffer.
+                    buffer.clear()
             else:
+                action = buffer.get_action(time.time())
+                if action is None:
+                    action = last_action
                 action_logs.append((time.time(), action))
-                des_pose, des_grip = action
-                obs = env.step(
-                    des_pose=URPose(*des_pose),  # absolute, recency-weighted average
-                    des_gripper_state=int(round(des_grip)),
-                )
-                save_frames.append(obs['image'].astype(np.uint8))
-                last_action = action
+
+            des_pose, des_grip = action
+            obs = env.step(
+                des_pose=URPose(*des_pose),  # absolute, recency-weighted average
+                des_gripper_state=int(round(des_grip)),
+            )
+            save_frames.append(obs['image'].astype(np.uint8))
+            last_action = action
+
+            cv2.imshow('RGB', obs['image'])
+            cv2.waitKey(1)
             env.wait_period()
 
     finally:
