@@ -239,7 +239,7 @@ def evaluate_realtime(policy, log_dir=None, control_freq=20, device='cuda',
         pred_thread.join(timeout=5.0)
 
     env.close()
-    _save_video(save_frames, log_dir)
+    _save_video(save_frames, env.epi_path)
 
 
 def parse_args():
