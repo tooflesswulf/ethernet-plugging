@@ -84,7 +84,7 @@ class RobotExecution:
             act = self.get_action()
             if act is None:
                 action = self.last_action
-            if len(act) == 4:
+            elif len(act) == 4:
                 action = act
             else:
                 action = (act[0], act[1], 0., False)

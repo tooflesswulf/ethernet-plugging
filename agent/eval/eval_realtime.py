@@ -1,17 +1,19 @@
-from einops import rearrange
-import torch
 
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import get_actions, wait_for_circle
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
+from util import URPose
 import robot_execution
 import collections
 import numpy as np
 import threading
 import argparse
+import einops
+import torch
 import time
 import os
+
 
 GRIP_WIDTH_MM = 10
 GRIP_FORCE_N = 40
@@ -48,7 +50,7 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         if act is None:
             return None
         des_pose, des_grip = act
-        return des_pose, int(round(des_grip))
+        return URPose(*des_pose), int(round(des_grip))
 
     def prediction_loop(self):
         action_horizon = self.policy.action_horizon
@@ -72,7 +74,7 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             curr_pose, curr_gripper = obs_state[-1], agent_gwidth[-1][0]
             obs_state = np.c_[obs_state, agent_gwidth]  # raw; policy normalizes internally
 
-            nimages = rearrange(
+            nimages = einops.rearrange(
                 torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
             nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)
             with torch.no_grad():
@@ -91,7 +93,7 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_dir', type=str, default=None,
                         help='where to save robot log data + evaluation video (None disables logging)')
-    parser.add_argument('--control_freq', type=int, default=10,
+    parser.add_argument('--control_freq', '--hz', type=int, default=10,
                         help='control/command frequency (Hz) for the real-time loop')
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
