@@ -100,6 +100,7 @@ class RobotExecution:
                 des_zforce=des_zforce,
                 adaptive_mode=adaptive_mode,
             )
+            self.post_step(self.last_obs)
             self.iface.store_obs(self.last_obs)
             self.runtime_info()
             if self.show_image:
@@ -107,6 +108,7 @@ class RobotExecution:
                 cv2.waitKey(1)
 
             self.env.wait_period()
+        self.stop()
         self.close()
 
     def stop(self):
@@ -126,6 +128,9 @@ class RobotExecution:
         pass
 
     def pre_run(self):
+        pass
+
+    def post_step(self, obs):
         pass
 
     def runtime_info(self):
