@@ -1,5 +1,6 @@
-import interface
 from env import Env, URPose
+import interface
+import threading
 import cv2
 
 
@@ -18,7 +19,7 @@ class RobotExecution:
         fps = 20
         self.control_freq = control_freq
         self.control_dt = 1 / control_freq
-        self.home_pose = home_pose  # low-position (cable easy to see)
+        self.home_pose = home_pose
         self.show_image = show_image
 
         # Robot control env
@@ -43,6 +44,7 @@ class RobotExecution:
             rpyspeed=0.9,
             forcespeed=5.,
         )
+        self.stop_event = threading.Event()
 
         self.pre_reset()
         self.env.reset(home_pose)  # start camera, robot go home, gripper open
@@ -50,15 +52,16 @@ class RobotExecution:
         self.pre_start()
         self.env.start()  # start threads
         self.post_start()
+        self.last_action = (self.home_pose, 0, 0., False)
 
     def get_action(self):
         """ Returns the action to send to environment.
-        Can return fewer than 4 values, in which des_zforce and adaptive_mode will be ignored.
         Returns:
             des_pose: URPose
             des_gripper: int
             des_zforce?: float
             adaptive_mode?: bool
+        Return: None --> repeat last action.
         """
         des_pose = URPose(*self.iface.target_pose)
         des_gripper = self.iface.gripper_state
@@ -68,7 +71,7 @@ class RobotExecution:
 
     def run(self):
         self.pre_run()
-        while True:
+        while not self.stop_event.is_set():
             self.env.init_period()
 
             # ========================================================
@@ -79,16 +82,18 @@ class RobotExecution:
                 break
 
             act = self.get_action()
+            if act is None:
+                action = self.last_action
             if len(act) == 4:
-                des_pose, des_gripper, adaptive_mode, des_zforce = act
+                action = act
             else:
-                des_pose, des_gripper = act
-                adaptive_mode = False
-                des_zforce = 0.
+                action = (act[0], act[1], 0., False)
 
             # ========================================================
             # Step environment
             # ========================================================
+            des_pose, des_gripper, adaptive_mode, des_zforce = action
+            self.last_action = action
             self.last_obs = self.env.step(
                 des_pose=des_pose,
                 des_gripper_state=des_gripper,
@@ -103,6 +108,9 @@ class RobotExecution:
 
             self.env.wait_period()
         self.close()
+
+    def stop(self):
+        self.stop_event.set()
 
     def pre_reset(self):
         pass
@@ -123,8 +131,6 @@ class RobotExecution:
     def runtime_info(self):
         obs = self.last_obs
         print(f"g_width: {obs['state']['gripper_width']:7.2f}", end='\r')
-
-
 
     def close(self):
         self.env.close()

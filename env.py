@@ -156,6 +156,12 @@ class Env:
             raise NotImplementedError("Mean obs mode not implemented yet")
 
     def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False):
+        """Args:
+            des_pose: URPose
+            des_gripper_state: int (0=open, 1=closed)
+            des_zforce: float (desired z-force in N)
+            adaptive_mode: bool (whether to use adaptive z-force control)
+        """
         if self.adaptive_mode and not adaptive_mode:
             # Transitioning adaptive -> position
             self.last_step_t = time.perf_counter()
