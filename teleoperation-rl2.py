@@ -35,6 +35,8 @@ class TeleoperationRL(EvalRealtimeChunking):
                 self.buffer.clear()
             return action
 
+        # super() = RealtimeChunking.get_action()
+        # gets nn prediction from RealtimeChunkingBuffer
         nn_action = super().get_action()
         des_pose, des_grip, _, _ = self._unshortcut_action(nn_action)
         des_pose = self.iface.residual_action(np.array(des_pose), self.control_dt)
