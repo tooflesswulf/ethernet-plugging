@@ -55,13 +55,7 @@ class RobotExecution:
         self.last_action = (self.home_pose, 0, 0., False)
 
     def get_action(self):
-        """ Returns the action to send to environment.
-        Returns:
-            des_pose: URPose
-            des_gripper: int
-            des_zforce?: float
-            adaptive_mode?: bool
-        Return: None --> repeat last action.
+        """ Returns the action to send to _unshortcut_action.
         """
         des_pose = URPose(*self.iface.target_pose)
         des_gripper = self.iface.gripper_state
@@ -70,11 +64,16 @@ class RobotExecution:
         return des_pose, des_gripper, adaptive_mode, des_zforce
 
     def _unshortcut_action(self, act):
+        """ Converts action shortcuts into unified format.
+        act: None             -> repeat last action
+        act: (float[6], int)  -> pose + gripper (0=open, 1=closed)
+        act: (float[6], int, bool, float) -> pose, grip, zforce, mode
+        """
         if act is None:
             return self.last_action
         if len(act) == 2:
             return (URPose(*act[0]), int(round(act[1])), 0, False)
-        return (URPose(*act[0]), int(round(act[1])), act[2], bool(act[3]))
+        return (URPose(*act[0]), int(round(act[1])), bool(act[2]), act[3])
 
     def run(self):
         self.pre_run()
