@@ -90,19 +90,19 @@ class RobotExecution:
 
             act = self.get_action()
             action = self._unshortcut_action(act)
+            des_pose, des_gripper, adaptive_mode, des_zforce = action
+            self.last_action = action
 
             # ========================================================
             # Step environment
             # ========================================================
-            des_pose, des_gripper, adaptive_mode, des_zforce = action
-            self.last_action = action
             self.last_obs = self.env.step(
                 des_pose=des_pose,
                 des_gripper_state=des_gripper,
                 des_zforce=des_zforce,
                 adaptive_mode=adaptive_mode,
             )
-            self.post_step(self.last_obs)
+            self.post_step(self.last_obs, self.last_action)
             self.iface.store_obs(self.last_obs)
             self.runtime_info()
             if self.show_image:
@@ -132,7 +132,7 @@ class RobotExecution:
     def pre_run(self):
         pass
 
-    def post_step(self, obs):
+    def post_step(self, obs, action):
         pass
 
     def runtime_info(self):

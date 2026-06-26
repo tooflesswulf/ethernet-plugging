@@ -39,7 +39,7 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
         wait_for_circle(self.env, self.iface, close_gripper=False)
         print("Starting evaluation...")
 
-    def post_step(self, obs):
+    def post_step(self, obs, act):
         self.obs_deque.append(obs)
 
     def get_action(self):
