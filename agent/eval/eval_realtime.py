@@ -46,10 +46,7 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         if self.buffer.is_empty():
             return None
         act = self.buffer.get_action(time.time())
-        if act is None:
-            return None
-        des_pose, des_grip = act
-        return URPose(*des_pose), int(round(des_grip))
+        return act
 
     def prediction_loop(self):
         action_horizon = self.policy.action_horizon
@@ -92,7 +89,7 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_dir', type=str, default=None,
                         help='where to save robot log data + evaluation video (None disables logging)')
-    parser.add_argument('--control_freq', '--hz', type=float, default=10,
+    parser.add_argument('--control_freq', '--hz', type=float, default=20,
                         help='control/command frequency (Hz) for the real-time loop')
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')

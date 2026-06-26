@@ -69,6 +69,13 @@ class RobotExecution:
         adaptive_mode = self.iface.adaptive_mode
         return des_pose, des_gripper, adaptive_mode, des_zforce
 
+    def _unshortcut_action(self, act):
+        if act is None:
+            return self.last_action
+        if len(act) == 2:
+            return (URPose(*act[0]), int(round(act[1])), 0, False)
+        return (URPose(*act[0]), int(round(act[1])), act[2], bool(act[3]))
+
     def run(self):
         self.pre_run()
         while not self.stop_event.is_set():
@@ -82,12 +89,7 @@ class RobotExecution:
                 break
 
             act = self.get_action()
-            if act is None:
-                action = self.last_action
-            elif len(act) == 4:
-                action = act
-            else:
-                action = (act[0], act[1], 0., False)
+            action = self._unshortcut_action(act)
 
             # ========================================================
             # Step environment
