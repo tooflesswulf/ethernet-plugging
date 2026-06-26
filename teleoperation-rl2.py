@@ -58,15 +58,15 @@ if __name__ == "__main__":
     if not args.debug:
         indices = [
             int(d.removeprefix('episode'))
-            for d in os.listdir(args.path)
+            for d in os.listdir(args.log_dir)
             if d.startswith('episode') and d.removeprefix('episode').isdigit()
-        ] if os.path.exists(args.path) else []
+        ] if os.path.exists(args.log_dir) else []
         args.id = max(indices, default=0) + 1
         print(f'Auto-selected episode ID: {args.id}')
-        print(f"Saving data to: {args.path}, Episode {args.id}")
+        print(f"Saving data to: {args.log_dir}, Episode {args.id}")
 
-        os.makedirs(args.path, exist_ok=True)
-        path = args.path
+        os.makedirs(args.log_dir, exist_ok=True)
+        path = args.log_dir
     else:
         path = None
     teleop = TeleoperationRL(

@@ -88,6 +88,7 @@ class RobotExecution:
             if flag == -1:
                 break
 
+            controller_state = self.iface.dualsense.state
             act = self.get_action()
             action = self._unshortcut_action(act)
             des_pose, des_gripper, adaptive_mode, des_zforce = action
@@ -101,6 +102,7 @@ class RobotExecution:
                 des_gripper_state=des_gripper,
                 des_zforce=des_zforce,
                 adaptive_mode=adaptive_mode,
+                dualsense=controller_state
             )
             self.post_step(self.last_obs, self.last_action)
             self.iface.store_obs(self.last_obs)
