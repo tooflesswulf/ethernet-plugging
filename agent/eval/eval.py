@@ -19,6 +19,7 @@ GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 5
 
+
 class EvalPolicySerialChunks(robot_execution.RobotExecution):
     def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20):
         # Architecture config, weights, and normalization stats all come from the checkpoint.
@@ -71,7 +72,8 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
             end = start + action_horizon
             des_poses, des_widths = des_poses[start:end], des_widths[start:end]
 
-        return [(URPose(*p), w) for p, w in zip(des_poses, des_widths)]
+        return [(p, w) for p, w in zip(des_poses, des_widths)]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Evaluation.')
@@ -82,6 +84,7 @@ def parse_args():
     parser.add_argument('--control_freq', '--hz', type=float, default=10,
                         help='control/command frequency (Hz) for the real-time loop')
     return parser.parse_args()
+
 
 if __name__ == '__main__':
     args = parse_args()
