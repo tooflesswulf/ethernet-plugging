@@ -28,6 +28,10 @@ class CameraObs(namedtuple('CameraObs', ('time', 'image'))):
     pass
 
 
+class Command(namedtuple('Command', ('time', 'des_pose', 'des_gripper', 'adaptive_mode', 'des_zforce', 'controller_state'))):
+    pass
+
+
 class Env:
     """
     Minimal robot environment wrapper for:
@@ -129,6 +133,7 @@ class Env:
         self.robot_obs: list[RobotObs] = []
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
+        self.commands: list[Command] = []
         self.save_eps = save_eps
         self.image_idx = 0
         self.metadata = metadata
@@ -155,7 +160,19 @@ class Env:
         elif self.obs_mode == 'mean':
             raise NotImplementedError("Mean obs mode not implemented yet")
 
-    def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False):
+    def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False, dualsense=None):
+        """Args:
+            des_pose: URPose
+            des_gripper_state: int (0=open, 1=closed)
+            des_zforce: float (desired z-force in N)
+            adaptive_mode: bool (whether to use adaptive z-force control)
+        """
+        log_cmd = Command(time=time.time() - self.t0,
+                          des_pose=des_pose, des_gripper=des_gripper_state,
+                          adaptive_mode=adaptive_mode, des_zforce=des_zforce,
+                          controller_state=dualsense)
+        self.commands.append(log_cmd)
+
         if self.adaptive_mode and not adaptive_mode:
             # Transitioning adaptive -> position
             self.last_step_t = time.perf_counter()
@@ -249,6 +266,7 @@ class Env:
         self.robot_obs: list[RobotObs] = []
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
+        self.commands: list[Command] = []
 
         print('Environment reset complete.')
 
@@ -465,6 +483,17 @@ class Env:
 
             f.create_dataset('camera_obs/time', data=[obs.time for obs in self.camera_obs])
             f.create_dataset('camera_obs/image_bgr', data=[obs.image for obs in self.camera_obs])
+
+            f.create_dataset('commands/time', data=[cmd.time for cmd in self.commands])
+            f.create_dataset('commands/des_pose', data=[cmd.des_pose for cmd in self.commands])
+            f.create_dataset('commands/des_gripper', data=[cmd.des_gripper for cmd in self.commands])
+            f.create_dataset('commands/adaptive_mode', data=[cmd.adaptive_mode for cmd in self.commands])
+            f.create_dataset('commands/des_zforce', data=[cmd.des_zforce for cmd in self.commands])
+
+            control = [vars(cmd.controller_state) for cmd in self.commands]
+            f.create_dataset('dualsense/time', data=[cmd.time for cmd in self.commands])
+            for key in control[0].keys():
+                f.create_dataset(f'dualsense/{key}', data=[item[key] for item in control])
 
             m = f.create_group('metadata')
             dict2hdf5(m, self.metadata)
