@@ -11,7 +11,7 @@ from diffusers.optimization import get_scheduler
 from agent.utils.utils import save_checkpoint, compute_norm_stats
 from agent.utils.logging import NoOpLogger, setup_logger
 from agent.model.policy import DiffusionPolicy
-from agent.dataset.sequence import StitchedSequenceDataset
+from agent.dataset.sequence import ActionMode, StitchedSequenceDataset
 
 DEVICE = "cuda:0"
 
@@ -32,10 +32,12 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
-    action_mode = 'umi'
-    obs_fields = ['pose', 'gripper_width', 'force']
-    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields, horizon_steps=16, action_mode=action_mode, device=device)
-  
+    action_mode: ActionMode = 'local_delta'
+    obs_fields = ['pose', 'gripper_width']
+    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                      horizon_steps=16, action_mode=action_mode, device=device,
+                                      max_n_episodes=50)
+
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                           horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
     dataloader = torch.utils.data.DataLoader(
@@ -136,7 +138,7 @@ if __name__ == '__main__':
 
     # if the ckpt_path already exists, save to a subdirectory with the name of the run (e.g. logs/pretrain-ethernet-unplug-red-topdown)
     if ckpt_path.exists():
-        print(f'Checkpoint directory {ckpt_path} already exists. Saving to {ckpt_path }..')
+        print(f'Checkpoint directory {ckpt_path} already exists. Saving to {ckpt_path}..')
 
         # if the new ckpt_path also exists, raise an error to avoid overwriting existing checkpoints
         if ckpt_path.exists():
