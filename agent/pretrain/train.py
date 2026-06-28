@@ -31,7 +31,6 @@ def batch_to_device(batch, device="cuda:0"):
 
 
 def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
-    logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
     action_mode: ActionMode = 'local_delta'
     obs_fields = ['pose', 'gripper_width']
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
@@ -43,7 +42,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=128,
-        num_workers=0,  # since all data are in ram, worker=0 is fine. multi-worker causing issue.
+        num_workers=8,  # since all data are in ram, worker=0 is fine. multi-worker causing issue.
         shuffle=True,
     )
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=64)
@@ -62,6 +61,8 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
         num_warmup_steps=len(dataloader),
         num_training_steps=len(dataloader) * epochs,
     )
+    logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
+
     pbar = tqdm(range(epochs))
     step = 0
     for epoch in pbar:
