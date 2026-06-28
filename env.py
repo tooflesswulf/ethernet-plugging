@@ -65,6 +65,9 @@ class Env:
         gforce=40,
         gspeed=50,
         gpullback=10,
+        force_alpha=0.03,
+        kp=.0007,
+        kd=.00001,
         metadata={}
     ):
         # ============================================================
@@ -86,6 +89,9 @@ class Env:
         self.g_width = gwidth
         self.g_speed = gspeed
         self.g_pullback = gpullback
+        self.force_alpha = force_alpha
+        self.kp = kp
+        self.kd = kd
 
         # ============================================================
         # Camera
@@ -310,7 +316,6 @@ class Env:
             interp_orientation = slerp(R1, R2, perc).as_rotvec()
         return URPose(*interp_position, *interp_orientation)
 
-    force_alpha = 0.03
     _force_filtered = np.zeros(6)
 
     def filter_force(self, force):
@@ -320,14 +325,12 @@ class Env:
     _prev_force_err = 0.
 
     def zforce_pid(self, actual_pose, filtered_force):
-        kp = .0007
-        kd = .00001
         fz = filtered_force.z
         force_err = fz - self.des_zforce
         d_force_err = (force_err - self._prev_force_err) / self.dt
         self._prev_force_err = force_err
 
-        zdes = actual_pose.z + kp * force_err + kd * d_force_err
+        zdes = actual_pose.z + self.kp * force_err + self.kd * d_force_err
         return zdes
 
     def _control_loop(self):
