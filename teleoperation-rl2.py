@@ -48,7 +48,7 @@ if __name__ == "__main__":
     parser.add_argument('--ckpt', type=str, required=True, help='path to checkpoint file')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_dir', type=str,
-                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_plugin_unplug_rl',
+                        default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_plugin_unplug_rl2',
                         help='Base dataset directory')
     parser.add_argument('--control_freq', '--hz', type=float, default=20,
                         help='control/command frequency (Hz) for the real-time loop')
