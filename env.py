@@ -326,6 +326,7 @@ class Env:
 
     _prev_force_err = 0.
     _d_force_err_filtered = 0.
+    _prev_force_hist = []
 
     def zforce_pid(self, actual_pose, filtered_force):
         fz = filtered_force.z
@@ -337,6 +338,7 @@ class Env:
         # force_alpha, since differentiating amplifies noise by 1/dt (~500x here).
         self._d_force_err_filtered = (self.d_alpha * d_force_err_raw
                                       + (1 - self.d_alpha) * self._d_force_err_filtered)
+        self._prev_force_hist.append((time.time() - self.t0, d_force_err_raw, self._d_force_err_filtered))
 
         zdes = actual_pose.z + self.kp * force_err + self.kd * self._d_force_err_filtered
         return zdes
@@ -436,8 +438,6 @@ class Env:
         gpos_list = []
         gforce_list = []
         self.wait_for_obs()  # Ensure we have at least one obs before starting logging
-
-        last_pose = None
 
         image_idx = 0
         tinit = time.time()

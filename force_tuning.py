@@ -39,7 +39,7 @@ class ForceTuner(robot_execution.RobotExecution):
         print('=============================================================')
 
     def __init__(self, args):
-        control_freq = 100
+        control_freq = 7
         home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see)
         self.plot_window_s = args.window
 
@@ -75,6 +75,7 @@ class ForceTuner(robot_execution.RobotExecution):
         self.filt_line, = self.axes[FZ_IDX].plot([], [], color='k', linewidth=2, label='filtered')
         self.axes[FZ_IDX].legend(loc='upper right', fontsize=7)
         self.fig.suptitle('robot_obs actual_force')
+        self.line2 ,= self.axes[5].plot([], [], color='k')
 
         ax_alpha = self.fig.add_axes([0.15, 0.29, 0.7, 0.03])
         ax_kp = self.fig.add_axes([0.15, 0.21, 0.7, 0.03])
@@ -130,6 +131,7 @@ class ForceTuner(robot_execution.RobotExecution):
         servo_hz = self.env.servo_frequency
         n = int(self.plot_window_s * servo_hz) + 10
         recent = self.env.robot_obs[-n:]
+        recent_ferr = self.env._prev_force_hist[-n:]
         if not recent:
             return
 
@@ -144,12 +146,25 @@ class ForceTuner(robot_execution.RobotExecution):
             return
 
         for i, (ax, line) in enumerate(zip(self.axes, self.lines)):
+            if i == 5:
+                break
             channel = forces[:, i]
             line.set_data(times, channel)
             ymax = max(1.0, float(np.abs(channel).max()) * 1.1)
             ax.set_ylim(-ymax, ymax)
             ax.set_xlim(-self.plot_window_s, 0)
         self.filt_line.set_data(times, filt_fz)
+
+        if len(recent_ferr) > 0:
+            ets = np.array([o[0] for o in recent_ferr]) - t_latest
+            force_errs = np.array([o[1] for o in recent_ferr])
+            force_errs_filt = np.array([o[2] for o in recent_ferr])
+            ax, line = self.axes[5], self.lines[5]
+            line.set_data(ets, force_errs)
+            self.line2.set_data(ets, force_errs_filt)
+            ymax = max(1.0, float(np.abs(force_errs).max()) * 1.1)
+            ax.set_ylim(-ymax, ymax)
+            ax.set_xlim(-self.plot_window_s, 0)
 
     def post_step(self, obs, action):
         if not self._figure_open():
@@ -160,11 +175,16 @@ class ForceTuner(robot_execution.RobotExecution):
             self._update_plot()
         plt.pause(0.001)
 
+    times_hist = []
+
     def runtime_info(self):
+        self.times_hist.append(time.time())
+        freq = len(self.times_hist) / (self.times_hist[-1] - self.times_hist[0] + 1e-6)
+
         obs = self.last_obs
         fz = obs['state']['filtered_force'].z
         mode = 'ON ' if self.env.adaptive_mode else 'OFF'
-        print(f"adaptive={mode} | alpha={self.env.force_alpha:.4f} "
+        print(f"freq={freq:.2f} | adaptive={mode} | alpha={self.env.force_alpha:.4f} "
              f"kp={self.env.kp:.2e} kd={self.env.kd:.2e} d_alpha={self.env.d_alpha:.4f} | "
              f"fz={fz:6.2f} des_zforce={self.env.des_zforce:6.2f}", end='\r')
 
