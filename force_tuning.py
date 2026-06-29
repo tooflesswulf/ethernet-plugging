@@ -35,7 +35,7 @@ class ForceTuner(robot_execution.RobotExecution):
     def pre_reset(self):
         print('============ FORCE TUNING (no data collection) ============')
         print('Triangle toggles adaptive z-force mode, which uses kp/kd below.')
-        print('Drag the sliders to tune force_alpha / kp / kd live.')
+        print('Drag the sliders to tune force_alpha / kp / kd / d_alpha live.')
         print('=============================================================')
 
     def __init__(self, args):
@@ -76,11 +76,12 @@ class ForceTuner(robot_execution.RobotExecution):
         self.axes[FZ_IDX].legend(loc='upper right', fontsize=7)
         self.fig.suptitle('robot_obs actual_force')
 
-        ax_alpha = self.fig.add_axes([0.15, 0.24, 0.7, 0.03])
-        ax_kp = self.fig.add_axes([0.15, 0.16, 0.7, 0.03])
-        ax_kd = self.fig.add_axes([0.15, 0.08, 0.7, 0.03])
+        ax_alpha = self.fig.add_axes([0.15, 0.29, 0.7, 0.03])
+        ax_kp = self.fig.add_axes([0.15, 0.21, 0.7, 0.03])
+        ax_kd = self.fig.add_axes([0.15, 0.13, 0.7, 0.03])
+        ax_dalpha = self.fig.add_axes([0.15, 0.05, 0.7, 0.03])
 
-        # kp/kd/alpha are tuned across orders of magnitude (e.g. kd ~ 1e-5),
+        # kp/kd/alpha/d_alpha are tuned across orders of magnitude (e.g. kd ~ 1e-5),
         # so use log-scaled sliders: the handle position tracks log10(value)
         # and we override valtext to display the real (non-log) value.
         self.slider_alpha = self._add_log_slider(
@@ -92,6 +93,12 @@ class ForceTuner(robot_execution.RobotExecution):
         self.slider_kd = self._add_log_slider(
             ax_kd, 'kd (log)', 1e-7, 1e-3, self.env.kd,
             '{:.2e}', lambda v: setattr(self.env, 'kd', v))
+        # Separate, typically heavier filter applied only to the D-term's raw
+        # derivative -- decouples its noise rejection from force_alpha so the
+        # P-term can stay responsive while D-term chatter gets tamed.
+        self.slider_dalpha = self._add_log_slider(
+            ax_dalpha, 'd_alpha (log)', 1e-3, 1.0, self.env.d_alpha,
+            '{:.4f}', lambda v: setattr(self.env, 'd_alpha', v))
 
         plt.show(block=False)
         self._last_plot_t = 0.0
@@ -158,7 +165,7 @@ class ForceTuner(robot_execution.RobotExecution):
         fz = obs['state']['filtered_force'].z
         mode = 'ON ' if self.env.adaptive_mode else 'OFF'
         print(f"adaptive={mode} | alpha={self.env.force_alpha:.4f} "
-             f"kp={self.env.kp:.2e} kd={self.env.kd:.2e} | "
+             f"kp={self.env.kp:.2e} kd={self.env.kd:.2e} d_alpha={self.env.d_alpha:.4f} | "
              f"fz={fz:6.2f} des_zforce={self.env.des_zforce:6.2f}", end='\r')
 
     def close(self):

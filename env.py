@@ -66,6 +66,7 @@ class Env:
         gspeed=50,
         gpullback=10,
         force_alpha=0.03,
+        d_alpha=0.1,
         kp=.0007,
         kd=.00001,
         metadata={}
@@ -92,6 +93,7 @@ class Env:
         self.force_alpha = force_alpha
         self.kp = kp
         self.kd = kd
+        self.d_alpha = d_alpha
 
         # ============================================================
         # Camera
@@ -323,14 +325,20 @@ class Env:
         return self._force_filtered
 
     _prev_force_err = 0.
+    _d_force_err_filtered = 0.
 
     def zforce_pid(self, actual_pose, filtered_force):
         fz = filtered_force.z
         force_err = fz - self.des_zforce
-        d_force_err = (force_err - self._prev_force_err) / self.dt
+        d_force_err_raw = (force_err - self._prev_force_err) / self.dt
         self._prev_force_err = force_err
 
-        zdes = actual_pose.z + self.kp * force_err + self.kd * d_force_err
+        # D-term gets its own (typically heavier) low-pass filter, separate from
+        # force_alpha, since differentiating amplifies noise by 1/dt (~500x here).
+        self._d_force_err_filtered = (self.d_alpha * d_force_err_raw
+                                      + (1 - self.d_alpha) * self._d_force_err_filtered)
+
+        zdes = actual_pose.z + self.kp * force_err + self.kd * self._d_force_err_filtered
         return zdes
 
     def _control_loop(self):
@@ -387,6 +395,7 @@ class Env:
                 command = command._replace(z=self.zforce_pid(actual_pose, filtered_force))
             else:
                 self._prev_force_err = 0.
+                self._d_force_err_filtered = 0.
 
             self.ctrl.servoL(
                 command,
