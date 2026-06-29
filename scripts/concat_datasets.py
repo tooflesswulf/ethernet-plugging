@@ -128,7 +128,6 @@ def inspect_source(dataset_dir: str, ep_slice: slice) -> SourceInfo:
 
 def check_consistent(sources: list[SourceInfo]):
     first = sources[0]
-    first_meta_keys = set(flatten_keys(first.metadata))
     for s in sources[1:]:
         for name in STITCHED_FIELDS:
             if s.field_shapes[name][1:] != first.field_shapes[name][1:]:
@@ -153,8 +152,35 @@ def check_consistent(sources: list[SourceInfo]):
         if first.framerate is not None and s.framerate != first.framerate:
             raise ValueError(f"framerate mismatch: {s.dataset_dir} has {s.framerate}, expected {first.framerate}")
 
-        if set(flatten_keys(s.metadata)) != first_meta_keys:
-            raise ValueError(f"metadata fields differ between {first.dataset_dir} and {s.dataset_dir}")
+
+def prune_metadata(d: dict, keep: set[str], prefix: str = '') -> dict:
+    pruned = {}
+    for key, value in d.items():
+        path = f'{prefix}{key}'
+        if isinstance(value, dict):
+            sub = prune_metadata(value, keep, prefix=path + '/')
+            if sub:
+                pruned[key] = sub
+        elif path in keep:
+            pruned[key] = value
+    return pruned
+
+
+def intersect_metadata(sources: list[SourceInfo]) -> list[dict]:
+    """Restrict every source's metadata down to the fields common to all of them.
+
+    Sources may come from datasets generated at different times with slightly
+    different metadata schemas; fields missing from at least one source can't
+    be merged, so they're dropped (with a warning) rather than failing the
+    whole concatenation.
+    """
+    key_sets = [set(flatten_keys(s.metadata)) for s in sources]
+    common = set.intersection(*key_sets)
+    dropped = set.union(*key_sets) - common
+    if dropped:
+        print(f"Warning: metadata fields not present in all sources will be dropped from the "
+              f"merged dataset: {', '.join(sorted(dropped))}")
+    return [prune_metadata(s.metadata, common) for s in sources]
 
 
 def build_virtual_dataset(out_f: h5py.File, name: str, sources: list[SourceInfo]):
@@ -204,7 +230,7 @@ def concat_datasets(sources: list[SourceInfo], out_dir: pathlib.Path):
             build_filepath_images(f, sources)
 
         meta_group = f.create_group('metadata')
-        write_metadata(meta_group, merge_metadata([s.metadata for s in sources]))
+        write_metadata(meta_group, merge_metadata(intersect_metadata(sources)))
         if sources[0].framerate is not None:
             meta_group.attrs['framerate'] = sources[0].framerate
 
