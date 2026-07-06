@@ -1,5 +1,5 @@
 from agent.eval.eval_realtime import EvalRealtimeChunking
-from agent.utils.robot_utils import reset_gripper, reset_to_position, reset_relative, reset_wait, reset_teleop
+from agent.utils.robot_utils import interrupt
 import numpy as np
 import argparse
 import os
@@ -9,19 +9,28 @@ from util import URPose
 
 class TeleoperationReset(EvalRealtimeChunking):
     # cable_drop_pos = URPose(-.0562, .6679, .0456, 2.508, 2.524, .936)
-    cable_drop_pos = URPose(-0.04938359, 0.64969687 , 0.07542422 ,-1.77502314 ,-1.78634705, -0.66244883)
+    cable_drop_pos = URPose(-0.04938359, 0.64969687, 0.07542422, -1.77502314, -1.78634705, -0.66244883)
 
     def get_action(self):
         if self.iface.dualsense.state.DpadLeft:
-            # Start reset sequence. The `reset_*` calls queue up instructions behind the scenes,
-            #  so custom logic needs to be 1. run through promise.then() and 2. be non-blocking.
-            reset_relative(self, [0, 0, .02, 0, 0, 0], speed=0.05)
-            reset_to_position(self, self.cable_drop_pos)
-            reset_gripper(self, 0, settle_time=1.0)
-            reset_to_position(self, self.home_pose) \
-               .then(lambda _: self.buffer.clear())
-            return self.get_action()
+            last_pose, last_grip, _, _ = self.last_action
+            if last_grip == 1:
+                return self.reset_cable()
+
+            print('Dpad-Left pressed, but gripper is open. Ignoring.')
         return super().get_action()
+
+    def reset_cable(self):
+        # Start interrupt sequence. The seq methods queue up instructions behind the scenes,
+        #   so custom logic needs to be 1. run through promise.then() and 2. be non-blocking.
+        print('Starting cable reset sequence.')
+        seq = interrupt(self)
+        seq.move_relative([0, 0, .02, 0, 0, 0], speed=0.05)
+        seq.move_to(self.cable_drop_pos)
+        seq.gripper(0, settle_time=1.0)
+        seq.move_to(self.home_pose) \
+           .then(lambda _: self.buffer.clear())
+        return self.get_action()
 
 
 if __name__ == '__main__':
