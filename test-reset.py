@@ -1,10 +1,25 @@
 from agent.eval.eval_realtime import EvalRealtimeChunking
+from agent.utils.robot_utils import reset_gripper, reset_to_position
 import numpy as np
 import argparse
 import os
 
+from util import URPose
+
+
 class TeleoperationReset(EvalRealtimeChunking):
-    pass
+    cable_drop_pos = URPose(-.0562, .6679, .0356, 2.508, 2.524, .936)
+
+    def get_action(self):
+        if self.iface.dualsense.state.DpadLeft:
+            # Start reset sequence
+            reset_to_position(self, self.cable_drop_pos) \
+                .then(lambda _: reset_gripper(self, 0)) \
+                .then(lambda _: reset_to_position(self, self.home_pose)) \
+                .then(lambda _: self.action_chunk.clear())
+            return self.get_action()
+        return super().get_action()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
