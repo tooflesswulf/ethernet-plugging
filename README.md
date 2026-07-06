@@ -3,7 +3,7 @@
 ## Environment setup
 
 ```
-conda create -n realrobot python=3.11
+conda create -n realrobot "python>=3.11"
 pip install -r requirements.txt
 ```
 
@@ -26,6 +26,10 @@ export PYTHONPATH=${PYTHONPATH}:"/path/to/ethernet-plugging"
 source ~/.bashrc 
 # then reactivate your conda environment
 ```
+
+TODO: fix this up. For now, useful links:
+
+https://github.com/mjun0812/flash-attention-prebuild-wheels / UsefulSearchPage pip install
 
 ## Internet Connection Check (Mac)
 

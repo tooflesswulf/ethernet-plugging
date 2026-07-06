@@ -6,8 +6,10 @@ imageio
 matplotlib
 opencv-python
 pyrealsense2
+qwen-vl-utils
 robosuite
 scipy
 tqdm
+transformers
 ur-rtde
 wandb
