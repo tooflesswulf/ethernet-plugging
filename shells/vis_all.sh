@@ -1,5 +1,5 @@
-for file in $(ls logs_pluginv2_local_delta_50); do
-    echo "python scripts/visualize-demo.py -f logs_pluginv2_local_delta_50/$file/rawdata.h5";
-    python scripts/visualize-demo.py -f logs_pluginv2_local_delta_50/$file/rawdata.h5;
+DIR=../dataset/ethernet_plugin_unplug
+for file in $(ls $DIR); do
+    echo "python scripts/visualize-demo.py -f $DIR/$file/rawdata.h5";
+    python scripts/visualize-demo.py -f $DIR/$file/rawdata.h5;
 done
-
