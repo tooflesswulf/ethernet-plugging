@@ -102,7 +102,7 @@ def compute_norm_stats(dataset) -> dict:
     """
     actions = np.asarray(dataset.actions)
     flat_actions = actions.reshape(-1, actions.shape[-1])
-    obs = dataset.obs.detach().cpu().numpy()
+    obs = dataset.obs
     return {
         'actions': {'min': flat_actions.min(0), 'max': flat_actions.max(0)},
         'states': {'min': obs.min(0), 'max': obs.max(0)},
