@@ -8,21 +8,18 @@ from util import URPose
 
 
 class TeleoperationReset(EvalRealtimeChunking):
-    cable_drop_pos = URPose(-.0562, .6679, .0356, 2.508, 2.524, .936)
+    # cable_drop_pos = URPose(-.0562, .6679, .0456, 2.508, 2.524, .936)
+    cable_drop_pos = URPose(-0.04938359, 0.64969687 , 0.07542422 ,-1.77502314 ,-1.78634705, -0.66244883)
 
     def get_action(self):
         if self.iface.dualsense.state.DpadLeft:
             # Start reset sequence. The `reset_*` calls queue up instructions behind the scenes,
             #  so custom logic needs to be 1. run through promise.then() and 2. be non-blocking.
-            reset_relative(self, [0, 0, .05, 0, 0, 0])
+            reset_relative(self, [0, 0, .02, 0, 0, 0], speed=0.05)
             reset_to_position(self, self.cable_drop_pos)
             reset_gripper(self, 0, settle_time=1.0)
             reset_to_position(self, self.home_pose) \
                .then(lambda _: self.buffer.clear())
-            # Terminal step: joystick teleop. DpadRight hands control back to the policy.
-            reset_teleop(self, until=lambda: self.iface.dualsense.state.DpadRight) \
-               .then(lambda _: self.buffer.clear())
-
             return self.get_action()
         return super().get_action()
 
