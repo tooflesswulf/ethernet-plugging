@@ -352,16 +352,19 @@ class Env:
                 if gripper_state == 0:
                     if gs != wsg.GripperState.IDLE.value:
                         self.gripper.stop().wait()
-                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed)
+                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
+                        .finished.catch(lambda e: print(f'Gripper GRIP failed: {e}'))
                     self.gripper_state = 1
                 else:
                     if gs == wsg.GripperState.GRASPING.value:
                         self.gripper.stop().wait()
-                        self.gripper.move(self.open_width, speed=self.g_speed)
+                        self.gripper.move(self.open_width, speed=self.g_speed) \
+                            .finished.catch(lambda e: print(f'Gripper MOVE failed: {e}'))
                         self.gripper_state = 0
                     else:
                         cur_width = self.gripper_obs[-1].gripper_width
-                        self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed)
+                        self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
+                            .finished.catch(lambda e: print(f'Gripper RELEASE failed: {e}'))
                         self.gripper_state = 0
 
             # ----------------------------
