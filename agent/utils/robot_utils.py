@@ -95,13 +95,18 @@ class ResetSequence:
         iface.gripper_state = des_gripper
 
 
-def motion_step(rexec, target_pose, gripper_state=None, speed=0.08, rot_speed=0.5,
-                pos_tol=2e-3, rot_tol=0.02, timeout=15.0):
+def motion_step(rexec, target_pose, gripper_state=None, relative=False,
+                speed=0.08, rot_speed=0.5, pos_tol=2e-3, rot_tol=0.02, timeout=15.0):
     """
     Per-tick step driving the robot to `target_pose`, for ResetSequence.add().
 
+    With `relative=True`, `target_pose` is a delta [dx, dy, dz, drx, dry, drz]
+    (base-frame translation, tool-frame rotation) applied to wherever the
+    robot is when the step *starts* — i.e. after any earlier queued steps
+    have finished, not where it was at queue time.
+
     Interpolates the commanded pose from wherever the robot is on the first
-    tick to `target_pose` (linear position, slerp orientation) over a duration
+    tick to the goal (linear position, slerp orientation) over a duration
     set by `speed` (m/s) and `rot_speed` (rad/s), whichever takes longer; the
     control loop's clamp() still limits per-servo step size for safety.
     Finishes when the measured pose converges (pos_tol meters, rot_tol
@@ -112,30 +117,38 @@ def motion_step(rexec, target_pose, gripper_state=None, speed=0.08, rot_speed=0.
     env = rexec.env
     target_pose = URPose(*target_pose)
     start_pose = None
+    goal = None
     start_t = None
     duration = None
 
     def step():
-        nonlocal start_pose, start_t, duration
+        nonlocal start_pose, goal, start_t, duration
         if start_pose is None:  # first tick: plan from wherever the robot is now
-            print(f'Resetting robot to {target_pose} ...')
             start_pose = URPose(*env.get_obs()['state']['actual_pose'])
-            dist = np.linalg.norm(np.array(target_pose[:3]) - np.array(start_pose[:3]))
-            ang = (R.from_rotvec(start_pose[3:]).inv() * R.from_rotvec(target_pose[3:])).magnitude()
+            if relative:
+                goal = URPose(*map(float, np.r_[
+                    np.array(start_pose[:3]) + np.array(target_pose[:3]),
+                    (R.from_rotvec(start_pose[3:]) * R.from_rotvec(target_pose[3:])).as_rotvec(),
+                ]))
+            else:
+                goal = target_pose
+            print(f'Resetting robot to {goal} ...')
+            dist = np.linalg.norm(np.array(goal[:3]) - np.array(start_pose[:3]))
+            ang = (R.from_rotvec(start_pose[3:]).inv() * R.from_rotvec(goal[3:])).magnitude()
             duration = max(dist / speed, ang / rot_speed, 1e-6)
             start_t = time.perf_counter()
         grip = env.des_gripper_state if gripper_state is None else gripper_state
 
         actual = np.array(env.get_obs()['state']['actual_pose'])
-        pos_err = np.linalg.norm(actual[:3] - np.array(target_pose[:3]))
-        rot_err = (R.from_rotvec(actual[3:]) * R.from_rotvec(target_pose[3:]).inv()).magnitude()
+        pos_err = np.linalg.norm(actual[:3] - np.array(goal[:3]))
+        rot_err = (R.from_rotvec(actual[3:]) * R.from_rotvec(goal[3:]).inv()).magnitude()
         if pos_err < pos_tol and rot_err < rot_tol:
             return None
         if time.perf_counter() - start_t > timeout:
-            print(f'motion to {target_pose} timed out (pos_err={pos_err:.4f} m, rot_err={rot_err:.4f} rad)')
+            print(f'motion to {goal} timed out (pos_err={pos_err:.4f} m, rot_err={rot_err:.4f} rad)')
             return None
 
-        cmd_pose = interpolate(start_pose, target_pose, (time.perf_counter() - start_t) / duration)
+        cmd_pose = interpolate(start_pose, goal, (time.perf_counter() - start_t) / duration)
         return cmd_pose, grip, False, 0.
 
     return step
@@ -177,32 +190,77 @@ def gripper_step(rexec, gripper_state, settle_time=0.3, width_eps=0.1, timeout=5
     return step
 
 
-def reset_to_position(rexec, reset_pose, gripper_state=None, speed=0.08, rot_speed=0.5,
-                      pos_tol=2e-3, rot_tol=0.02, timeout=15.0):
+def wait_step(rexec, duration):
+    """
+    Per-tick step that holds the current commanded pose and gripper state for
+    `duration` seconds, for ResetSequence.add(). The clock starts on the
+    step's first tick, not when it is queued.
+    """
+    env = rexec.env
+    start_t = None
+
+    def step():
+        nonlocal start_t
+        now = time.perf_counter()
+        if start_t is None:
+            start_t = now
+        if now - start_t > duration:
+            return None
+        return URPose(*env.des_pose), env.des_gripper_state, False, 0.
+
+    return step
+
+
+def reset_wait(rexec, t):
+    """
+    Queue a wait on `rexec`'s active ResetSequence: hold the current pose and
+    gripper state in place for `t` seconds. Returns a Promise resolved when
+    the wait ends; see reset_to_position for chaining usage.
+    """
+    seq = ResetSequence.current(rexec)
+    return seq.add(wait_step(rexec, t))
+
+
+def reset_to_position(rexec, reset_pose, gripper_state=None, relative=False,
+                      speed=0.08, rot_speed=0.5, pos_tol=2e-3, rot_tol=0.02, timeout=15.0):
     """
     Queue a motion back to `reset_pose` on `rexec`'s active ResetSequence
     (hijacking get_action() if not already hijacked), ignoring joystick/policy
-    input until the whole sequence completes.
+    input until the whole sequence completes. With `relative=True`,
+    `reset_pose` is a delta from wherever the robot is when this step starts
+    (see motion_step / reset_relative).
 
     Returns a Promise resolved when this motion finishes. Chain `.then()` to
     queue further steps or run custom logic before control is handed back:
 
         def get_action(self):
             if reset_condition:
-                (reset_to_position(self, PRE_RESET_POSE)
+                (reset_relative(self, [0, 0, 0.05, 0, 0, 0])  # retract 5 cm up
                     .then(lambda _: reset_gripper(self, 0))
                     .then(lambda _: reset_to_position(self, self.home_pose))
                     .then(lambda _: self.action_chunk.clear()))
                 return self.get_action()  # now hijacked: plays the first reset tick
             ...
 
-    Calling it (or reset_gripper) several times in a row queues the steps in
-    call order on the same sequence, so plain sequential style works too.
+    Calling it (or reset_gripper / reset_relative) several times in a row
+    queues the steps in call order on the same sequence, so plain sequential
+    style works too.
     """
     seq = ResetSequence.current(rexec)
     return seq.add(motion_step(rexec, reset_pose, gripper_state=gripper_state,
-                               speed=speed, rot_speed=rot_speed,
+                               relative=relative, speed=speed, rot_speed=rot_speed,
                                pos_tol=pos_tol, rot_tol=rot_tol, timeout=timeout))
+
+
+def reset_relative(rexec, delta_pose, **kwargs):
+    """
+    Queue a relative motion: `delta_pose` is [dx, dy, dz, drx, dry, drz]
+    (base-frame translation, tool-frame rotation) applied to wherever the
+    robot is when the step starts, e.g. [0, 0, 0.05, 0, 0, 0] moves up 5 cm.
+    Accepts the same keyword arguments as reset_to_position; returns a
+    Promise resolved when the motion finishes.
+    """
+    return reset_to_position(rexec, delta_pose, relative=True, **kwargs)
 
 
 def reset_gripper(rexec, gripper_state, settle_time=0.3, width_eps=0.1, timeout=5.0):
