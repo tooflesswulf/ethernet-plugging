@@ -15,15 +15,6 @@ DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
 
-def get_images(image_list, img_size=IMAGE_SIZE):
-    # N = len(os.listdir(dir_path)) if total_num_steps is None else min(len(os.listdir(dir_path)), total_num_steps)
-    images = []
-    for img_path in tqdm(image_list, desc="loading images to RAM"):
-        img = Image.open(img_path).resize((img_size, img_size))
-        images.append(np.array(img))
-    return np.array(images)
-
-
 class StitchedSequenceDataset(torch.utils.data.Dataset):
     """
     From: https://github.com/irom-princeton/dppo

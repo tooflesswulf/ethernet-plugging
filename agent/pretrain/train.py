@@ -42,7 +42,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=128,
-        num_workers=8,  # since all data are in ram, worker=0 is fine. multi-worker causing issue.
+        num_workers=8,
         shuffle=True,
     )
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=64)
