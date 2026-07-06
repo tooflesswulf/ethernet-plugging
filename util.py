@@ -23,14 +23,36 @@ def slerp(q1, q2, fraction):
     return q
 
 
-def blend(
+def interpolate(p_start: URPose, p_end: URPose, frac):
+    """
+    Interpolate between two poses: linear in position, slerp in orientation.
+    frac=0 -> p_start, frac=1 -> p_end (clipped to [0, 1]).
+    """
+    frac = np.clip(frac, 0, 1)
+    position = (
+        p_start.x + frac * (p_end.x - p_start.x),
+        p_start.y + frac * (p_end.y - p_start.y),
+        p_start.z + frac * (p_end.z - p_start.z),
+    )
+
+    R1 = R.from_rotvec([p_start.rx, p_start.ry, p_start.rz])
+    R2 = R.from_rotvec([p_end.rx, p_end.ry, p_end.rz])
+    if (R1.inv() * R2).magnitude() < 1e-6:
+        orientation = R1.as_rotvec()
+    else:
+        orientation = slerp(R1, R2, frac).as_rotvec()
+
+    return URPose(*position, *orientation)
+
+
+def clamp(
     p_start: URPose,
     p_end: URPose,
     max_position_step=[0.008, 0.008, 0.008],
     max_orientation_step=0.02,
 ):
     """
-    Smoothly blend current pose toward target pose while limiting
+    Clamps the step from current pose toward target pose to
     translational and rotational step sizes.
     """
 
@@ -66,6 +88,7 @@ def episode_index(data_dir, prefix='ep'):
         if d.startswith(prefix) and d.removeprefix(prefix).isdigit()
     ]
     return max(ixs, default=0) + 1
+
 
 def dict2hdf5(h5group, data: dict):
     for key, value in data.items():

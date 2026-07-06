@@ -11,7 +11,7 @@ import time
 import cv2
 import os
 
-from util import URPose, blend, slerp, episode_index, dict2hdf5
+from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
 from camera import Camera
 import wsg
 
@@ -292,23 +292,7 @@ class Env:
     def interpolate(self):
         t = time.perf_counter() - self.last_step_t
         perc = min(1, t * self.input_frequency)
-
-        actual_pose = self.last_step_end
-        des_pose = self.des_pose
-
-        interp_position = (
-            actual_pose.x + perc * (des_pose.x - actual_pose.x),
-            actual_pose.y + perc * (des_pose.y - actual_pose.y),
-            actual_pose.z + perc * (des_pose.z - actual_pose.z),
-        )
-        R1 = R.from_rotvec([actual_pose.rx, actual_pose.ry, actual_pose.rz])
-        R2 = R.from_rotvec([des_pose.rx, des_pose.ry, des_pose.rz])
-        delta_theta = (R1.inv() * R2).magnitude()
-        if delta_theta < 1e-6:
-            interp_orientation = R1.as_rotvec()
-        else:
-            interp_orientation = slerp(R1, R2, perc).as_rotvec()
-        return URPose(*interp_position, *interp_orientation)
+        return interpolate(self.last_step_end, self.des_pose, perc)
 
     force_alpha = 0.03
     _force_filtered = np.zeros(6)
@@ -373,7 +357,7 @@ class Env:
             if self.last_step_t > 0:
                 # Received at least 1 input
                 des_pose = self.interpolate()
-            command = blend(
+            command = clamp(
                 actual_pose,
                 des_pose,
                 self.max_position_step,
