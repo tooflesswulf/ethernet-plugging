@@ -26,7 +26,7 @@ def get_actions(policy: DiffusionPolicy, nimages, nagent_poses, curr_pose, curr_
 
 def wait_for_circle(env: Env, iface: DualSenseInterface, close_gripper=False):
     freq = 250
-    print('Waiting the circle ...')
+    print('Waiting the circle...')
     while True:
         flag = iface.update(1 / freq)
         if flag == -1:
