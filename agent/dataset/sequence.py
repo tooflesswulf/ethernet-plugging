@@ -10,17 +10,9 @@ import torch
 import pathlib
 import h5py
 
+IMAGE_SIZE = 128
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
-
-
-def get_images(image_list, img_size=128):
-    # N = len(os.listdir(dir_path)) if total_num_steps is None else min(len(os.listdir(dir_path)), total_num_steps)
-    images = []
-    for img_path in tqdm(image_list, desc="loading images to RAM"):
-        img = Image.open(img_path).resize((img_size, img_size))
-        images.append(np.array(img))
-    return np.array(images)
 
 
 class StitchedSequenceDataset(torch.utils.data.Dataset):
@@ -61,7 +53,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.dataset_path = pathlib.Path(dataset_path)
 
         # Load dataset to device
-        need_resize = False
         with h5py.File(self.dataset_path / 'dataset.h5', 'r') as f:
             traj_lengths = f['metadata/length'][:max_n_episodes]  # 1-D array
             total_num_steps = np.sum(traj_lengths)
@@ -84,18 +75,14 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             g_widths = np.array(f['gripper_width'][:total_num_steps])  # (N,)
 
             if f['images'].attrs['stored_as'] == 'image':
-                need_resize = True
-                image_list = np.array(f['images'][:total_num_steps]).transpose(0, 3, 1, 2)  # (N, C, H, W)
+                self.h5_image = True
             elif f['images'].attrs['stored_as'] == 'filepath':
-                image_path_list = [self.dataset_path / im.decode() for im in f['images'][:total_num_steps]]
-                image_list = get_images(image_path_list).transpose(0, 3, 1, 2)  # (N, C, H, W)
+                self.h5_image = False
 
         # Store dataset in memory for fast sampling during training
         self.indices = self.make_indices(traj_lengths, horizon_steps)
-        self.obs = torch.from_numpy(all_obs).float().to(device)  # (N, obs_dim)
-        self.images = torch.from_numpy(image_list).to(device)  # (N, C, H, W)
-        if need_resize:
-            self.images = F.resize(self.images, size=(128, 128))
+        self.obs = all_obs  # (N, obs_dim)
+        self.h5 = None
         self._precompute_actions(poses, g_widths)
 
         self.obs_dim = self.obs.shape[1]
@@ -108,6 +95,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         """
         repeat states/images if using history observation at the beginning of the episode
         """
+        if self.h5 is None:
+            self.h5 = h5py.File(self.dataset_path / 'dataset.h5', 'r')
+
         start, ep_start, ep_end = self.indices[idx]
         end = min(start + self.horizon_steps, ep_end)
         if end > ep_end:
@@ -115,16 +105,28 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
 
         # Conditioning observations: current and history states + images
-        obs = torch.stack([self.obs[max(start - t, ep_start)]
+        obs_np = np.array([self.obs[max(start - t, ep_start)]
                           for t in reversed(range(self.cond_steps))])  # more recent is at the end, # cond_steps x dim
-        images = torch.stack([self.images[max(start - t, ep_start)]
-                             for t in reversed(range(self.img_cond_steps))])  # img_cond_steps x H x W x C
-        conditions = {'state': obs, 'rgb': images / 255.0}
+        images = np.array([self.getimage(max(start - t, ep_start))
+                           for t in reversed(range(self.img_cond_steps))])
+        conditions = {'state': obs_np, 'rgb': images / 255.0}
 
         batch = DataBatch(self.actions[idx], conditions)
         if self.transform is not None:
             batch = self.transform(batch)
         return batch
+
+    def getimage(self, idx):
+        if self.h5 is None:
+            self.h5 = h5py.File(self.dataset_path / 'dataset.h5', 'r')
+        im = self.h5['images'][idx]
+        if self.h5_image:
+            img = Image.fromarray(im).resize((IMAGE_SIZE, IMAGE_SIZE))
+        else:
+            im_path = self.dataset_path / im.decode()
+            img = Image.open(im_path).resize((IMAGE_SIZE, IMAGE_SIZE))
+        im_np = np.array(img).transpose(2, 0, 1)  # (C, H, W)
+        return im_np
 
     def make_indices(self, traj_lengths, horizon_steps):
         """
@@ -177,16 +179,17 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         t0 = transforms[0]
         deltas = [t0.inv() * t for t in transforms]
         return np.array([delta.as_exp_coords() for delta in deltas])
-    
+
     def _pose_action_umi(self, poses):
         # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
-        delta_xyz = poses[1:, :3] - poses[:1, :3]; eulers = np.array([ R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:] ])
+        delta_xyz = poses[1:, :3] - poses[:1, :3]
+        eulers = np.array([R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:]])
         # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
         delta_eulers = eulers[1:] - eulers[:1]
         # wrap to [-pi, pi]
         delta_euler = (delta_eulers + np.pi) % (2 * np.pi) - np.pi
         delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
-        return np.concatenate( [delta_umi, delta_umi[-1:]] ) # poor decision here, pad by 1 by repeating last one.
+        return np.concatenate([delta_umi, delta_umi[-1:]])  # poor decision here, pad by 1 by repeating last one.
 
     def _pose_action_global_delta(self, poses):
         # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
