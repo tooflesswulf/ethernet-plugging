@@ -1,5 +1,5 @@
 from agent.eval.eval_realtime import EvalRealtimeChunking
-from agent.utils.robot_utils import reset_gripper, reset_to_position, reset_relative, reset_wait
+from agent.utils.robot_utils import reset_gripper, reset_to_position, reset_relative, reset_wait, reset_teleop
 import numpy as np
 import argparse
 import os
@@ -18,6 +18,9 @@ class TeleoperationReset(EvalRealtimeChunking):
             reset_to_position(self, self.cable_drop_pos)
             reset_gripper(self, 0, settle_time=1.0)
             reset_to_position(self, self.home_pose) \
+               .then(lambda _: self.buffer.clear())
+            # Terminal step: joystick teleop. DpadRight hands control back to the policy.
+            reset_teleop(self, until=lambda: self.iface.dualsense.state.DpadRight) \
                .then(lambda _: self.buffer.clear())
 
             return self.get_action()

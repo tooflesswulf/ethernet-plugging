@@ -221,6 +221,53 @@ def reset_wait(rexec, t):
     return seq.add(wait_step(rexec, t))
 
 
+def teleop_step(rexec, until=None):
+    """
+    Per-tick step that hands control to the joystick (the base
+    RobotExecution.get_action() behavior), for ResetSequence.add().
+
+    On its first tick the interface targets are re-synced to the current
+    commanded pose, so teleop continues from wherever the sequence left the
+    robot instead of the stale pre-reset target. Runs until the zero-arg
+    callable `until` returns truthy (checked once per tick); with until=None
+    it never finishes and the sequence stays in teleop indefinitely.
+    """
+    env, iface = rexec.env, rexec.iface
+    started = False
+
+    def step():
+        nonlocal started
+        if not started:
+            print('Entering joystick teleop...')
+            iface.targ_pose = np.array(env.des_pose)
+            iface.targ_zforce = 0.
+            iface.adaptive_mode = False
+            iface.gripper_state = env.des_gripper_state
+            started = True
+
+        if until is not None and until():
+            return None
+        return (URPose(*iface.target_pose), iface.gripper_state,
+                iface.adaptive_mode, iface.target_zforce)
+
+    return step
+
+
+def reset_teleop(rexec, until=None):
+    """
+    Queue joystick teleop on `rexec`'s active ResetSequence. With until=None
+    this is terminal: the sequence stays hijacked and the joystick keeps
+    control (the subclass's policy get_action never resumes). Pass a zero-arg
+    predicate to hand control back when it fires, e.g.
+
+        reset_teleop(self, until=lambda: self.iface.dualsense.state.DpadRight)
+
+    Returns a Promise resolved when `until` fires (never, if until is None).
+    """
+    seq = ResetSequence.current(rexec)
+    return seq.add(teleop_step(rexec, until))
+
+
 def reset_to_position(rexec, reset_pose, gripper_state=None, relative=False,
                       speed=0.08, rot_speed=0.5, pos_tol=2e-3, rot_tol=0.02, timeout=15.0):
     """
