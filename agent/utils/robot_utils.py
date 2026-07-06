@@ -1,6 +1,6 @@
 import time
 
-from env import URPose, Env
+from env import URPose, Env, GRIP_CLOSED
 from interface import DualSenseInterface
 from agent.model.policy import DiffusionPolicy
 from agent.utils.interrupt_sequence import InterruptSequence
@@ -46,7 +46,7 @@ def wait_for_circle(env: Env, iface: DualSenseInterface, close_gripper=False):
                 des_zforce=iface.target_zforce,
                 adaptive_mode=iface.adaptive_mode,
             )
-        if des_gripper == 1:
+        if des_gripper == GRIP_CLOSED:
             break
         time.sleep(1 / 250)
 

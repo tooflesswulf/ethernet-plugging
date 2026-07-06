@@ -8,7 +8,7 @@ Usage from within a RobotExecution subclass's get_action():
     if reset_condition:
         seq = interrupt(self)
         seq.move_relative([0, 0, 0.05, 0, 0, 0])   # retract 5 cm up
-        seq.gripper(0)
+        seq.gripper(GRIP_OPEN)
         seq.move_to(self.home_pose) \\
            .then(lambda _: self.buffer.clear())    # custom logic via Promise
         return self.get_action()  # now taken over: plays the first tick
@@ -79,8 +79,8 @@ class InterruptSequence:
 
         Args:
             target_pose: URPose (or any 6-sequence [x, y, z, rx, ry, rz])
-            gripper_state: gripper command held during the motion (0=open,
-                1=closed); None holds the last commanded state
+            gripper_state: gripper command held during the motion (GRIP_OPEN,
+                GRIP_CLOSED); None holds the last commanded state
             relative: treat `target_pose` as a delta from wherever the robot
                 is when the step starts (see move_relative)
             speed: translation speed in m/s
@@ -111,7 +111,7 @@ class InterruptSequence:
         Queue a gripper move, holding the current pose while it executes.
 
         Args:
-            gripper_state: 0=open, 1=closed
+            gripper_state: GRIP_OPEN (0) or GRIP_CLOSED (1)
             settle_time: done once the observed width has been stable this long (s)
             width_eps: width change (mm) below which the gripper counts as stable
             timeout: give up (but continue the sequence) after this many seconds
@@ -252,7 +252,7 @@ class MotionStep(Step):
 class GripperStep(Step):
     """
     Hold the current commanded pose and command the gripper to
-    `gripper_state` (0=open, 1=closed). Finishes once the observed width has
+    `gripper_state` (GRIP_OPEN, GRIP_CLOSED). Finishes once the observed width has
     been stable (within `width_eps` mm) for `settle_time` seconds, or after
     `timeout`.
     """

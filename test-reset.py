@@ -5,6 +5,7 @@ import argparse
 import os
 
 from util import URPose
+from env import GRIP_OPEN, GRIP_CLOSED
 
 
 class TeleoperationReset(EvalRealtimeChunking):
@@ -14,7 +15,7 @@ class TeleoperationReset(EvalRealtimeChunking):
     def get_action(self):
         if self.iface.dualsense.state.DpadLeft:
             last_pose, last_grip, _, _ = self.last_action
-            if last_grip == 1:
+            if last_grip == GRIP_CLOSED:
                 return self.reset_cable()
 
             print('Dpad-Left pressed, but gripper is open. Ignoring.')
@@ -27,7 +28,7 @@ class TeleoperationReset(EvalRealtimeChunking):
         seq = interrupt(self)
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=0.05)
         seq.move_to(self.cable_drop_pos)
-        seq.gripper(0, settle_time=1.0)
+        seq.gripper(GRIP_OPEN, settle_time=1.0)
         seq.move_to(self.home_pose) \
            .then(lambda _: self.buffer.clear())
         return self.get_action()

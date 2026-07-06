@@ -15,6 +15,10 @@ from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
 from camera import Camera
 import wsg
 
+# Gripper command states (des_gripper_state / gripper_state)
+GRIP_OPEN = 0
+GRIP_CLOSED = 1
+
 
 class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
     pass
@@ -73,7 +77,7 @@ class Env:
         self.t0 = None
         self.open_width = gwidth + 2 * gpullback
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
-        self.gripper_state = 0  # 0=open, 1=closed
+        self.gripper_state = GRIP_OPEN
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
         self.des_zforce = 0.
         self.adaptive_mode = False
@@ -163,7 +167,7 @@ class Env:
     def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False, dualsense=None):
         """Args:
             des_pose: URPose
-            des_gripper_state: int (0=open, 1=closed)
+            des_gripper_state: int (GRIP_OPEN=0, GRIP_CLOSED=1)
             des_zforce: float (desired z-force in N)
             adaptive_mode: bool (whether to use adaptive z-force control)
         """
@@ -258,7 +262,7 @@ class Env:
         # ============================================================
         g = self.gripper.move(position=self.open_width, speed=self.g_speed)
         g.finished.wait()
-        self.gripper_state = 0
+        self.gripper_state = GRIP_OPEN
 
         # ============================================================
         # Reset observations
@@ -333,23 +337,23 @@ class Env:
             # ----------------------------
             if gripper_state != des_gripper_state:
                 gs = self.gripper.gripstate().value
-                if gripper_state == 0:
+                if gripper_state == GRIP_OPEN:
                     if gs != wsg.GripperState.IDLE.value:
                         self.gripper.stop().wait()
                     self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
                         .finished.catch(lambda e: print(f'Gripper GRIP failed: {e}'))
-                    self.gripper_state = 1
+                    self.gripper_state = GRIP_CLOSED
                 else:
                     if gs == wsg.GripperState.GRASPING.value:
                         self.gripper.stop().wait()
                         self.gripper.move(self.open_width, speed=self.g_speed) \
                             .finished.catch(lambda e: print(f'Gripper MOVE failed: {e}'))
-                        self.gripper_state = 0
+                        self.gripper_state = GRIP_OPEN
                     else:
                         cur_width = self.gripper_obs[-1].gripper_width
                         self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
                             .finished.catch(lambda e: print(f'Gripper RELEASE failed: {e}'))
-                        self.gripper_state = 0
+                        self.gripper_state = GRIP_OPEN
 
             # ----------------------------
             # blend + servo
