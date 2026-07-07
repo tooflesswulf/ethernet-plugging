@@ -11,9 +11,13 @@ import time
 import cv2
 import os
 
-from util import URPose, blend, slerp, episode_index, dict2hdf5
+from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
 from camera import Camera
 import wsg
+
+# Gripper command states (des_gripper_state / gripper_state)
+GRIP_OPEN = 0
+GRIP_CLOSED = 1
 
 
 class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
@@ -76,7 +80,7 @@ class Env:
         self.t0 = None
         self.open_width = gwidth + 2 * gpullback
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
-        self.gripper_state = 0  # 0=open, 1=closed
+        self.gripper_state = GRIP_OPEN
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
         self.des_zforce = 0.
         self.adaptive_mode = False
@@ -193,7 +197,7 @@ class Env:
     def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False, dualsense=None):
         """Args:
             des_pose: URPose
-            des_gripper_state: int (0=open, 1=closed)
+            des_gripper_state: int (GRIP_OPEN=0, GRIP_CLOSED=1)
             des_zforce: float (desired z-force in N)
             adaptive_mode: bool (whether to use adaptive z-force control)
         """
@@ -288,7 +292,7 @@ class Env:
         # ============================================================
         g = self.gripper.move(position=self.open_width, speed=self.g_speed)
         g.finished.wait()
-        self.gripper_state = 0
+        self.gripper_state = GRIP_OPEN
 
         # ============================================================
         # Reset observations
@@ -332,23 +336,7 @@ class Env:
     def interpolate(self):
         t = time.perf_counter() - self.last_step_t
         perc = min(1, t * self.input_frequency)
-
-        actual_pose = self.last_step_end
-        des_pose = self.des_pose
-
-        interp_position = (
-            actual_pose.x + perc * (des_pose.x - actual_pose.x),
-            actual_pose.y + perc * (des_pose.y - actual_pose.y),
-            actual_pose.z + perc * (des_pose.z - actual_pose.z),
-        )
-        R1 = R.from_rotvec([actual_pose.rx, actual_pose.ry, actual_pose.rz])
-        R2 = R.from_rotvec([des_pose.rx, des_pose.ry, des_pose.rz])
-        delta_theta = (R1.inv() * R2).magnitude()
-        if delta_theta < 1e-6:
-            interp_orientation = R1.as_rotvec()
-        else:
-            interp_orientation = slerp(R1, R2, perc).as_rotvec()
-        return URPose(*interp_position, *interp_orientation)
+        return interpolate(self.last_step_end, self.des_pose, perc)
 
     _GHAT = np.array([0., 0., 1.])  # gravity direction in the base frame (unit)
 
@@ -532,20 +520,23 @@ class Env:
             # ----------------------------
             if gripper_state != des_gripper_state:
                 gs = self.gripper.gripstate().value
-                if gripper_state == 0:
+                if gripper_state == GRIP_OPEN:
                     if gs != wsg.GripperState.IDLE.value:
                         self.gripper.stop().wait()
-                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed)
-                    self.gripper_state = 1
+                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
+                        .finished.catch(lambda e: print(f'Gripper GRIP failed: {e}'))
+                    self.gripper_state = GRIP_CLOSED
                 else:
                     if gs == wsg.GripperState.GRASPING.value:
                         self.gripper.stop().wait()
-                        self.gripper.move(self.open_width, speed=self.g_speed)
-                        self.gripper_state = 0
+                        self.gripper.move(self.open_width, speed=self.g_speed) \
+                            .finished.catch(lambda e: print(f'Gripper MOVE failed: {e}'))
+                        self.gripper_state = GRIP_OPEN
                     else:
                         cur_width = self.gripper_obs[-1].gripper_width
-                        self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed)
-                        self.gripper_state = 0
+                        self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
+                            .finished.catch(lambda e: print(f'Gripper RELEASE failed: {e}'))
+                        self.gripper_state = GRIP_OPEN
 
             # ----------------------------
             # blend + servo
@@ -553,7 +544,7 @@ class Env:
             if self.last_step_t > 0:
                 # Received at least 1 input
                 des_pose = self.interpolate()
-            command = blend(
+            command = clamp(
                 actual_pose,
                 des_pose,
                 self.max_position_step,
