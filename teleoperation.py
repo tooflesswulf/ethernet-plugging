@@ -27,6 +27,11 @@ class Teleoperation(robot_execution.RobotExecution):
         # print(f'Target port = {self.data["target_port"]}')
         pass
 
+    def runtime_info(self):
+        obs = self.last_obs
+        force = obs['state']['filtered_force']
+        print(f"fx: {force[0]:5.2f} fy: {force[1]:5.2f} fz: {force[2]:5.2f}", end='\r')
+
     def __init__(self, args):
         control_freq = 100
         home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see)
