@@ -7,6 +7,11 @@ in free space, fits the residual, and saves it next to env.py so Env picks
 it up automatically.
 
 Run with the robot clear of contact and nothing grasped.
+
+NOTE: the default sweep includes tool-axis rotations up to +-120 deg (needed to
+separate sensor-bias artifacts from gravity-shaped ones). Make sure the gripper
+can spin that far without cable snag or collision, or pass a custom orientation
+list to calibrate_gravity_residual().
 """
 import pathlib
 import sys
