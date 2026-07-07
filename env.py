@@ -65,6 +65,7 @@ class Env:
         gforce=40,
         gspeed=50,
         gpullback=10,
+        gravity_cal_path=None,
         metadata={}
     ):
         # ============================================================
@@ -79,9 +80,18 @@ class Env:
         self.adaptive_mode = False
         self.last_step_t = time.perf_counter()
 
-        # Payload gravity compensation (populated in reset() after zeroFtSensor)
-        self.payload_mass = 0.
-        self.payload_cog = np.zeros(3)  # CoG relative to TCP, in tool frame
+        # Residual gravity compensation. getActualTCPForce() already compensates
+        # the configured payload; what drifts with orientation is the residual from
+        # payload config error, fitted by calibrate_gravity_residual().
+        self.grav_cal_path = pathlib.Path(gravity_cal_path) if gravity_cal_path \
+            else pathlib.Path(__file__).parent / 'gravity_residual.npz'
+        self.grav_residual = np.zeros(3)      # residual gravity force, base frame [N]
+        self.grav_residual_cog = np.zeros(3)  # residual lever arm, tool frame [m]
+        if self.grav_cal_path.exists():
+            cal = np.load(self.grav_cal_path)
+            self.grav_residual = cal['residual_force']
+            self.grav_residual_cog = cal['residual_cog']
+            print(f'Loaded gravity residual calibration from {self.grav_cal_path}')
         self._ft_zero_rot = None  # TCP orientation when the FT sensor was zeroed
 
         # ============================================================
@@ -273,16 +283,10 @@ class Env:
         self.camera_obs: list[CameraObs] = []
         self.commands: list[Command] = []
         self.ctrl.zeroFtSensor()
-
-        self.payload_mass = self.recv.getPayload()
-        tcp_offset = np.array(self.ctrl.getTCPOffset())
-        # CoG is reported relative to the tool flange; shift it to the TCP
-        # (assumes the TCP offset has no rotation component)
-        self.payload_cog = np.array(self.recv.getPayloadCog()) - tcp_offset[:3]
         zero_pose = URPose(*self.recv.getActualTCPPose())
         self._ft_zero_rot = R.from_rotvec([zero_pose.rx, zero_pose.ry, zero_pose.rz])
 
-        print('payload kg', self.payload_mass)
+        print('payload kg', self.recv.getPayload())
         print('payload cog', self.recv.getPayloadCog())
 
         print('Environment reset complete.')
@@ -327,26 +331,91 @@ class Env:
             interp_orientation = slerp(R1, R2, perc).as_rotvec()
         return URPose(*interp_position, *interp_orientation)
 
-    gravity = np.array([0., 0., -9.81])
-
-    def _payload_gravity_wrench_tool(self, rot: R):
-        """Payload gravity wrench about the TCP, expressed in the tool frame at orientation `rot`."""
-        f = rot.inv().apply(self.payload_mass * self.gravity)
-        return np.r_[f, np.cross(self.payload_cog, f)]
+    def _residual_wrench_tool(self, rot: R):
+        """Residual gravity wrench expressed in the tool frame at orientation `rot`."""
+        f = rot.inv().apply(self.grav_residual)
+        return np.r_[f, np.cross(self.grav_residual_cog, f)]
 
     def compensate_gravity(self, force, actual_pose):
-        """Remove the payload gravity artifact from a raw TCP wrench (base frame).
+        """Remove the orientation-dependent residual from a getActualTCPForce() wrench.
 
-        zeroFtSensor() stores the gravity wrench at the zeroing orientation as a
-        tool-frame offset, so rotating away from that orientation leaks the
-        difference in gravity wrenches into the reading.
+        The controller compensates the configured payload internally; a slightly-off
+        configuration leaks a residual wrench that is zeroed (as a tool-frame offset)
+        by zeroFtSensor() and drifts back in as the tool rotates. Subtract how much
+        the residual has changed since the zeroing orientation.
         """
         if self._ft_zero_rot is None:
             return np.asarray(force)
         rot = R.from_rotvec([actual_pose.rx, actual_pose.ry, actual_pose.rz])
-        dw = self._payload_gravity_wrench_tool(rot) - self._payload_gravity_wrench_tool(self._ft_zero_rot)
+        dw = self._residual_wrench_tool(rot) - self._residual_wrench_tool(self._ft_zero_rot)
         artifact = np.r_[rot.apply(dw[:3]), rot.apply(dw[3:])]
         return np.asarray(force) - artifact
+
+    def calibrate_gravity_residual(self, tilt_angle=0.25, settle_time=0.7, sample_time=1.0, save=True):
+        """Fit the orientation-dependent residual in getActualTCPForce().
+
+        Tilts the TCP through a set of orientations in free space and fits the
+        drift as a constant base-frame force `v` (with tool-frame lever arm `c`
+        for the torque part) seen through the tool-frame zero offset:
+
+            f_base(R) = (I - R R0^T) v,   tau_tool(R) = c x (R^T - R0^T) v
+
+        Run right after reset() (FT sensor freshly zeroed), before start(), with
+        no contact and nothing grasped. The result is saved to `grav_cal_path`
+        and loaded automatically on the next Env construction.
+        """
+        assert self._ft_zero_rot is not None, 'call reset() first'
+        assert not any(t.is_alive() for t in self.threads), 'run before start()'
+        start_pose = URPose(*self.recv.getActualTCPPose())
+        rot0 = self._ft_zero_rot
+
+        s2 = np.sqrt(0.5)
+        axes = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (s2, s2, 0), (-s2, s2, 0)]
+        rots = [rot0] + [rot0 * R.from_rotvec(np.array(ax) * tilt_angle) for ax in axes]
+
+        forces, torques = [], []
+        for rot in rots:
+            self.ctrl.moveL(URPose(start_pose.x, start_pose.y, start_pose.z, *rot.as_rotvec()), 0.1, 0.1)
+            time.sleep(settle_time)
+            samples = []
+            t_end = time.perf_counter() + sample_time
+            while time.perf_counter() < t_end:
+                samples.append(self.recv.getActualTCPForce())
+                time.sleep(0.008)
+            wrench = np.mean(samples, axis=0)
+            forces.append(wrench[:3])
+            torques.append(wrench[3:])
+        self.ctrl.moveL(start_pose, 0.1, 0.1)
+
+        # f_base_i = (I - R_i R0^T) v  ->  least-squares for v
+        A = np.vstack([np.eye(3) - (rot * rot0.inv()).as_matrix() for rot in rots])
+        b = np.concatenate(forces)
+        v, *_ = np.linalg.lstsq(A, b, rcond=None)
+
+        # tau_tool_i = c x u_i = -[u_i]x c,  u_i = (R_i^T - R0^T) v  ->  least-squares for c
+        def skew(u):
+            return np.array([[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]])
+        us = [(rot.inv().as_matrix() - rot0.inv().as_matrix()) @ v for rot in rots]
+        M = np.vstack([-skew(u) for u in us])
+        t = np.concatenate([rot.inv().apply(tau) for rot, tau in zip(rots, torques)])
+        if np.linalg.norm(v) < 0.05:
+            # residual too small to identify a lever arm; don't fit noise
+            c = np.zeros(3)
+        else:
+            c, *_ = np.linalg.lstsq(M, t, rcond=None)
+
+        rms_before = np.sqrt(np.mean(b ** 2))
+        rms_after = np.sqrt(np.mean((b - A @ v) ** 2))
+        print(f'Gravity residual |v| = {np.linalg.norm(v):.3f} N '
+              f'(~{np.linalg.norm(v) / 9.81 * 1000:.0f} g payload config error)')
+        print(f'Force drift RMS across tilts: {rms_before:.3f} N -> {rms_after:.3f} N after fit')
+
+        self.grav_residual = v
+        self.grav_residual_cog = c
+        if save:
+            np.savez(self.grav_cal_path, residual_force=v, residual_cog=c)
+            print(f'Saved calibration to {self.grav_cal_path}')
+        return v, c
 
     force_alpha = 0.03
     _force_filtered = np.zeros(6)
