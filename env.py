@@ -267,6 +267,10 @@ class Env:
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
         self.commands: list[Command] = []
+        self.ctrl.zeroFtSensor()
+
+        print('payload kg', self.recv.getPayload())
+        print('payload cog', self.recv.getPayloadCog())
 
         print('Environment reset complete.')
 
