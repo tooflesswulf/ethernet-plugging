@@ -79,6 +79,11 @@ class Env:
         self.adaptive_mode = False
         self.last_step_t = time.perf_counter()
 
+        # Payload gravity compensation (populated in reset() after zeroFtSensor)
+        self.payload_mass = 0.
+        self.payload_cog = np.zeros(3)  # CoG relative to TCP, in tool frame
+        self._ft_zero_rot = None  # TCP orientation when the FT sensor was zeroed
+
         # ============================================================
         # Control parameters
         # ============================================================
@@ -269,7 +274,15 @@ class Env:
         self.commands: list[Command] = []
         self.ctrl.zeroFtSensor()
 
-        print('payload kg', self.recv.getPayload())
+        self.payload_mass = self.recv.getPayload()
+        tcp_offset = np.array(self.ctrl.getTCPOffset())
+        # CoG is reported relative to the tool flange; shift it to the TCP
+        # (assumes the TCP offset has no rotation component)
+        self.payload_cog = np.array(self.recv.getPayloadCog()) - tcp_offset[:3]
+        zero_pose = URPose(*self.recv.getActualTCPPose())
+        self._ft_zero_rot = R.from_rotvec([zero_pose.rx, zero_pose.ry, zero_pose.rz])
+
+        print('payload kg', self.payload_mass)
         print('payload cog', self.recv.getPayloadCog())
 
         print('Environment reset complete.')
@@ -314,6 +327,27 @@ class Env:
             interp_orientation = slerp(R1, R2, perc).as_rotvec()
         return URPose(*interp_position, *interp_orientation)
 
+    gravity = np.array([0., 0., -9.81])
+
+    def _payload_gravity_wrench_tool(self, rot: R):
+        """Payload gravity wrench about the TCP, expressed in the tool frame at orientation `rot`."""
+        f = rot.inv().apply(self.payload_mass * self.gravity)
+        return np.r_[f, np.cross(self.payload_cog, f)]
+
+    def compensate_gravity(self, force, actual_pose):
+        """Remove the payload gravity artifact from a raw TCP wrench (base frame).
+
+        zeroFtSensor() stores the gravity wrench at the zeroing orientation as a
+        tool-frame offset, so rotating away from that orientation leaks the
+        difference in gravity wrenches into the reading.
+        """
+        if self._ft_zero_rot is None:
+            return np.asarray(force)
+        rot = R.from_rotvec([actual_pose.rx, actual_pose.ry, actual_pose.rz])
+        dw = self._payload_gravity_wrench_tool(rot) - self._payload_gravity_wrench_tool(self._ft_zero_rot)
+        artifact = np.r_[rot.apply(dw[:3]), rot.apply(dw[3:])]
+        return np.asarray(force) - artifact
+
     force_alpha = 0.03
     _force_filtered = np.zeros(6)
 
@@ -338,7 +372,7 @@ class Env:
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
             actual_pose = URPose(*self.recv.getActualTCPPose())
-            actual_force = URPose(*self.recv.getActualTCPForce())
+            actual_force = URPose(*self.compensate_gravity(self.recv.getActualTCPForce(), actual_pose))
             filtered_force = URPose(*self.filter_force(actual_force))
             self.robot_obs.append(RobotObs(time=time.time() - self.t0,
                                   actual_pose=actual_pose, actual_force=actual_force,
