@@ -201,6 +201,7 @@ class GravityCalibration(robot_execution.RobotExecution):
         B, b, q, tb = fit_residual(self.clusters, self.env._ft_zero_rot)
         np.savez(self.env.grav_cal_path,
                  residual_B=B, residual_b=b, residual_q=q, residual_tb=tb,
+                 ft_zero_rotvec=self.env._ft_zero_rot.as_rotvec(),
                  probe_rotvecs=np.concatenate([rv for rv, _, _ in self.clusters]),
                  probe_wrenches=np.concatenate([w for _, w, _ in self.clusters]),
                  probe_times=np.concatenate([t for _, _, t in self.clusters]))
