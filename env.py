@@ -88,25 +88,23 @@ class Env:
 
         # getActualTCPForce() compensates the configured payload internally, so the
         # correct payload config (set in reset()) removes the bulk of the
-        # orientation-dependent drift. What leaks through — sensor gain/crosstalk
-        # acting on the payload weight — is fitted by calibrate_gravity_residual()
-        # as a 3x3 matrix B mapping the change in tool-frame gravity direction to a
-        # tool-frame force residual.
+        # orientation-dependent drift. What leaks through is fitted by
+        # scripts/calibrate_gravity.py and applied by compensate_gravity().
         self.payload_mass = payload_mass
         self.payload_cog = payload_cog
         self.grav_cal_path = pathlib.Path(gravity_cal_path) if gravity_cal_path \
             else pathlib.Path(__file__).parent / 'gravity_residual.npz'
         self.grav_residual_B = np.zeros((3, 3))  # gravity-shaped residual [N per unit u]
         self.grav_residual_b = np.zeros(3)       # tool-frame force bias zeroed in base frame [N]
-        self.grav_residual_cog = np.zeros(3)     # lever arm for the gravity term [m]
+        self.grav_residual_q = np.zeros(3)       # gravity-shaped torque lever, q x u [Nm]
         self.grav_residual_tb = np.zeros(3)      # tool-frame torque bias counterpart [Nm]
-        _cal_keys = ('residual_B', 'residual_b', 'residual_cog', 'residual_tb')
+        _cal_keys = ('residual_B', 'residual_b', 'residual_q', 'residual_tb')
         if self.grav_cal_path.exists():
             cal = np.load(self.grav_cal_path)
             if all(k in cal for k in _cal_keys):
                 self.grav_residual_B = cal['residual_B']
                 self.grav_residual_b = cal['residual_b']
-                self.grav_residual_cog = cal['residual_cog']
+                self.grav_residual_q = cal['residual_q']
                 self.grav_residual_tb = cal['residual_tb']
                 print(f'Loaded gravity residual calibration from {self.grav_cal_path}')
             else:
@@ -348,138 +346,23 @@ class Env:
         the payload weight) driven by the change in tool-frame gravity direction,
         and a constant tool-frame sensor bias whose zero offset does not co-rotate
         with the tool, which grows with the full relative rotation (e.g. also for
-        rotations about the gravity axis):
+        rotations about the gravity axis). u = (R^T - R0^T) ghat:
 
-            f_tool = B (R^T - R0^T) ghat + (I - R^T R0) b,   tau analogous
+            f_tool = B u + (I - R^T R0) b
+            tau_tool = q x u + (I - R^T R0) tb
+
+        where q absorbs payload CoG config error (q = m g dcog) as well as the
+        mass-error lever.
         """
         if self._ft_zero_rot is None:
             return np.asarray(force)
         rot = R.from_rotvec([actual_pose.rx, actual_pose.ry, actual_pose.rz])
         u = rot.inv().apply(self._GHAT) - self._ft_zero_rot.inv().apply(self._GHAT)
         drel = np.eye(3) - rot.inv().as_matrix() @ self._ft_zero_rot.as_matrix()
-        f_grav = self.grav_residual_B @ u
-        f_tool = f_grav + drel @ self.grav_residual_b
-        tau_tool = np.cross(self.grav_residual_cog, f_grav) + drel @ self.grav_residual_tb
+        f_tool = self.grav_residual_B @ u + drel @ self.grav_residual_b
+        tau_tool = np.cross(self.grav_residual_q, u) + drel @ self.grav_residual_tb
         artifact = np.r_[rot.apply(f_tool), rot.apply(tau_tool)]
         return np.asarray(force) - artifact
-
-    def _default_cal_orientations(self):
-        """Relative rotvecs (tool frame) probing both artifact mechanisms:
-        x/y tilts excite the gravity term, tool-z rotations (which leave the
-        gravity direction nearly unchanged) isolate the bias term, and combined
-        poses cover the working range in between."""
-        s2 = np.sqrt(0.5)
-        xy_axes = [(1, 0, 0), (0, 1, 0), (-1, 0, 0), (0, -1, 0),
-                   (s2, s2, 0), (-s2, s2, 0), (s2, -s2, 0), (-s2, -s2, 0)]
-        rvs = [np.array(ax) * ang for ang in (0.15, 0.3) for ax in xy_axes]
-        rvs += [np.array([0., 0., s * ang]) for ang in (0.7, 1.4, 2.1) for s in (1, -1)]
-        rvs += [(R.from_rotvec([0., 0., s * 1.4]) * R.from_rotvec(np.array(ax) * 0.25)).as_rotvec()
-                for s in (1, -1) for ax in ((1, 0, 0), (0, 1, 0))]
-        return rvs
-
-    def calibrate_gravity_residual(self, orientations=None, settle_time=0.7, sample_time=1.0, save=True):
-        """Fit the orientation-dependent residual left in getActualTCPForce().
-
-        Moves the TCP through a set of orientations in free space and jointly fits
-
-            f_tool = B (R^T - R0^T) ghat + (I - R^T R0) b
-
-        where B captures gravity-shaped errors (payload config error is B=dm*g*I;
-        the full matrix adds sensor gain/crosstalk on the payload weight) and b is
-        a constant tool-frame sensor bias whose zero offset does not co-rotate with
-        the tool — the term that dominates at large rotations about the tool/gravity
-        axis. Torques get a lever arm `c` and bias `tb` analogously. The zeroing
-        orientation is revisited throughout to measure and remove sensor time drift.
-
-        `orientations`: optional list of rotvecs relative to the zeroing orientation
-        (tool frame). The default sweeps +-17 deg tilts, +-(40/80/120) deg tool-z
-        rotations, and combined poses — make sure the tool can rotate that far
-        without cable snag or collision, or pass a safe custom list covering your
-        working range.
-
-        Run right after reset() (payload configured, FT sensor freshly zeroed),
-        before start(), with no contact and nothing grasped. The result is saved
-        to `grav_cal_path` and loaded automatically on the next Env construction.
-        """
-        assert self._ft_zero_rot is not None, 'call reset() first'
-        assert not any(t.is_alive() for t in self.threads), 'run before start()'
-        start_pose = URPose(*self.recv.getActualTCPPose())
-        rot0 = self._ft_zero_rot
-        if orientations is None:
-            orientations = self._default_cal_orientations()
-        rots = [rot0 * R.from_rotvec(rv) for rv in orientations]
-
-        def measure(rot):
-            self.ctrl.moveL(URPose(start_pose.x, start_pose.y, start_pose.z, *rot.as_rotvec()), 0.1, 0.1)
-            time.sleep(settle_time)
-            samples = []
-            t_end = time.perf_counter() + sample_time
-            while time.perf_counter() < t_end:
-                samples.append(self.recv.getActualTCPForce())
-                time.sleep(0.008)
-            return time.perf_counter(), np.mean(samples, axis=0)
-
-        # Interleave revisits of the zeroing orientation, where the reading should
-        # stay zero; whatever accumulates there is time drift, not orientation.
-        anchor_ts, anchor_ws = [], []
-        pose_ts, pose_ws = [], []
-        for i, rot in enumerate(rots):
-            if i % 4 == 0:
-                t, w = measure(rot0)
-                anchor_ts.append(t), anchor_ws.append(w)
-            t, w = measure(rot)
-            pose_ts.append(t), pose_ws.append(w)
-        t, w = measure(rot0)
-        anchor_ts.append(t), anchor_ws.append(w)
-        self.ctrl.moveL(start_pose, 0.1, 0.1)
-
-        anchor_ws = np.array(anchor_ws)
-        drift = np.stack([np.interp(pose_ts, anchor_ts, anchor_ws[:, k]) for k in range(6)], axis=1)
-        meas = np.array(pose_ws) - drift
-        print(f'Sensor time drift over run: up to {np.abs(anchor_ws[:, :3]).max():.3f} N (removed)')
-
-        # Joint least-squares for B (9) and b (3):
-        # f_tool_i = B u_i + (I - R_i^T R0) b
-        u0 = rot0.inv().apply(self._GHAT)
-        us = [rot.inv().apply(self._GHAT) - u0 for rot in rots]
-        drels = [np.eye(3) - rot.inv().as_matrix() @ rot0.as_matrix() for rot in rots]
-        f_tool = np.array([rot.inv().apply(w[:3]) for rot, w in zip(rots, meas)])
-        A = np.vstack([np.hstack([np.kron(np.eye(3), u), drel]) for u, drel in zip(us, drels)])
-        x, *_ = np.linalg.lstsq(A, f_tool.ravel(), rcond=None)
-        B, b = x[:9].reshape(3, 3), x[9:]
-
-        # tau_tool_i = c x (B u_i) + (I - R_i^T R0) tb
-        def skew(u):
-            return np.array([[0, -u[2], u[1]], [u[2], 0, -u[0]], [-u[1], u[0], 0]])
-        f_grav = np.array([B @ u for u in us])
-        tau_tool = np.array([rot.inv().apply(w[3:]) for rot, w in zip(rots, meas)])
-        if np.abs(f_grav).max() < 0.05:
-            # gravity term too small to identify a lever arm; fit the bias alone
-            c = np.zeros(3)
-            M = np.vstack(drels)
-            tb, *_ = np.linalg.lstsq(M, tau_tool.ravel(), rcond=None)
-        else:
-            M = np.vstack([np.hstack([-skew(f), drel]) for f, drel in zip(f_grav, drels)])
-            y, *_ = np.linalg.lstsq(M, tau_tool.ravel(), rcond=None)
-            c, tb = y[:3], y[3:]
-
-        f_pred = f_grav + np.array([drel @ b for drel in drels])
-        rms_before = np.sqrt(np.mean(f_tool ** 2))
-        rms_after = np.sqrt(np.mean((f_tool - f_pred) ** 2))
-        print(f'Gravity-shaped residual ~{np.trace(B) / 3 / 9.81 * 1000:.0f} g payload error equivalent, '
-              f'bias-shaped residual |b| = {np.linalg.norm(b):.3f} N')
-        print(f'Force drift RMS across poses: {rms_before:.3f} N -> {rms_after:.3f} N after fit '
-              f'(worst pose {np.abs(f_tool - f_pred).max():.3f} N)')
-        print('Fitted B [N]:\n', np.array_str(B, precision=3, suppress_small=True))
-
-        self.grav_residual_B = B
-        self.grav_residual_b = b
-        self.grav_residual_cog = c
-        self.grav_residual_tb = tb
-        if save:
-            np.savez(self.grav_cal_path, residual_B=B, residual_b=b, residual_cog=c, residual_tb=tb)
-            print(f'Saved calibration to {self.grav_cal_path}')
-        return B, b
 
     force_alpha = 0.03
     _force_filtered = np.zeros(6)
