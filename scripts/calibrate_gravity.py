@@ -131,6 +131,7 @@ class GravityCalibration(robot_execution.RobotExecution):
         print('  Teleoperate in free space: nothing grasped, no contact.')
         print('  Dpad-Right: probe around the current orientation')
         print('  Dpad-Left:  fit + save + apply live (needs >= 2 probes)')
+        print('  Dpad-Down:  return to home pose')
         print('=' * 64)
 
     def post_reset(self):
@@ -148,9 +149,14 @@ class GravityCalibration(robot_execution.RobotExecution):
         state = self.iface.dualsense.state
         trigger_probe = state.DpadRight and not self._prev_probe_btn
         trigger_fit = state.DpadLeft and not self._prev_fit_btn
+        go_home = state.DpadDown
         self._prev_probe_btn = state.DpadRight
         self._prev_fit_btn = state.DpadLeft
 
+        if go_home:
+            seq = InterruptSequence.current(self)
+            seq.move_to(self.home_pose)
+            return self.get_action()
         if trigger_fit:
             self.fit_and_save()
         if trigger_probe:
