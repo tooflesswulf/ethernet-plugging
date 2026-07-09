@@ -3,9 +3,11 @@ from dualsense import DualSense
 from robosuite import make
 import numpy as np
 
+from env import GRIP_OPEN, GRIP_CLOSED
+
 
 class DualSenseInterface:
-    gripper_state = 0
+    gripper_state = GRIP_OPEN
     adaptive_mode = False
 
     def __init__(self, start_pose, xyzspeed=0.1, rpyspeed=1.0, forcespeed=1.0, enable_zadaptive=True):
@@ -49,7 +51,7 @@ class DualSenseInterface:
             return -1
         self.act = act
         if act['right_gripper']:
-            self.gripper_state = 1 - self.gripper_state
+            self.gripper_state = GRIP_OPEN if self.gripper_state == GRIP_CLOSED else GRIP_CLOSED
         if self.enable_zadaptive and act['toggle_zforce']:
             if self.adaptive_mode:
                 self.adaptive_mode = False

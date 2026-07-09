@@ -1,4 +1,4 @@
-from env import Env, URPose
+from env import Env, URPose, GRIP_OPEN
 import interface
 import threading
 import cv2
@@ -52,7 +52,7 @@ class RobotExecution:
         self.pre_start()
         self.env.start()  # start threads
         self.post_start()
-        self.last_action = (self.home_pose, 0, 0., False)
+        self.last_action = (self.home_pose, GRIP_OPEN, 0., False)
 
     def get_action(self):
         """ Returns the action to send to _unshortcut_action.
@@ -66,7 +66,7 @@ class RobotExecution:
     def _unshortcut_action(self, act):
         """ Converts action shortcuts into unified format.
         act: None             -> repeat last action
-        act: (float[6], int)  -> pose + gripper (0=open, 1=closed)
+        act: (float[6], int)  -> pose + gripper (GRIP_OPEN=0, GRIP_CLOSED=1)
         act: (float[6], int, bool, float) -> pose, grip, zforce, mode
         """
         if act is None:
