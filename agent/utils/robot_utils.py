@@ -1,9 +1,9 @@
-import torch
 import time
 
-from env import URPose, Env
+from env import URPose, Env, GRIP_CLOSED
 from interface import DualSenseInterface
 from agent.model.policy import DiffusionPolicy
+from agent.utils.interrupt_sequence import InterruptSequence
 
 
 def get_actions(policy: DiffusionPolicy, nimages, nagent_poses, curr_pose, curr_gripper_width):
@@ -24,9 +24,14 @@ def get_actions(policy: DiffusionPolicy, nimages, nagent_poses, curr_pose, curr_
     return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
 
 
+def interrupt(rexec):
+    """The active InterruptSequence on `rexec`, installing one if needed."""
+    return InterruptSequence.current(rexec)
+
+
 def wait_for_circle(env: Env, iface: DualSenseInterface, close_gripper=False):
     freq = 250
-    print('Waiting the circle ...')
+    print('Waiting the circle...')
     while True:
         flag = iface.update(1 / freq)
         if flag == -1:
@@ -41,7 +46,7 @@ def wait_for_circle(env: Env, iface: DualSenseInterface, close_gripper=False):
                 des_zforce=iface.target_zforce,
                 adaptive_mode=iface.adaptive_mode,
             )
-        if des_gripper == 1:
+        if des_gripper == GRIP_CLOSED:
             break
         time.sleep(1 / 250)
 
