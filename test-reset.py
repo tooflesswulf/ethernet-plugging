@@ -12,6 +12,18 @@ class TeleoperationReset(EvalRealtimeChunking):
     # cable_drop_pos = URPose(-.0562, .6679, .0456, 2.508, 2.524, .936)
     cable_drop_pos = URPose(-0.04938359, 0.64969687, 0.07542422, -1.77502314, -1.78634705, -0.66244883)
 
+    # Failed plugins wrench the cable out of the grippers: force z ramps past ~42N
+    # before the cable slips, while successful ones stay under ~33N until release.
+    # Only applies while gripping the cable (~9mm); the unplug phase grips the plug
+    # head (~16mm) and legitimately reaches 55-75N, and an empty gripper closes to ~5mm.
+    FZ_THRESH_N = 38.0            # force z above episode-start baseline
+    FZ_TICKS = 3                  # consecutive control ticks above threshold
+    CABLE_WIDTH_MM = (6.5, 12.0)  # gripper width range when holding the cable
+
+    _fz_baseline = None
+    _fz_count = 0
+    _armed = True
+
     def get_action(self):
         if self.iface.dualsense.state.DpadLeft:
             last_pose, last_grip, _, _ = self.last_action
@@ -19,7 +31,39 @@ class TeleoperationReset(EvalRealtimeChunking):
                 return self.reset_cable()
 
             print('Dpad-Left pressed, but gripper is open. Ignoring.')
+        if self.detect_wrench_risk():
+            print('Force z spike while gripping cable: failed plugin, resetting before wrench-out.')
+            return self.reset_cable()
         return super().get_action()
+
+    def detect_wrench_risk(self):
+        obs = getattr(self, 'last_obs', None)
+        if obs is None:
+            return False
+        fz = obs['state']['actual_force'][2]
+        width = obs['state']['gripper_width']
+        if self._fz_baseline is None:
+            self._fz_baseline = fz
+            return False
+
+        if not self._armed:
+            # Re-arm once the cable has left the gripper (reset seq / release opens it).
+            self._armed = not (self.CABLE_WIDTH_MM[0] < width < self.CABLE_WIDTH_MM[1])
+            return False
+
+        _, last_grip, _, _ = self.last_action
+        holding_cable = (last_grip == GRIP_CLOSED
+                         and self.CABLE_WIDTH_MM[0] < width < self.CABLE_WIDTH_MM[1])
+        if holding_cable and fz - self._fz_baseline > self.FZ_THRESH_N:
+            self._fz_count += 1
+        else:
+            self._fz_count = 0
+
+        if self._fz_count >= self.FZ_TICKS:
+            self._armed = False
+            self._fz_count = 0
+            return True
+        return False
 
     def reset_cable(self):
         # Start interrupt sequence. The seq methods queue up instructions behind the scenes,
