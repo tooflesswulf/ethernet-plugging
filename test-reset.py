@@ -10,7 +10,7 @@ from env import GRIP_OPEN, GRIP_CLOSED
 
 class TeleoperationReset(EvalRealtimeChunking):
     # cable_drop_pos = URPose(-.0562, .6679, .0456, 2.508, 2.524, .936)
-    cable_drop_pos = URPose(-0.04938359, 0.64969687, 0.07542422, -1.77502314, -1.78634705, -0.66244883)
+    cable_drop_pos = URPose(-0.03938359, 0.64969687, 0.07542422, -1.77502314, -1.78634705, -0.66244883)
 
     # Failed plugins wrench the cable out of the grippers: the plug catches on the
     # socket rim (first contact at z=68.6-71.1mm vs 55.5-64.0mm when it enters the
@@ -40,52 +40,10 @@ class TeleoperationReset(EvalRealtimeChunking):
                 return self.reset_cable()
 
             print('Dpad-Left pressed, but gripper is open. Ignoring.')
-        if self.detect_wrench_risk():
-            print('Force z spike while gripping cable: failed plugin, resetting before wrench-out.')
-            return self.reset_cable()
+        # if self.detect_wrench_risk():
+        #     print('Force z spike while gripping cable: failed plugin, resetting before wrench-out.')
+        #     return self.reset_cable()
         return super().get_action()
-
-    def detect_wrench_risk(self):
-        obs = getattr(self, 'last_obs', None)
-        if obs is None:
-            return False
-        fz = obs['state']['actual_force'][2]
-        width = obs['state']['gripper_width']
-        z = obs['state']['actual_pose'][2]
-        if self._fz_baseline is None:
-            self._fz_baseline = fz
-            return False
-        fz_rel = fz - self._fz_baseline
-
-        _, last_grip, _, _ = self.last_action
-        holding_cable = (last_grip == GRIP_CLOSED
-                         and self.CABLE_WIDTH_MM[0] < width < self.CABLE_WIDTH_MM[1])
-        if not holding_cable:
-            # Cable left the gripper (release, wrench-out, or reset): re-arm for the
-            # next grasp and forget this attempt's contact point.
-            self._armed = True
-            self._contact_z = None
-            self._contact_count = 0
-            self._fz_count = 0
-            return False
-        if not self._armed:
-            return False
-
-        # Latch the height of first contact for this attempt.
-        if self._contact_z is None:
-            self._contact_count = self._contact_count + 1 if fz_rel > self.CONTACT_RISE_N else 0
-            if self._contact_count >= 2:
-                self._contact_z = z
-
-        rim_hit = self._contact_z is not None and self._contact_z > self.CONTACT_Z_M
-        thresh = self.FZ_THRESH_N if rim_hit else self.FZ_BACKSTOP_N
-        self._fz_count = self._fz_count + 1 if fz_rel > thresh else 0
-
-        if self._fz_count >= self.FZ_TICKS:
-            self._armed = False
-            self._fz_count = 0
-            return True
-        return False
 
     def reset_cable(self):
         # Start interrupt sequence. The seq methods queue up instructions behind the scenes,
@@ -95,8 +53,11 @@ class TeleoperationReset(EvalRealtimeChunking):
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=0.05)
         seq.move_to(self.cable_drop_pos)
         seq.gripper(GRIP_OPEN, settle_time=1.0)
+            # .then(lambda _: self.env.reset()) \
+            # .then(lambda _: self.buffer.clear())
         seq.move_to(self.home_pose) \
-           .then(lambda _: self.buffer.clear())
+            .then(lambda _: self.buffer.clear()) \
+            .then(lambda _: self.env.ctrl.zeroFtSensor())
         return self.get_action()
 
 
@@ -108,11 +69,14 @@ if __name__ == '__main__':
                         help='control/command frequency (Hz) for the real-time loop')
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
+    parser.add_argument('--log', type=str, default=None, help='log directory')
     args = parser.parse_args()
 
+    if args.log is not None:
+        os.makedirs(args.log, exist_ok=True)
     teleop = TeleoperationReset(
         ckpt=args.ckpt, device=args.device,
-        log_dir=None,
+        log_dir=args.log,
         control_freq=args.control_freq, weight_decay=args.weight_decay
     )
     teleop.run()
