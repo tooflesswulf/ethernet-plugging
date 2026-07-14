@@ -18,6 +18,7 @@ import wsg
 # Gripper command states (des_gripper_state / gripper_state)
 GRIP_OPEN = 0
 GRIP_CLOSED = 1
+GRIP_MOVING = -1
 
 
 class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
@@ -321,6 +322,9 @@ class Env:
 
         zdes = actual_pose.z + kp * force_err + kd * d_force_err
         return zdes
+    
+    def _set_gripstate(self, gs):
+        self.gripper_state = gs
 
     def _control_loop(self):
         while not self.stop_flag:
@@ -339,34 +343,25 @@ class Env:
             # ----------------------------
             # gripper logic (non-blocking preferred)
             # ----------------------------
-            if gripper_state != des_gripper_state:
-                gs = self.gripper.gripstate().value
+            if gripper_state != GRIP_MOVING and gripper_state != des_gripper_state:
+                self.gripper_state = GRIP_MOVING
                 if gripper_state == GRIP_OPEN:
-                    if gs != wsg.GripperState.IDLE.value:
-                        self.gripper.stop().wait()
                     self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
-                        .finished.catch(lambda e: (
+                        .finished.then(lambda _: self._set_gripstate(GRIP_CLOSED)) \
+                        .catch(lambda e: (
+                            self._set_gripstate(GRIP_CLOSED),
                             print(f'Gripper GRIP failed: {e}'),
                             print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
                             ))
-                    self.gripper_state = GRIP_CLOSED
                 else:
-                    if gs == wsg.GripperState.GRASPING.value:
-                        self.gripper.stop().wait()
-                        self.gripper.move(self.open_width, speed=self.g_speed) \
-                            .finished.catch(lambda e: (
-                                print(f'Gripper MOVE failed: {e}'),
-                                print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
-                            ))
-                        self.gripper_state = GRIP_OPEN
-                    else:
-                        cur_width = self.gripper_obs[-1].gripper_width
-                        self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
-                            .finished.catch(lambda e: (
-                                print(f'Gripper RELEASE failed: {e}'),
-                                print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
-                            ))
-                        self.gripper_state = GRIP_OPEN
+                    cur_width = self.gripper_obs[-1].gripper_width
+                    self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
+                        .finished.then(lambda _: self._set_gripstate(GRIP_OPEN)) \
+                        .catch(lambda e: (
+                            self._set_gripstate(GRIP_OPEN),
+                            print(f'Gripper RELEASE failed: {e}'),
+                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                        ))
 
             # ----------------------------
             # blend + servo

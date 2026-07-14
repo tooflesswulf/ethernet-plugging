@@ -128,12 +128,20 @@ class WSG:
         # ERR <CMD> / ERR <detail>
         elif line.startswith('ERR'):
             err = RuntimeError(f'WSG error: {line}')
+            cmd = line.split(' ')[1]
+            action_entry = None
+            stop_entry = None
             with self._lock:
-                action_entry = self._pending_action[1] if self._pending_action else None
+                if self._pending_action and self._pending_action[0] == cmd:
+                    action_entry = self._pending_action[1]
+                if self._pending_stop and cmd == 'STOP':
+                    stop_entry = self._pending_stop
             if action_entry:
                 action_entry['ack'].reject(err)
                 if 'fin' in action_entry:
                     action_entry['fin'].reject(err)
+            if stop_entry:
+                stop_entry.reject(err)
 
         # <KEY>=<VALUE> (query responses like FORCE=12.5)
         elif '=' in line:

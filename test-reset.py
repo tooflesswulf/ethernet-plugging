@@ -45,6 +45,10 @@ class TeleoperationReset(EvalRealtimeChunking):
         #     return self.reset_cable()
         return super().get_action()
 
+    def runtime_info(self):
+        obs = self.last_obs
+        print(f"force_z: {obs['state']['filtered_force'][2]:7.2f}", end='\r')
+
     def reset_cable(self):
         # Start interrupt sequence. The seq methods queue up instructions behind the scenes,
         #   so custom logic needs to be 1. run through promise.then() and 2. be non-blocking.
