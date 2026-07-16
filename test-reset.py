@@ -3,6 +3,7 @@ from agent.utils.robot_utils import interrupt
 from collections import deque
 import numpy as np
 import argparse
+import time
 import os
 
 from util import URPose
@@ -63,36 +64,54 @@ class TeleoperationReset(EvalRealtimeChunking):
 
     _fz_baseline = None
     _contact_z = None
-    _contact_count = 0
     _fz_count = 0
     _armed = True
     _force_edge = None
     _fz_cursor = 0
+    _contact_flag = False
+    _contact_t = -1
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._force_edge = StreamingForceEdge(hz=self.env.servo_frequency)
 
     def detect_force_edge(self):
         # robot_obs is appended by the receive thread at servo_frequency (~500Hz),
         # much faster than this control loop, so drain every sample since last tick.
         robot_obs = self.env.robot_obs
-        if self._force_edge is None:
-            self._force_edge = StreamingForceEdge(hz=self.env.servo_frequency)
         n = len(robot_obs)  # snapshot; the receive thread may append concurrently
+        flag = False
         for obs in robot_obs[self._fz_cursor:n]:
             if self._force_edge.update(obs.actual_force[2]):
-                print('Detected rising force edge')
+                flag = True
         self._fz_cursor = n
+        return flag
 
     def get_action(self):
-        self.detect_force_edge()
+        if self.detect_force_edge():
+            last_pose, last_grip, _, _ = self.last_action
+            if last_grip == GRIP_CLOSED:
+                print('Detected rising force edge while gripper closed. Setting 2s timeout')
+                self._contact_flag = True
+                self._contact_t = time.time()
+
         if self.iface.dualsense.state.DpadLeft:
             last_pose, last_grip, _, _ = self.last_action
             if last_grip == GRIP_CLOSED:
                 return self.reset_cable()
 
             print('Dpad-Left pressed, but gripper is open. Ignoring.')
-        # if self.detect_wrench_risk():
-        #     print('Force z spike while gripping cable: failed plugin, resetting before wrench-out.')
-        #     return self.reset_cable()
-        return super().get_action()
+        act = super().get_action()
+        if act is not None and act[1] == GRIP_OPEN:
+            self._contact_flag = False
+            self._contact_t = -1
+        if self._contact_flag:
+            if time.time() - self._contact_t > 2:
+                print('Contact timeout: shouldve been done plugging by now. Resetting.')
+                self._contact_flag = False
+                self._contact_t = -1
+                return self.reset_cable()
+        return act
 
     def runtime_info(self):
         obs = self.last_obs
