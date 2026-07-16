@@ -83,6 +83,7 @@ class Env:
         self.des_zforce = 0.
         self.adaptive_mode = False
         self.last_step_t = time.perf_counter()
+        self._zero_ft_request = False  # serviced by _control_loop; see request_zero_ft()
 
         # ============================================================
         # Control parameters
@@ -281,8 +282,14 @@ class Env:
 
     def close(self):
         self.stop_flag = True
+        # Bounded joins: a worker can be parked in a no-timeout blocking call
+        # (gripper query .wait(), or ctrl.servoL after a protective stop) and
+        # never re-check stop_flag. Since these are daemon threads, don't wait
+        # on them forever -- that wedges the main thread and forces a ctrl-Z.
         for thr in self.threads:
-            thr.join()
+            thr.join(timeout=2.0)
+            if thr.is_alive():
+                print(f'Warning: thread {thr.name} did not exit; leaving it to daemon cleanup.')
         self.camera.close()
         if self.dataset_path is not None:
             self.save_data()
@@ -326,9 +333,22 @@ class Env:
     def _set_gripstate(self, gs):
         self.gripper_state = gs
 
+    def request_zero_ft(self):
+        """Ask the control loop to zero the F/T sensor at a safe point.
+
+        self.ctrl (RTDE control) is not thread-safe, so it must only be touched
+        from _control_loop. Callers on other threads (e.g. an interrupt-sequence
+        .then callback) set this flag instead of calling ctrl.zeroFtSensor()
+        directly, which would race with servoL() and can hang the RTDE handshake.
+        """
+        self._zero_ft_request = True
+
     def _control_loop(self):
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
+            if self._zero_ft_request:
+                self.ctrl.zeroFtSensor()
+                self._zero_ft_request = False
             actual_pose = URPose(*self.recv.getActualTCPPose())
             actual_force = URPose(*self.recv.getActualTCPForce())
             filtered_force = URPose(*self.filter_force(actual_force))

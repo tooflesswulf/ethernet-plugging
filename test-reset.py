@@ -127,7 +127,7 @@ class TeleoperationReset(EvalRealtimeChunking):
         seq.gripper(GRIP_OPEN, settle_time=1.0)
         seq.move_to(self.home_pose) \
             .then(lambda _: self.buffer.clear()) \
-            .then(lambda _: self.env.ctrl.zeroFtSensor())
+            .then(lambda _: self.env.request_zero_ft())
         return self.get_action()
 
 
