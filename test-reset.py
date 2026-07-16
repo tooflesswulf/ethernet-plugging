@@ -57,8 +57,6 @@ class TeleoperationReset(EvalRealtimeChunking):
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=0.05)
         seq.move_to(self.cable_drop_pos)
         seq.gripper(GRIP_OPEN, settle_time=1.0)
-            # .then(lambda _: self.env.reset()) \
-            # .then(lambda _: self.buffer.clear())
         seq.move_to(self.home_pose) \
             .then(lambda _: self.buffer.clear()) \
             .then(lambda _: self.env.ctrl.zeroFtSensor())
