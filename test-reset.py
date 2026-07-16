@@ -1,11 +1,45 @@
 from agent.eval.eval_realtime import EvalRealtimeChunking
 from agent.utils.robot_utils import interrupt
+from collections import deque
 import numpy as np
 import argparse
 import os
 
 from util import URPose
 from env import GRIP_OPEN, GRIP_CLOSED
+
+
+class StreamingForceEdge:
+    """Online detector for a sharp rise in a noisy force signal, one sample per tick.
+
+    Keeps a long trailing baseline window and a short reaction window; flags a rise
+    when the reaction mean exceeds the baseline mean by `k` times the baseline's own
+    std, so the threshold auto-scales to the current noise level. Refractory gating
+    prevents repeated triggers on a single edge.
+    """
+
+    def __init__(self, hz=20, baseline_s=1.0, react_s=0.15, k=6.0, refractory_s=0.5):
+        self.b = max(int(baseline_s * hz), 1)
+        self.r = max(int(react_s * hz), 1)
+        self.k = k
+        self.refractory = int(refractory_s * hz)
+        self.buf = deque(maxlen=self.b + self.r)
+        self.cooldown = 0
+
+    def update(self, value):
+        """Feed one sample; return True on the tick a rising edge is detected."""
+        self.buf.append(float(value))
+        if self.cooldown > 0:
+            self.cooldown -= 1
+        if len(self.buf) < self.b + self.r:
+            return False
+        window = np.asarray(self.buf)
+        base, cur = window[:self.b], window[self.b:]
+        sigma = base.std() + 1e-6
+        if self.cooldown == 0 and (cur.mean() - base.mean()) / sigma >= self.k:
+            self.cooldown = self.refractory
+            return True
+        return False
 
 
 class TeleoperationReset(EvalRealtimeChunking):
@@ -32,8 +66,23 @@ class TeleoperationReset(EvalRealtimeChunking):
     _contact_count = 0
     _fz_count = 0
     _armed = True
+    _force_edge = None
+    _fz_cursor = 0
+
+    def detect_force_edge(self):
+        # robot_obs is appended by the receive thread at servo_frequency (~500Hz),
+        # much faster than this control loop, so drain every sample since last tick.
+        robot_obs = self.env.robot_obs
+        if self._force_edge is None:
+            self._force_edge = StreamingForceEdge(hz=self.env.servo_frequency)
+        n = len(robot_obs)  # snapshot; the receive thread may append concurrently
+        for obs in robot_obs[self._fz_cursor:n]:
+            if self._force_edge.update(obs.actual_force[2]):
+                print('Detected rising force edge')
+        self._fz_cursor = n
 
     def get_action(self):
+        self.detect_force_edge()
         if self.iface.dualsense.state.DpadLeft:
             last_pose, last_grip, _, _ = self.last_action
             if last_grip == GRIP_CLOSED:
