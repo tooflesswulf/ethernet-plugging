@@ -266,6 +266,8 @@ class Env:
         g.finished.wait()
         self.gripper_state = GRIP_OPEN
 
+        self.gripper.set_pwt(20)
+
         # ============================================================
         # Reset observations
         # ============================================================

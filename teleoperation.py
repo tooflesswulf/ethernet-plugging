@@ -1,6 +1,8 @@
+from agent.utils.robot_utils import interrupt
 import robot_execution
-from env import URPose
+from env import URPose, GRIP_OPEN
 import argparse
+import numpy as np
 import os
 
 GRIP_WIDTH_MM = 15
@@ -10,6 +12,9 @@ GRIP_PULLBACK_MM = 10
 
 
 class Teleoperation(robot_execution.RobotExecution):
+    port_xyz = URPose(x=-0.1269, y=0.5979, z=0.0730, rx=1.7296, ry=1.7668, rz=-0.760357)
+    release_pose = URPose(x=-0.0297, y=0.7031, z=0.0813, rx=-2.1029, ry=-2.0230, rz=-0.4256)
+
     @staticmethod
     def add_args(parser):
         pass
@@ -28,16 +33,38 @@ class Teleoperation(robot_execution.RobotExecution):
         pass
 
     def get_action(self):
+        if self.iface.dualsense.state.DpadDown:
+            return self.move_to_port()
+        if self.iface.dualsense.state.DpadRight:
+            return self.release_cable()
         des_pose = URPose(*self.iface.target_pose)
         des_gripper = self.iface.gripper_state
         des_zforce = self.iface.target_zforce
         adaptive_mode = self.iface.adaptive_mode
         return des_pose, des_gripper, adaptive_mode, des_zforce
 
+    def move_to_port(self):
+        seq = interrupt(self)
+        seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
+        seq.move_to(self.port_xyz)
+        return self.get_action()
+
+    def release_cable(self):
+        seq = interrupt(self)
+        seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
+        rel = np.array(self.release_pose)
+        rel[:2] += np.random.uniform([-.04, -.08], [.04, .05])
+        seq.move_to(URPose(*rel))
+        seq.gripper(GRIP_OPEN)
+        return self.get_action()
+
     def runtime_info(self):
         obs = self.last_obs
+        st = obs['state']
+        p = st['actual_pose']
         force = obs['state']['filtered_force']
-        print(f"fx: {force[0]:5.2f} fy: {force[1]:5.2f} fz: {force[2]:5.2f}", end='\r')
+        # print(f"Pose: {st['actual_pose']}", end='\r')
+        print(f'URPose(x={p.x:.4f}, y={p.y:.4f}, z={p.z:.4f}, rx={p.rx:.4f}, ry={p.ry:.4f}, rz={p.rz:.4f})', end='\r')
 
     def __init__(self, args):
         control_freq = 100
