@@ -99,8 +99,10 @@ class TeleoperationReset(EvalRealtimeChunking):
             last_pose, last_grip, _, _ = self.last_action
             if last_grip == GRIP_CLOSED:
                 return self.reset_cable()
-
             print('Dpad-Left pressed, but gripper is open. Ignoring.')
+        if self.iface.dualsense.state.DpadDown:
+            return self.go_home()
+
         act = super().get_action()
         if act is not None and act[1] == GRIP_OPEN:
             self._contact_flag = False
@@ -130,6 +132,12 @@ class TeleoperationReset(EvalRealtimeChunking):
             .then(lambda _: self.env.request_zero_ft())
         return self.get_action()
 
+    def go_home(self):
+        seq = interrupt(self)
+        seq.move_to(self.home_pose) \
+            .then(lambda _: self.buffer.clear()) \
+            .then(lambda _: self.env.request_zero_ft())
+        return self.get_action()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')

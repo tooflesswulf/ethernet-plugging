@@ -3,10 +3,10 @@ from env import URPose
 import argparse
 import os
 
-GRIP_WIDTH_MM = 10
+GRIP_WIDTH_MM = 15
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 5
+GRIP_PULLBACK_MM = 10
 
 
 class Teleoperation(robot_execution.RobotExecution):
@@ -26,6 +26,13 @@ class Teleoperation(robot_execution.RobotExecution):
         """Print info to operator at start of teleop session."""
         # print(f'Target port = {self.data["target_port"]}')
         pass
+
+    def get_action(self):
+        des_pose = URPose(*self.iface.target_pose)
+        des_gripper = self.iface.gripper_state
+        des_zforce = self.iface.target_zforce
+        adaptive_mode = self.iface.adaptive_mode
+        return des_pose, des_gripper, adaptive_mode, des_zforce
 
     def runtime_info(self):
         obs = self.last_obs

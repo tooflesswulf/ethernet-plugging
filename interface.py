@@ -76,8 +76,9 @@ class DualSenseInterface:
         # Orientation: compose delta Euler (ZYX) onto current rotation vector
         drx, dry, drz = delta[3:] * self.speed[3:] * dt
         R_cur = R.from_rotvec(self.targ_pose[3:])
-        R_delta = R.from_euler('ZYX', [drz, dry, drx])
-        self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
+        R_delta = R.from_euler('ZYX', [-drz, -dry, drx])
+        self.targ_pose[3:] = (R_cur * R_delta).as_rotvec() # Local rotation
+        # self.targ_pose[3:] = (R_delta * R_cur).as_rotvec() # Global rotation
 
     def update_force_mode(self, act, dt):
         delta = act['right_delta']
@@ -92,7 +93,8 @@ class DualSenseInterface:
         drx, dry, drz = delta[3:] * self.speed[3:] * dt
         R_cur = R.from_rotvec(self.targ_pose[3:])
         R_delta = R.from_euler('ZYX', [drz, dry, drx])
-        self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
+        # self.targ_pose[3:] = (R_cur * R_delta).as_rotvec() # Local rotation
+        self.targ_pose[3:] = (R_delta * R_cur).as_rotvec() # Global rotation
 
     def activate_adaptive_mode(self):
         self.targ_zforce = self.latest_obs['state']['filtered_force'].z
