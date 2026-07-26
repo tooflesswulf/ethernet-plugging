@@ -1,8 +1,8 @@
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import get_actions, wait_for_circle
+from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
-from util import URPose
 import robot_execution
 import collections
 import numpy as np
@@ -14,23 +14,22 @@ import time
 import os
 
 
-GRIP_WIDTH_MM = 10
-GRIP_FORCE_N = 40
-GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 5
-
-
 class EvalRealtimeChunking(robot_execution.RobotExecution):
     def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, weight_decay=0.5):
         # Architecture config, weights, and normalization stats all come from the checkpoint.
         self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
         self.policy.eval()
         self.device = device
+        grip = GripperStats(*self.policy.grip_stats)
 
         # super().__init__() resets & starts the robot.
         super().__init__(
             path=log_dir,
             control_freq=control_freq,
+            gwidth=grip.grip_width_mm,
+            gforce=grip.grip_force_n,
+            gspeed=grip.grip_speed_mmps,
+            gpullback=grip.grip_pullback_mm,
         )
 
         self.buffer = RealtimeActionChunkingBuffer(action_dt=self.control_dt, weight_decay=weight_decay)

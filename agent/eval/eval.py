@@ -1,16 +1,13 @@
-from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import get_actions, wait_for_circle
+from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
-from util import URPose
 import robot_execution
 import collections
 import numpy as np
-import threading
 import argparse
 import einops
 import torch
-import time
 import os
 
 
@@ -26,11 +23,16 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
         self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
         self.policy.eval()
         self.device = device
+        grip = GripperStats(*self.policy.grip_stats)
 
         # super().__init__() resets & starts the robot.
         super().__init__(
             path=log_dir,
             control_freq=control_freq,
+            gwidth=grip.grip_width_mm,
+            gforce=grip.grip_force_n,
+            gspeed=grip.grip_speed_mmps,
+            gpullback=grip.grip_pullback_mm,
         )
 
         self.action_chunk = []
