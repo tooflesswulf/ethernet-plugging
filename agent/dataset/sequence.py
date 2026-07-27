@@ -1,6 +1,7 @@
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 import torchvision.transforms.functional as F
 from collections import namedtuple
+from dataclasses import dataclass
 from typing import Literal
 from PIL import Image
 from tqdm import tqdm
@@ -12,6 +13,7 @@ import h5py
 
 IMAGE_SIZE = 128
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
+GripperStats = namedtuple('GripperStats', ['grip_width_mm', 'grip_force_n', 'grip_speed_mmps', 'grip_pullback_mm'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
 
@@ -78,6 +80,16 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 self.h5_image = True
             elif f['images'].attrs['stored_as'] == 'filepath':
                 self.h5_image = False
+
+            # Gripper metadata
+            self.grip_stats = None
+            if 'metadata/grip_width_mm' in f:
+                self.grip_stats = GripperStats(
+                    grip_width_mm=f['metadata/grip_width_mm'][0],
+                    grip_force_n=f['metadata/grip_force_n'][0],
+                    grip_speed_mmps=f['metadata/grip_speed_mmps'][0],
+                    grip_pullback_mm=f['metadata/grip_pullback_mm'][0]
+                )
 
         # Store dataset in memory for fast sampling during training
         self.indices = self.make_indices(traj_lengths, horizon_steps)

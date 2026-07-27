@@ -22,6 +22,11 @@ class Teleoperation(robot_execution.RobotExecution):
     def args2metadata(self, args):
         meta = {}
         meta['id'] = args.id
+        meta['grip_width_mm'] = GRIP_WIDTH_MM
+        meta['grip_force_n'] = GRIP_FORCE_N
+        meta['grip_speed_mmps'] = GRIP_SPEED_MMPS
+        meta['grip_pullback_mm'] = GRIP_PULLBACK_MM
+
         # RNG for target port selection
         # targ_port = random.randint(1, 4)
         # meta['target_port'] = targ_port
