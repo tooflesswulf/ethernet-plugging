@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers import DDIMScheduler
-from agent.dataset.sequence import ActionMode
+from agent.dataset.sequence import ActionMode, GripperStats
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
@@ -35,6 +35,7 @@ class DiffusionPolicy(nn.Module):
         action_mode: ActionMode = 'local_delta',
         encoder_type='resnet',
         augment=True,
+        grip_stats: GripperStats | None = None
     ):
         super().__init__()
         # Architecture/config args; saved alongside the weights by save_checkpoint so
@@ -89,6 +90,12 @@ class DiffusionPolicy(nn.Module):
         if norm_stats is not None:
             self.set_norm_stats(norm_stats)
 
+        if grip_stats is not None:
+            self.register_buffer('grip_stats', torch.tensor(grip_stats))
+        else:
+            # Default gripper params from v1
+            self.register_buffer('grip_stats', [10, 40, 50, 5])
+
     @property
     def action_mode(self) -> str:
         return ACTION_MODES[int(self._action_mode_idx)]
@@ -106,7 +113,7 @@ class DiffusionPolicy(nn.Module):
         policy = cls(**checkpoint['config'])
         policy.load_state_dict(checkpoint['model_state_dict'])
         print(f"[Checkpoint] Loaded policy from {ckpt_path} (config: {checkpoint['config']})")
-   
+
         return policy.to(device)
 
     def set_norm_stats(self, stats: dict):
@@ -215,7 +222,7 @@ class DiffusionPolicy(nn.Module):
             des_poses = pose_actions.copy()
         elif self.action_mode == "umi":
             curr_pos = curr_pose[:3]
-            curr_euler = (R.from_rotvec(curr_pose[3:]) .as_euler("xyz") )
+            curr_euler = (R.from_rotvec(curr_pose[3:]) .as_euler("xyz"))
 
             des_poses = []
             for a in pose_actions:
@@ -224,7 +231,7 @@ class DiffusionPolicy(nn.Module):
 
                 pos = curr_pos + delta_pos
                 euler = curr_euler + delta_euler
-                rot =  R.from_euler("xyz", euler).as_rotvec()
+                rot = R.from_euler("xyz", euler).as_rotvec()
 
                 des_poses.append(
                     np.concatenate([pos, rot])
