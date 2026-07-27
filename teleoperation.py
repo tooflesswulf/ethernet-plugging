@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 import os
 
-GRIP_WIDTH_MM = 15
+GRIP_WIDTH_MM = 10
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 10

@@ -11,12 +11,6 @@ import torch
 import os
 
 
-GRIP_WIDTH_MM = 10
-GRIP_FORCE_N = 40
-GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 5
-
-
 class EvalPolicySerialChunks(robot_execution.RobotExecution):
     def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20):
         # Architecture config, weights, and normalization stats all come from the checkpoint.
@@ -44,6 +38,9 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
 
     def post_step(self, obs, act):
         self.obs_deque.append(obs)
+
+    def runtime_info(self):
+        return super().runtime_info()
 
     def get_action(self):
         if len(self.action_chunk) == 0:
