@@ -234,7 +234,7 @@ class Env:
                 thr.join()
             if self.dataset_path is not None:
                 self.save_data()
-        self.camera = Camera(crop_mode=self.camera_crop_mode)
+        self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
 
         # ============================================================
         # Home / open gripper
