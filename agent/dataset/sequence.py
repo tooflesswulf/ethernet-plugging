@@ -80,6 +80,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 self.h5_image = True
             elif f['images'].attrs['stored_as'] == 'filepath':
                 self.h5_image = False
+            else:
+                raise ValueError('Invalid image storage format in dataset.')
 
             # Gripper metadata
             self.grip_stats = None
@@ -90,6 +92,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                     grip_speed_mmps=f['metadata/grip_speed_mmps'][0],
                     grip_pullback_mm=f['metadata/grip_pullback_mm'][0]
                 )
+            else:
+                print('Warning: Gripper metadata not found in dataset. Gripper stats will be Env defaults.')
 
         # Store dataset in memory for fast sampling during training
         self.indices = self.make_indices(traj_lengths, horizon_steps)
