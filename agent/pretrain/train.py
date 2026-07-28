@@ -53,7 +53,8 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
     policy = DiffusionPolicy(action_horizon=16, norm_stats=norm_stats,
                              state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
                              action_mode=dataset.action_mode,
-                             grip_stats=dataset.grip_stats).to(device)
+                             grip_stats=dataset.grip_stats,
+                             obs_fields=obs_fields).to(device)
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
     lr_scheduler = get_scheduler(
