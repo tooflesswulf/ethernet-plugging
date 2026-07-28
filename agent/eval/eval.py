@@ -9,11 +9,12 @@ import os
 
 
 class EvalPolicySerialChunks(robot_execution.RobotExecution):
-    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20):
+    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, done_threshold=0.5):
         # Architecture config, weights, and normalization stats all come from the checkpoint.
         self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
         self.policy.eval()
         self.device = device
+        self.done_threshold = done_threshold
         grip = GripperStats(*self.policy.grip_stats)
 
         # super().__init__() resets & starts the robot.
@@ -43,7 +44,11 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
         if len(self.action_chunk) == 0:
             self.obs_deque.append(self.env.get_obs())
             self.action_chunk = self.do_prediction()[1:]
-        return self.action_chunk.pop(0)
+        des_pose, des_width, done = self.action_chunk.pop(0)
+        if done > self.done_threshold:
+            print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
+            self.stop()
+        return des_pose, des_width
 
     def do_prediction(self):
         obs_horizon = self.policy.obs_horizon
@@ -51,12 +56,12 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
 
         # get_actions builds images + the obs_fields state vector from the deque.
         with torch.no_grad():
-            des_poses, des_widths = get_actions(self.policy, self.obs_deque, self.device)
+            des_poses, des_widths, des_done = get_actions(self.policy, self.obs_deque, self.device)
             start = obs_horizon - 1
             end = start + action_horizon
-            des_poses, des_widths = des_poses[start:end], des_widths[start:end]
+            des_poses, des_widths, des_done = des_poses[start:end], des_widths[start:end], des_done[start:end]
 
-        return [(p, w) for p, w in zip(des_poses, des_widths)]
+        return [(p, w, d) for p, w, d in zip(des_poses, des_widths, des_done)]
 
 
 def parse_args():
