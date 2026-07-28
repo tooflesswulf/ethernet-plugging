@@ -12,8 +12,12 @@ GRIP_PULLBACK_MM = 10
 
 
 class Teleoperation(robot_execution.RobotExecution):
-    port_xyz = URPose(x=-0.1269, y=0.5979, z=0.0730, rx=1.7296, ry=1.7668, rz=-0.760357)
-    release_pose = URPose(x=-0.0297, y=0.7031, z=0.0813, rx=-2.1029, ry=-2.0230, rz=-0.4256)
+    # port_pose = URPose(x=-0.1269, y=0.5979, z=0.0730, rx=1.7296, ry=1.7668, rz=-0.760357)
+    # release_pose = URPose(x=-0.0297, y=0.7031, z=0.0813, rx=-2.1029, ry=-2.0230, rz=-0.4256)
+
+    port_pose = URPose(x=-0.1221, y=0.4944, z=0.0583, rx=1.8300, ry=1.6718, rz=-0.6700)
+    release_pose1 = URPose(x=-0.0168, y=0.7714, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
+    release_pose2 = URPose(x=-0.2665, y=0.6624, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
 
     @staticmethod
     def add_args(parser):
@@ -51,14 +55,16 @@ class Teleoperation(robot_execution.RobotExecution):
     def move_to_port(self):
         seq = interrupt(self)
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
-        seq.move_to(self.port_xyz)
+        seq.move_to(self.port_pose)
         return self.get_action()
 
     def release_cable(self):
         seq = interrupt(self)
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
-        rel = np.array(self.release_pose)
-        rel[:2] += np.random.uniform([-.04, -.08], [.04, .05])
+
+        r1, r2 = self.release_pose1, self.release_pose2
+        rel = np.array(self.release_pose1)
+        rel[:2] = np.random.uniform([r1.x, r1.y], [r2.x, r2.y])
         seq.move_to(URPose(*rel))
         seq.gripper(GRIP_OPEN)
         return self.get_action()
