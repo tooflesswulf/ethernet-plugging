@@ -39,6 +39,10 @@ class DiffusionPolicy(nn.Module):
         obs_fields: list[str] | None = None
     ):
         super().__init__()
+        self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
+        grip = GripperStats(*grip_stats) if grip_stats is not None else GripperStats(10, 40, 50, 5)
+        self.grip_stats = GripperStats(*(float(x) for x in grip))
+
         # Architecture/config args; saved alongside the weights by save_checkpoint so
         # from_checkpoint can rebuild the policy without the caller knowing the dims.
         self.config = dict(
@@ -53,10 +57,8 @@ class DiffusionPolicy(nn.Module):
             encoder_type=encoder_type,
             augment=augment,
             obs_fields=obs_fields,
-            grip_stats=grip_stats
+            grip_stats=list(self.grip_stats)
         )
-        self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
-        self.grip_stats = GripperStats(*grip_stats) if grip_stats is not None else GripperStats(10, 40, 50, 5)
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
         self.action_dim = action_dim
