@@ -1,12 +1,9 @@
 from agent.utils.robot_utils import get_actions, wait_for_circle
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
-from agent.utils.utils import resize_image
 import robot_execution
 import collections
-import numpy as np
 import argparse
-import einops
 import torch
 import os
 
@@ -49,24 +46,12 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
         return self.action_chunk.pop(0)
 
     def do_prediction(self):
-        obs_deque = self.obs_deque
         obs_horizon = self.policy.obs_horizon
         action_horizon = self.policy.action_horizon
-        img_size = self.policy.img_size
-        device = self.device
 
-        images = np.stack([resize_image(x['image'], (img_size, img_size), flip_channel=True) for x in obs_deque])
-        obs_state = np.stack([x['state']['actual_pose'] for x in obs_deque])
-        agent_gwidth = np.stack([[x['state']['gripper_width']] for x in obs_deque])
-        agent_force = np.stack([x['state']['actual_force'] for x in obs_deque])
-        agent_gforce = np.stack([[x['state']['gripper_force']] for x in obs_deque])
-
-        curr_pose, curr_gripper = obs_state[-1], agent_gwidth[-1][0]
-        obs_state = np.c_[obs_state, agent_gwidth]
-        nimages = einops.rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
-        nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)  # txd
+        # get_actions builds images + the obs_fields state vector from the deque.
         with torch.no_grad():
-            des_poses, des_widths = get_actions(self.policy, nimages, nobs_state, curr_pose, curr_gripper)
+            des_poses, des_widths = get_actions(self.policy, self.obs_deque, self.device)
             start = obs_horizon - 1
             end = start + action_horizon
             des_poses, des_widths = des_poses[start:end], des_widths[start:end]
