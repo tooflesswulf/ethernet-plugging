@@ -159,6 +159,6 @@ if __name__ == '__main__':
             # exit(1)
 
     print('Saving checkpoints to:', ckpt_path)
-    train(name=args.name, dataset_path=dataset_path, ckpt_path=ckpt_path,
+    train(name=args.name, dataset_path=dataset_path, ckpt_dir=ckpt_path,
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
