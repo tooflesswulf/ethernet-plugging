@@ -30,14 +30,19 @@ def batch_to_device(batch, device="cuda:0"):
     return type(batch)(*vals)
 
 
-def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
+def train(name, dataset_path, ckpt_dir, epochs=100,
+          predict_done=True, end_signal_steps=None,
+          use_wandb=False, log_interval=10, save_interval=10,
+          device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
     obs_fields = ['pose', 'gripper_width']
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                      predict_done=predict_done, end_signal_steps=end_signal_steps,
                                       horizon_steps=16, action_mode=action_mode, device=device,
                                       max_n_episodes=50)
 
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                          predict_done=predict_done, end_signal_steps=end_signal_steps,
                                           horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -130,6 +135,8 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=150)
     parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets/')
     parser.add_argument('--ckpt_dir', type=str, default='logs')
+    parser.add_argument('--end_signal', action='store_true', default=True)
+    parser.add_argument('--end_steps', type=int, default=None)
     return parser.parse_args()
 
 
@@ -152,4 +159,6 @@ if __name__ == '__main__':
             # exit(1)
 
     print('Saving checkpoints to:', ckpt_path)
-    train(args.name, dataset_path, ckpt_path, args.epochs, use_wandb=args.use_wandb, device=args.device)
+    train(name=args.name, dataset_path=dataset_path, ckpt_path=ckpt_path,
+          predict_done=args.end_signal, end_signal_steps=args.end_steps,
+          epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
