@@ -35,9 +35,14 @@ class DiffusionPolicy(nn.Module):
         action_mode: ActionMode = 'local_delta',
         encoder_type='resnet',
         augment=True,
-        grip_stats: GripperStats | None = None
+        grip_stats: GripperStats | None = None,
+        obs_fields: list[str] | None = None
     ):
         super().__init__()
+        self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
+        grip = GripperStats(*grip_stats) if grip_stats is not None else GripperStats(10, 40, 50, 5)
+        self.grip_stats = GripperStats(*(float(x) for x in grip))
+
         # Architecture/config args; saved alongside the weights by save_checkpoint so
         # from_checkpoint can rebuild the policy without the caller knowing the dims.
         self.config = dict(
@@ -50,7 +55,9 @@ class DiffusionPolicy(nn.Module):
             num_diffusion_iters=num_diffusion_iters,
             action_mode=action_mode,
             encoder_type=encoder_type,
-            augment=augment
+            augment=augment,
+            obs_fields=obs_fields,
+            grip_stats=list(self.grip_stats)
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
@@ -89,12 +96,6 @@ class DiffusionPolicy(nn.Module):
         self.register_buffer('_action_mode_idx', torch.tensor(ACTION_MODES.index(action_mode)))
         if norm_stats is not None:
             self.set_norm_stats(norm_stats)
-
-        if grip_stats is not None:
-            self.register_buffer('grip_stats', torch.tensor(grip_stats))
-        else:
-            # Default gripper params from v1
-            self.register_buffer('grip_stats', [10, 40, 50, 5])
 
     @property
     def action_mode(self) -> str:
