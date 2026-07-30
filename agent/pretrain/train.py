@@ -69,6 +69,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
         num_training_steps=len(dataloader) * epochs,
     )
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
+    logger.log_config(policy.config)
 
     pbar = tqdm(range(epochs))
     step = 0
