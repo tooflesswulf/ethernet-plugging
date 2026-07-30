@@ -2,6 +2,7 @@
 __pycache__/
 wandb/
 logs*/
+debug*/
 
 *.mp4
 *.pkl
