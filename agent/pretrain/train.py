@@ -36,12 +36,15 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
     obs_fields = ['pose', 'gripper_width']
+    obs_horizon = 3
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                      cond_steps=obs_horizon, img_cond_steps=obs_horizon,
                                       predict_done=predict_done, end_signal_steps=end_signal_steps,
                                       horizon_steps=16, action_mode=action_mode, device=device,
                                       max_n_episodes=50)
 
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                          cond_steps=obs_horizon, img_cond_steps=obs_horizon,
                                           predict_done=predict_done, end_signal_steps=end_signal_steps,
                                           horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
     dataloader = torch.utils.data.DataLoader(
@@ -55,7 +58,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     # Normalization stats from the training set; stored as buffers inside the
     # policy so they're saved in the checkpoint for un-normalizing at eval time.
     norm_stats = compute_norm_stats(dataset)
-    policy = DiffusionPolicy(action_horizon=16, norm_stats=norm_stats,
+    policy = DiffusionPolicy(action_horizon=16, obs_horizon=obs_horizon, norm_stats=norm_stats,
                              state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
                              action_mode=dataset.action_mode,
                              grip_stats=dataset.grip_stats,
