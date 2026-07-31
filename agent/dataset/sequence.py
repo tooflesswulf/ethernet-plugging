@@ -1,17 +1,19 @@
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 import torchvision.transforms.functional as F
 from collections import namedtuple
+from dataclasses import dataclass
 from typing import Literal
 from PIL import Image
 from tqdm import tqdm
 from einops import rearrange, repeat
 import numpy as np
-import torch
-import pathlib
-import h5py
+import pandas as pd 
+import h5py, pathlib, os, torch
+
 
 IMAGE_SIZE = 128
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
+GripperStats = namedtuple('GripperStats', ['grip_width_mm', 'grip_force_n', 'grip_speed_mmps', 'grip_pullback_mm'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
 
@@ -38,6 +40,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         max_n_episodes=10000,
         obs_fields=['pose', 'gripper_width'],
         action_mode: ActionMode = 'local_delta',
+        predict_done=True,
+        end_signal_steps=None,
         transform=None,
         device="cuda:0",
     ):
@@ -48,6 +52,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.device = device
         self.action_mode = action_mode
         self.transform = transform
+
+        self.predict_done = predict_done
+        self.end_signal_steps = end_signal_steps if end_signal_steps is not None else horizon_steps
 
         self.max_n_episodes = max_n_episodes
         self.dataset_path = pathlib.Path(dataset_path)
@@ -78,6 +85,20 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 self.h5_image = True
             elif f['images'].attrs['stored_as'] == 'filepath':
                 self.h5_image = False
+            else:
+                raise ValueError('Invalid image storage format in dataset.')
+
+            # Gripper metadata
+            self.grip_stats = None
+            if 'metadata/grip_width_mm' in f:
+                self.grip_stats = GripperStats(
+                    grip_width_mm=f['metadata/grip_width_mm'][0],
+                    grip_force_n=f['metadata/grip_force_n'][0],
+                    grip_speed_mmps=f['metadata/grip_speed_mmps'][0],
+                    grip_pullback_mm=f['metadata/grip_pullback_mm'][0]
+                )
+            else:
+                print('Warning: Gripper metadata not found in dataset. Gripper stats will be Env defaults.')
 
         # Store dataset in memory for fast sampling during training
         self.indices = self.make_indices(traj_lengths, horizon_steps)
@@ -159,7 +180,10 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
             g_action = self.gripper_action(g_width, threshold=g_thr)
             pose_action = self.pose_action(pose)
-            actions.append(np.c_[pose_action, g_action])
+            chunk = np.c_[pose_action, g_action]
+            if self.predict_done:
+                chunk = np.c_[chunk, self.done_action(start, end, ep_end)]
+            actions.append(chunk)
         self.actions = np.array(actions)
         return self.actions
 
@@ -168,6 +192,16 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         Binary gripper predictions. 1=open, -1=closed
         """
         return 2 * (g_widths > threshold).astype(int).reshape(-1, 1) - 1
+
+    def done_action(self, start, end, ep_end):
+        """
+        Binary end-of-episode signal for the chunk covering absolute timesteps
+        [start, end). 1=task complete (within the final `end_signal_steps` frames
+        of the episode), -1=not done.
+        """
+        abs_t = np.arange(start, end)
+        done = abs_t >= (ep_end - self.end_signal_steps)
+        return 2 * done.astype(int).reshape(-1, 1) - 1
 
     def _pose_action_absolute(self, poses):
         # Returns (N, 6): [tx, ty, tz, rx, ry, rz]
@@ -210,11 +244,88 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         else:
             raise ValueError(f"Invalid action_mode: {self.action_mode}")
 
+class FailureDetectDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        dataset_path,
+        label_path,
+        horizon_steps=8,
+        cond_steps=1,
+        force_cond_steps=8,
+        img_cond_steps=1,
+        obs_fields=['pose', 'gripper_width', 'force'],       
+        transform=None,
+        device="cuda:0",
+    ):
+        """
+        Return (obs=(images, ....), label=0/1) where 0 is success, 1 is failled
+        """
+        self.dataset_path = dataset_path
+        df = pd.read_csv(label_path)
+        episode_ids, fail_idx = df.episode.values, df.idx.values
+        self.ep_states = [
+            np.load(os.path.join(dataset_path, f"episode{int(episode_id):06d}", 'states.npz'))
+            for episode_id in episode_ids
+        ]
+        self.ep_lengths = [ len(ep_states['pose']) for ep_states in self.ep_states]
+        self.horizon_steps = horizon_steps
+        self.img_cond_steps = img_cond_steps; self.cond_steps = cond_steps; self.force_cond_steps = force_cond_steps
+        self.make_indices(episode_ids, fail_idx)
+        self.obs_fields = obs_fields
+        self.device = device
+
+    def make_indices(self, episode_ids, fail_idx):
+        self.indices = [] # list of item: [image_dir, state_idx, start, end, fail/success]
+        for i, episode_id in enumerate(episode_ids):
+            image_dir = os.path.join(self.dataset_path, f"episode{int(episode_id):06d}", "images")
+            state_idx = i 
+            ep_fail_idx = fail_idx[i]
+            for j in range(self.ep_lengths[i]-self.horizon_steps):
+                start = max(0, j-self.horizon_steps)
+                label = 0 if ep_fail_idx == -1 else int( j > ep_fail_idx) # if j > ep_fail_idx, 1 else 0
+                self.indices.append([image_dir, state_idx, start, j, label])
+    def get_image(self, image_path):
+        return np.array( Image.open(image_path).resize((IMAGE_SIZE, IMAGE_SIZE)) ) 
+    
+    def __getitem__(self, index):
+        image_dir, state_idx, start, end, label = self.indices[index]
+        image_indices = np.linspace(start, end, self.img_cond_steps, dtype=int) if self.img_cond_steps > 1 else [end]
+        force_indices = np.linspace(start, end, self.force_cond_steps, dtype=int) if self.force_cond_steps > 1 else [end]
+        cond_indices = np.linspace(start, end, self.cond_steps, dtype=int) if self.cond_steps > 1 else [end]
+        np_images = np.array(
+            [ self.get_image(os.path.join(image_dir, f'{i:06d}.png')) for i in image_indices] ) # TxHxWxC
+        data_dict = {'image': torch.from_numpy(np_images).float().to(self.device)}
+        states = self.ep_states[state_idx]
+        for k in self.obs_fields:
+            obs = states[k]; obs_index = cond_indices if 'force' not in k else force_indices
+            obs = np.array([obs[i] for i in obs_index])
+            data_dict[k] = torch.from_numpy(obs).float().to(self.device)
+        return data_dict, label
+    
+    def __len__(self):
+        return len(self.indices)
+
 
 if __name__ == '__main__':
-    dataset_dir = '/home/albertxu/data/ethernet_plug_v3_dataset'
-    dataset = StitchedSequenceDataset(dataset_dir, obs_fields=['pose', 'gripper_width', 'metadata/rng'])
+    # dataset_dir = '/home/albertxu/data/ethernet_plug_v3_dataset'
+    # dataset = StitchedSequenceDataset(dataset_dir, obs_fields=['pose', 'gripper_width', 'metadata/rng'])
 
-    for _ in dataset:
-        print(_.actions.shape, _.conditions['state'].shape, _.conditions['rgb'].shape)
+    # for _ in dataset:
+    #     print(_.actions.shape, _.conditions['state'].shape, _.conditions['rgb'].shape)
+    #     break
+    dataset_path = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/logs-collectfailures/75rl-rtc'
+    label_path = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/logs-collectfailures/75rl-rtc/label.csv'
+    dataset = FailureDetectDataset(dataset_path, label_path)
+
+    from torch.utils.data import  DataLoader
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=16, 
+        shuffle=True, 
+    )
+    for data, label in dataloader:
+        print(label.shape)
+        for k,v in data.items():
+            print(k, v.shape)
+
         break

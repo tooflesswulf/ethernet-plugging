@@ -3,9 +3,11 @@ from dualsense import DualSense
 from robosuite import make
 import numpy as np
 
+from env import GRIP_OPEN, GRIP_CLOSED
+
 
 class DualSenseInterface:
-    gripper_state = 0
+    gripper_state = GRIP_OPEN
     adaptive_mode = False
 
     def __init__(self, start_pose, xyzspeed=0.1, rpyspeed=1.0, forcespeed=1.0, enable_zadaptive=True):
@@ -49,7 +51,7 @@ class DualSenseInterface:
             return -1
         self.act = act
         if act['right_gripper']:
-            self.gripper_state = 1 - self.gripper_state
+            self.gripper_state = GRIP_OPEN if self.gripper_state == GRIP_CLOSED else GRIP_CLOSED
         if self.enable_zadaptive and act['toggle_zforce']:
             if self.adaptive_mode:
                 self.adaptive_mode = False
@@ -74,8 +76,11 @@ class DualSenseInterface:
         # Orientation: compose delta Euler (ZYX) onto current rotation vector
         drx, dry, drz = delta[3:] * self.speed[3:] * dt
         R_cur = R.from_rotvec(self.targ_pose[3:])
-        R_delta = R.from_euler('ZYX', [drz, dry, drx])
-        self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
+        R_delta = R.from_euler('ZYX', [0, dry, drx])
+        # self.targ_pose[3:] = (R_cur * R_delta).as_rotvec() # Local rotation
+        Rz = R.from_euler('ZYX', [drz, 0, 0])
+        # R_delta = R.from_euler('ZYX', [-drz, -dry, drx])
+        self.targ_pose[3:] = (Rz * R_cur * R_delta).as_rotvec() # Mixed rotation
 
     def update_force_mode(self, act, dt):
         delta = act['right_delta']
@@ -89,8 +94,10 @@ class DualSenseInterface:
         # Orientation: compose delta Euler (ZYX) onto current rotation vector
         drx, dry, drz = delta[3:] * self.speed[3:] * dt
         R_cur = R.from_rotvec(self.targ_pose[3:])
-        R_delta = R.from_euler('ZYX', [drz, dry, drx])
-        self.targ_pose[3:] = (R_cur * R_delta).as_rotvec()
+        # R_delta = R.from_euler('ZYX', [drz, dry, drx])
+        # self.targ_pose[3:] = (R_cur * R_delta).as_rotvec() # Local rotation
+        R_delta = R.from_euler('ZYX', [-drz, -dry, drx])
+        self.targ_pose[3:] = (R_delta * R_cur).as_rotvec() # Global rotation
 
     def activate_adaptive_mode(self):
         self.targ_zforce = self.latest_obs['state']['filtered_force'].z
@@ -112,6 +119,6 @@ class DualSenseInterface:
         # Orientation: compose delta Euler (ZYX) onto current rotation vector
         drx, dry, drz = delta[3:] * self.speed[3:] * dt
         R_cur = R.from_rotvec(des_pose[3:])
-        R_delta = R.from_euler('ZYX', [drz, dry, drx])
-        new_des_ori = (R_cur * R_delta).as_rotvec()
+        R_delta = R.from_euler('ZYX', [-drz, -dry, drx])
+        new_des_ori = (R_delta * R_cur).as_rotvec() # Global rotation
         return np.r_[new_des_pos, new_des_ori]

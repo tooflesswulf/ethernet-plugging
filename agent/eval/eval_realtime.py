@@ -1,36 +1,34 @@
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
-from agent.utils.robot_utils import get_actions, wait_for_circle
+from agent.utils.robot_utils import get_actions, build_states, wait_for_circle
+from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
-from agent.utils.utils import resize_image
-from util import URPose
 import robot_execution
 import collections
-import numpy as np
 import threading
 import argparse
-import einops
 import torch
 import time
 import os
 
 
-GRIP_WIDTH_MM = 10
-GRIP_FORCE_N = 40
-GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 5
-
-
 class EvalRealtimeChunking(robot_execution.RobotExecution):
-    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, weight_decay=0.5):
+    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, weight_decay=0.5, done_threshold=0.5):
         # Architecture config, weights, and normalization stats all come from the checkpoint.
         self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
         self.policy.eval()
         self.device = device
+        # End the episode once the policy's predicted completion score crosses this.
+        self.done_threshold = done_threshold
+        grip = GripperStats(*self.policy.grip_stats)
 
         # super().__init__() resets & starts the robot.
         super().__init__(
             path=log_dir,
             control_freq=control_freq,
+            gwidth=grip.grip_width_mm,
+            gforce=grip.grip_force_n,
+            gspeed=grip.grip_speed_mmps,
+            gpullback=grip.grip_pullback_mm,
         )
 
         self.buffer = RealtimeActionChunkingBuffer(action_dt=self.control_dt, weight_decay=weight_decay)
@@ -46,13 +44,18 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         if self.buffer.is_empty():
             return None
         act = self.buffer.get_action(time.time())
-        return act
+        if act is None:
+            return None
+        des_pose, des_width, done = act
+        # End-of-episode signal: stop once the executed action's done score crosses the threshold.
+        if self.policy.predict_done and done > self.done_threshold:
+            print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
+            self.stop()
+        return des_pose, des_width
 
     def prediction_loop(self):
         action_horizon = self.policy.action_horizon
         obs_horizon = self.policy.obs_horizon
-        img_size = self.policy.img_size
-        device = self.device
 
         obs_deque = collections.deque(maxlen=obs_horizon)
         while not self.stop_event.is_set():
@@ -61,25 +64,18 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             if len(obs_deque) < obs_horizon:
                 continue
 
-            images = np.stack([
-                resize_image(x['image'], (img_size, img_size), flip_channel=True) for x in obs_deque])
-            obs_state = np.stack([x['state']['actual_pose'] for x in obs_deque])
-            agent_gwidth = np.stack([[x['state']['gripper_width']] for x in obs_deque])
-            agent_force = np.stack([x['state']['actual_force'] for x in obs_deque])
-            agent_gforce = np.stack([[x['state']['gripper_force']] for x in obs_deque])
-            curr_pose, curr_gripper = obs_state[-1], agent_gwidth[-1][0]
-            obs_state = np.c_[obs_state, agent_gwidth]  # raw; policy normalizes internally
-
-            nimages = einops.rearrange(
-                torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
-            nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)
+            # get_actions builds images + the obs_fields state vector from the deque.
             with torch.no_grad():
-                des_poses, des_grips = get_actions(self.policy, nimages, nobs_state, curr_pose, curr_gripper)
+                des_poses, des_grips, des_done = get_actions(self.policy, obs_deque, self.device)
 
-            # the executable chunk starts at index obs_horizon-1, which aligns with t_obs
+            # the executable chunk starts at index obs_horizon-1, which aligns with t_obs.
+            # The done score rides through the buffer so it's ensembled and thresholded at
+            # execution time in get_action (not averaged over the chunk here).
             start = obs_horizon - 1
             end = start + action_horizon
-            chnk = self.buffer.add_chunk(t_obs, des_poses[start:end], des_grips[start:end])
+            chnk = self.buffer.add_chunk(
+                t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end])
+            obs_state = build_states(obs_deque, self.policy.obs_fields)  # for offline logging
             self.buffer.dolog(chnk, obs_state, time.time())
 
 

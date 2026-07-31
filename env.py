@@ -11,9 +11,14 @@ import time
 import cv2
 import os
 
-from util import URPose, blend, slerp, episode_index, dict2hdf5
+from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
 from camera import Camera
 import wsg
+
+# Gripper command states (des_gripper_state / gripper_state)
+GRIP_OPEN = 0
+GRIP_CLOSED = 1
+GRIP_MOVING = -1
 
 
 class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
@@ -73,11 +78,12 @@ class Env:
         self.t0 = None
         self.open_width = gwidth + 2 * gpullback
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
-        self.gripper_state = 0  # 0=open, 1=closed
+        self.gripper_state = GRIP_OPEN
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
         self.des_zforce = 0.
         self.adaptive_mode = False
         self.last_step_t = time.perf_counter()
+        self._zero_ft_request = False  # serviced by _control_loop; see request_zero_ft()
 
         # ============================================================
         # Control parameters
@@ -163,7 +169,7 @@ class Env:
     def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False, dualsense=None):
         """Args:
             des_pose: URPose
-            des_gripper_state: int (0=open, 1=closed)
+            des_gripper_state: int (GRIP_OPEN=0, GRIP_CLOSED=1)
             des_zforce: float (desired z-force in N)
             adaptive_mode: bool (whether to use adaptive z-force control)
         """
@@ -228,7 +234,7 @@ class Env:
                 thr.join()
             if self.dataset_path is not None:
                 self.save_data()
-        self.camera = Camera(crop_mode=self.camera_crop_mode)
+        self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
 
         # ============================================================
         # Home / open gripper
@@ -258,7 +264,9 @@ class Env:
         # ============================================================
         g = self.gripper.move(position=self.open_width, speed=self.g_speed)
         g.finished.wait()
-        self.gripper_state = 0
+        self.gripper_state = GRIP_OPEN
+
+        self.gripper.set_pwt(20)
 
         # ============================================================
         # Reset observations
@@ -267,13 +275,23 @@ class Env:
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
         self.commands: list[Command] = []
+        self.ctrl.zeroFtSensor()
+
+        print('payload kg', self.recv.getPayload())
+        print('payload cog', self.recv.getPayloadCog())
 
         print('Environment reset complete.')
 
     def close(self):
         self.stop_flag = True
+        # Bounded joins: a worker can be parked in a no-timeout blocking call
+        # (gripper query .wait(), or ctrl.servoL after a protective stop) and
+        # never re-check stop_flag. Since these are daemon threads, don't wait
+        # on them forever -- that wedges the main thread and forces a ctrl-Z.
         for thr in self.threads:
-            thr.join()
+            thr.join(timeout=2.0)
+            if thr.is_alive():
+                print(f'Warning: thread {thr.name} did not exit; leaving it to daemon cleanup.')
         self.camera.close()
         if self.dataset_path is not None:
             self.save_data()
@@ -292,23 +310,7 @@ class Env:
     def interpolate(self):
         t = time.perf_counter() - self.last_step_t
         perc = min(1, t * self.input_frequency)
-
-        actual_pose = self.last_step_end
-        des_pose = self.des_pose
-
-        interp_position = (
-            actual_pose.x + perc * (des_pose.x - actual_pose.x),
-            actual_pose.y + perc * (des_pose.y - actual_pose.y),
-            actual_pose.z + perc * (des_pose.z - actual_pose.z),
-        )
-        R1 = R.from_rotvec([actual_pose.rx, actual_pose.ry, actual_pose.rz])
-        R2 = R.from_rotvec([des_pose.rx, des_pose.ry, des_pose.rz])
-        delta_theta = (R1.inv() * R2).magnitude()
-        if delta_theta < 1e-6:
-            interp_orientation = R1.as_rotvec()
-        else:
-            interp_orientation = slerp(R1, R2, perc).as_rotvec()
-        return URPose(*interp_position, *interp_orientation)
+        return interpolate(self.last_step_end, self.des_pose, perc)
 
     force_alpha = 0.03
     _force_filtered = np.zeros(6)
@@ -329,10 +331,26 @@ class Env:
 
         zdes = actual_pose.z + kp * force_err + kd * d_force_err
         return zdes
+    
+    def _set_gripstate(self, gs):
+        self.gripper_state = gs
+
+    def request_zero_ft(self):
+        """Ask the control loop to zero the F/T sensor at a safe point.
+
+        self.ctrl (RTDE control) is not thread-safe, so it must only be touched
+        from _control_loop. Callers on other threads (e.g. an interrupt-sequence
+        .then callback) set this flag instead of calling ctrl.zeroFtSensor()
+        directly, which would race with servoL() and can hang the RTDE handshake.
+        """
+        self._zero_ft_request = True
 
     def _control_loop(self):
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
+            if self._zero_ft_request:
+                self.ctrl.zeroFtSensor()
+                self._zero_ft_request = False
             actual_pose = URPose(*self.recv.getActualTCPPose())
             actual_force = URPose(*self.recv.getActualTCPForce())
             filtered_force = URPose(*self.filter_force(actual_force))
@@ -347,22 +365,25 @@ class Env:
             # ----------------------------
             # gripper logic (non-blocking preferred)
             # ----------------------------
-            if gripper_state != des_gripper_state:
-                gs = self.gripper.gripstate().value
-                if gripper_state == 0:
-                    if gs != wsg.GripperState.IDLE.value:
-                        self.gripper.stop().wait()
-                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed)
-                    self.gripper_state = 1
+            if gripper_state != GRIP_MOVING and gripper_state != des_gripper_state:
+                self.gripper_state = GRIP_MOVING
+                if gripper_state == GRIP_OPEN:
+                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
+                        .finished.then(lambda _: self._set_gripstate(GRIP_CLOSED)) \
+                        .catch(lambda e: (
+                            self._set_gripstate(GRIP_CLOSED),
+                            print(f'Gripper GRIP failed: {e}'),
+                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                            ))
                 else:
-                    if gs == wsg.GripperState.GRASPING.value:
-                        self.gripper.stop().wait()
-                        self.gripper.move(self.open_width, speed=self.g_speed)
-                        self.gripper_state = 0
-                    else:
-                        cur_width = self.gripper_obs[-1].gripper_width
-                        self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed)
-                        self.gripper_state = 0
+                    cur_width = self.gripper_obs[-1].gripper_width
+                    self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
+                        .finished.then(lambda _: self._set_gripstate(GRIP_OPEN)) \
+                        .catch(lambda e: (
+                            self._set_gripstate(GRIP_OPEN),
+                            print(f'Gripper RELEASE failed: {e}'),
+                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                        ))
 
             # ----------------------------
             # blend + servo
@@ -370,7 +391,7 @@ class Env:
             if self.last_step_t > 0:
                 # Received at least 1 input
                 des_pose = self.interpolate()
-            command = blend(
+            command = clamp(
                 actual_pose,
                 des_pose,
                 self.max_position_step,

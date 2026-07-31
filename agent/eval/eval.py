@@ -1,36 +1,30 @@
-from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import get_actions, wait_for_circle
+from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
-from agent.utils.utils import resize_image
-from util import URPose
 import robot_execution
 import collections
-import numpy as np
-import threading
 import argparse
-import einops
 import torch
-import time
 import os
 
 
-GRIP_WIDTH_MM = 10
-GRIP_FORCE_N = 40
-GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 5
-
-
 class EvalPolicySerialChunks(robot_execution.RobotExecution):
-    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20):
+    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, done_threshold=0.5):
         # Architecture config, weights, and normalization stats all come from the checkpoint.
         self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
         self.policy.eval()
         self.device = device
+        self.done_threshold = done_threshold
+        grip = GripperStats(*self.policy.grip_stats)
 
         # super().__init__() resets & starts the robot.
         super().__init__(
             path=log_dir,
             control_freq=control_freq,
+            gwidth=grip.grip_width_mm,
+            gforce=grip.grip_force_n,
+            gspeed=grip.grip_speed_mmps,
+            gpullback=grip.grip_pullback_mm,
         )
 
         self.action_chunk = []
@@ -43,36 +37,31 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
     def post_step(self, obs, act):
         self.obs_deque.append(obs)
 
+    def runtime_info(self):
+        return super().runtime_info()
+
     def get_action(self):
         if len(self.action_chunk) == 0:
             self.obs_deque.append(self.env.get_obs())
             self.action_chunk = self.do_prediction()[1:]
-        return self.action_chunk.pop(0)
+        des_pose, des_width, done = self.action_chunk.pop(0)
+        if done > self.done_threshold:
+            print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
+            self.stop()
+        return des_pose, des_width
 
     def do_prediction(self):
-        obs_deque = self.obs_deque
         obs_horizon = self.policy.obs_horizon
         action_horizon = self.policy.action_horizon
-        img_size = self.policy.img_size
-        device = self.device
 
-        images = np.stack([resize_image(x['image'], (img_size, img_size), flip_channel=True) for x in obs_deque])
-        obs_state = np.stack([x['state']['actual_pose'] for x in obs_deque])
-        agent_gwidth = np.stack([[x['state']['gripper_width']] for x in obs_deque])
-        agent_force = np.stack([x['state']['actual_force'] for x in obs_deque])
-        agent_gforce = np.stack([[x['state']['gripper_force']] for x in obs_deque])
-
-        curr_pose, curr_gripper = obs_state[-1], agent_gwidth[-1][0]
-        obs_state = np.c_[obs_state, agent_gwidth]
-        nimages = einops.rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
-        nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)  # txd
+        # get_actions builds images + the obs_fields state vector from the deque.
         with torch.no_grad():
-            des_poses, des_widths = get_actions(self.policy, nimages, nobs_state, curr_pose, curr_gripper)
+            des_poses, des_widths, des_done = get_actions(self.policy, self.obs_deque, self.device)
             start = obs_horizon - 1
             end = start + action_horizon
-            des_poses, des_widths = des_poses[start:end], des_widths[start:end]
+            des_poses, des_widths, des_done = des_poses[start:end], des_widths[start:end], des_done[start:end]
 
-        return [(p, w) for p, w in zip(des_poses, des_widths)]
+        return [(p, w, d) for p, w, d in zip(des_poses, des_widths, des_done)]
 
 
 def parse_args():
