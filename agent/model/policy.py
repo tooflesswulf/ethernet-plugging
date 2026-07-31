@@ -4,8 +4,10 @@ import torch
 import torch.nn as nn
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers import DDIMScheduler
-from agent.dataset.sequence import ActionMode, GripperStats
+
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
+from agent.dataset.sequence import ActionMode, GripperStats
+from env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
 
@@ -36,12 +38,16 @@ class DiffusionPolicy(nn.Module):
         encoder_type='resnet',
         augment=True,
         grip_stats: GripperStats | None = None,
-        obs_fields: list[str] | None = None
+        obs_fields: list[str] | None = None,
+        predict_done: bool | None = None,
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
         grip = GripperStats(*grip_stats) if grip_stats is not None else GripperStats(10, 40, 50, 5)
         self.grip_stats = GripperStats(*(float(x) for x in grip))
+
+        # Actions are [pose(6), gripper(1), done(1)], so assume it if predict_done is None.
+        self.predict_done = (action_dim > 7) if predict_done is None else predict_done
 
         # Architecture/config args; saved alongside the weights by save_checkpoint so
         # from_checkpoint can rebuild the policy without the caller knowing the dims.
@@ -57,7 +63,8 @@ class DiffusionPolicy(nn.Module):
             encoder_type=encoder_type,
             augment=augment,
             obs_fields=obs_fields,
-            grip_stats=list(self.grip_stats)
+            grip_stats=list(self.grip_stats),
+            predict_done=self.predict_done,
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
@@ -212,12 +219,13 @@ class DiffusionPolicy(nn.Module):
         Returns:
             des_poses:  (horizon, 6) absolute poses [tx, ty, tz, rx, ry, rz].
             des_widths: (horizon,) desired gripper widths.
+            des_done:   (horizon,) end-of-episode / task-complete score in [0, 1].
         """
         if torch.is_tensor(actions):
             actions = actions.detach().cpu().numpy()
         actions = np.asarray(actions)
         curr_pose = np.asarray(curr_pose, dtype=float)
-        pose_actions, g_actions = actions[:, :6], actions[:, -1]
+        pose_actions, g_actions = actions[:, :6], actions[:, 6]
 
         if self.action_mode == 'absolute':
             des_poses = pose_actions.copy()
@@ -249,5 +257,12 @@ class DiffusionPolicy(nn.Module):
                 np.concatenate([t.translation, t.rotation.as_rotvec()]) for t in des_tfs])
 
         # Map gripper action (-1 -> 1, 1 -> 0)
-        des_gripper = np.where(g_actions > 0, 0, 1)
-        return des_poses, des_gripper
+        des_gripper = np.where(g_actions > 0, GRIP_OPEN, GRIP_CLOSED)
+
+        # Decode the end-of-episode channel (±1) into a [0, 1] completion score. Zeros
+        # (never done) when this policy has no done channel.
+        if self.predict_done:
+            des_done = (np.clip(actions[:, 7], -1.0, 1.0) + 1.0) / 2.0
+        else:
+            des_done = np.zeros(len(des_poses))
+        return des_poses, des_gripper, des_done

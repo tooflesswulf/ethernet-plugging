@@ -30,14 +30,19 @@ def batch_to_device(batch, device="cuda:0"):
     return type(batch)(*vals)
 
 
-def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interval=10, save_interval=10, device='cuda:0'):
+def train(name, dataset_path, ckpt_dir, epochs=100,
+          predict_done=True, end_signal_steps=None,
+          use_wandb=False, log_interval=10, save_interval=10,
+          device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
     obs_fields = ['pose', 'gripper_width']
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                      predict_done=predict_done, end_signal_steps=end_signal_steps,
                                       horizon_steps=16, action_mode=action_mode, device=device,
                                       max_n_episodes=50)
 
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                          predict_done=predict_done, end_signal_steps=end_signal_steps,
                                           horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -64,6 +69,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
         num_training_steps=len(dataloader) * epochs,
     )
     logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
+    logger.log_config(policy.config)
 
     pbar = tqdm(range(epochs))
     step = 0
@@ -94,7 +100,11 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
         if epoch % save_interval == 0:
             save_checkpoint(policy, ema, ckpt_dir, epoch=epoch)
 
-        val_mses, gripper_correctness = [], []
+        # Binary channels (gripper, done) are encoded as ±1; score them by sign agreement.
+        def binary_correctness(pred, tgt):
+            return (torch.sign(pred) == torch.sign(tgt)).float().mean().item()
+
+        val_mses, gripper_correctness, done_correctness = [], [], []
         for i, batch in enumerate(val_dataloader):
             with torch.no_grad():
                 batch = batch_to_device(batch, device)
@@ -103,18 +113,16 @@ def train(name, dataset_path, ckpt_dir, epochs=100, use_wandb=False, log_interva
                 naction = policy.predict_action(batch.conditions)
 
                 val_mses.append(nn.functional.mse_loss(naction, actions).mean().item())
-                tgt_gripper = actions[:, :, -1].long()  # it should be binary already
-                tgt_mask = tgt_gripper <= 0
-                tgt_gripper[tgt_mask] = -1
-                tgt_gripper[~tgt_mask] = 1
-                pred_gripper = naction[:, :, -1]
-                mask = pred_gripper <= 0
-                pred_gripper[mask] = -1
-                pred_gripper[~mask] = 1
-                gripper_correctness.append((pred_gripper == tgt_gripper).float().mean().item())
+                # gripper is channel 6; the optional end-of-episode signal is channel 7.
+                gripper_correctness.append(binary_correctness(naction[:, :, 6], actions[:, :, 6]))
+                if policy.predict_done:
+                    done_correctness.append(binary_correctness(naction[:, :, 7], actions[:, :, 7]))
 
-        logger.log({"val/mse_loss": np.mean(val_mses),
-                   "val/gripper_correctness": np.mean(gripper_correctness), "val/epoch": epoch}, step=step)
+        val_log = {"val/mse_loss": np.mean(val_mses),
+                   "val/gripper_correctness": np.mean(gripper_correctness), "val/epoch": epoch}
+        if done_correctness:
+            val_log["val/done_correctness"] = np.mean(done_correctness)
+        logger.log(val_log, step=step)
 
     # save the lastest model (with EMA weights applied)
     save_checkpoint(policy, ema, ckpt_dir, epoch=None)
@@ -128,6 +136,8 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=150)
     parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets/')
     parser.add_argument('--ckpt_dir', type=str, default='logs')
+    parser.add_argument('--end_signal', action='store_true', default=True)
+    parser.add_argument('--end_steps', type=int, default=None)
     return parser.parse_args()
 
 
@@ -150,4 +160,6 @@ if __name__ == '__main__':
             # exit(1)
 
     print('Saving checkpoints to:', ckpt_path)
-    train(args.name, dataset_path, ckpt_path, args.epochs, use_wandb=args.use_wandb, device=args.device)
+    train(name=args.name, dataset_path=dataset_path, ckpt_dir=ckpt_path,
+          predict_done=args.end_signal, end_signal_steps=args.end_steps,
+          epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
