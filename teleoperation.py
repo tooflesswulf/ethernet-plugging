@@ -1,6 +1,6 @@
 from agent.utils.robot_utils import interrupt
 import robot_execution
-from env import URPose, GRIP_OPEN
+from env import URPose, GRIP_OPEN, GRIP_CLOSED
 import argparse
 import numpy as np
 import os
@@ -16,6 +16,7 @@ class Teleoperation(robot_execution.RobotExecution):
     # release_pose = URPose(x=-0.0297, y=0.7031, z=0.0813, rx=-2.1029, ry=-2.0230, rz=-0.4256)
 
     port_pose = URPose(x=-0.1221, y=0.4944, z=0.0583, rx=1.8300, ry=1.6718, rz=-0.6700)
+    unplug_pose = URPose(x=-0.1217, y=0.4901, z=0.0236, rx=1.7954, ry=1.8063, rz=-0.6346)
     release_pose1 = URPose(x=-0.0168, y=0.7714, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
     release_pose2 = URPose(x=-0.2665, y=0.6624, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
 
@@ -44,6 +45,8 @@ class Teleoperation(robot_execution.RobotExecution):
     def get_action(self):
         if self.iface.dualsense.state.DpadDown:
             return self.move_to_port()
+        if self.iface.dualsense.state.DpadUp:
+            return self.unplug_and_release()
         if self.iface.dualsense.state.DpadRight:
             return self.release_cable()
         des_pose = URPose(*self.iface.target_pose)
@@ -58,8 +61,14 @@ class Teleoperation(robot_execution.RobotExecution):
         seq.move_to(self.port_pose)
         return self.get_action()
 
-    def release_cable(self):
+    def unplug_and_release(self):
         seq = interrupt(self)
+        seq.move_to(self.unplug_pose)
+        seq.gripper(GRIP_CLOSED)
+    #     return self.get_action()
+
+    # def release_cable(self):
+    #     seq = interrupt(self)
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
 
         r1, r2 = self.release_pose1, self.release_pose2
@@ -67,6 +76,9 @@ class Teleoperation(robot_execution.RobotExecution):
         rel[:2] = np.random.uniform([r1.x, r1.y], [r2.x, r2.y])
         seq.move_to(URPose(*rel))
         seq.gripper(GRIP_OPEN)
+        seq.wait(1) \
+            .then(lambda _: print('Released! Safe to exit.')) \
+            .then(lambda _: self.stop())
         return self.get_action()
 
     def runtime_info(self):
