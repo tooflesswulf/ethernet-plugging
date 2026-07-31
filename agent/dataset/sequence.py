@@ -40,6 +40,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         max_n_episodes=10000,
         obs_fields=['pose', 'gripper_width'],
         action_mode: ActionMode = 'local_delta',
+        predict_done=True,
+        end_signal_steps=None,
         transform=None,
         device="cuda:0",
     ):
@@ -50,6 +52,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.device = device
         self.action_mode = action_mode
         self.transform = transform
+
+        self.predict_done = predict_done
+        self.end_signal_steps = end_signal_steps if end_signal_steps is not None else horizon_steps
 
         self.max_n_episodes = max_n_episodes
         self.dataset_path = pathlib.Path(dataset_path)
@@ -175,7 +180,10 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
             g_action = self.gripper_action(g_width, threshold=g_thr)
             pose_action = self.pose_action(pose)
-            actions.append(np.c_[pose_action, g_action])
+            chunk = np.c_[pose_action, g_action]
+            if self.predict_done:
+                chunk = np.c_[chunk, self.done_action(start, end, ep_end)]
+            actions.append(chunk)
         self.actions = np.array(actions)
         return self.actions
 
@@ -184,6 +192,16 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         Binary gripper predictions. 1=open, -1=closed
         """
         return 2 * (g_widths > threshold).astype(int).reshape(-1, 1) - 1
+
+    def done_action(self, start, end, ep_end):
+        """
+        Binary end-of-episode signal for the chunk covering absolute timesteps
+        [start, end). 1=task complete (within the final `end_signal_steps` frames
+        of the episode), -1=not done.
+        """
+        abs_t = np.arange(start, end)
+        done = abs_t >= (ep_end - self.end_signal_steps)
+        return 2 * done.astype(int).reshape(-1, 1) - 1
 
     def _pose_action_absolute(self, poses):
         # Returns (N, 6): [tx, ty, tz, rx, ry, rz]

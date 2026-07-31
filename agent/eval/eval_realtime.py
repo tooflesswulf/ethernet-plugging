@@ -12,11 +12,13 @@ import os
 
 
 class EvalRealtimeChunking(robot_execution.RobotExecution):
-    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, weight_decay=0.5):
+    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, weight_decay=0.5, done_threshold=0.5):
         # Architecture config, weights, and normalization stats all come from the checkpoint.
         self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
         self.policy.eval()
         self.device = device
+        # End the episode once the policy's predicted completion score crosses this.
+        self.done_threshold = done_threshold
         grip = GripperStats(*self.policy.grip_stats)
 
         # super().__init__() resets & starts the robot.
@@ -42,7 +44,14 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         if self.buffer.is_empty():
             return None
         act = self.buffer.get_action(time.time())
-        return act
+        if act is None:
+            return None
+        des_pose, des_width, done = act
+        # End-of-episode signal: stop once the executed action's done score crosses the threshold.
+        if self.policy.predict_done and done > self.done_threshold:
+            print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
+            self.stop()
+        return des_pose, des_width
 
     def prediction_loop(self):
         action_horizon = self.policy.action_horizon
@@ -57,12 +66,15 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
 
             # get_actions builds images + the obs_fields state vector from the deque.
             with torch.no_grad():
-                des_poses, des_grips = get_actions(self.policy, obs_deque, self.device)
+                des_poses, des_grips, des_done = get_actions(self.policy, obs_deque, self.device)
 
-            # the executable chunk starts at index obs_horizon-1, which aligns with t_obs
+            # the executable chunk starts at index obs_horizon-1, which aligns with t_obs.
+            # The done score rides through the buffer so it's ensembled and thresholded at
+            # execution time in get_action (not averaged over the chunk here).
             start = obs_horizon - 1
             end = start + action_horizon
-            chnk = self.buffer.add_chunk(t_obs, des_poses[start:end], des_grips[start:end])
+            chnk = self.buffer.add_chunk(
+                t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end])
             obs_state = build_states(obs_deque, self.policy.obs_fields)  # for offline logging
             self.buffer.dolog(chnk, obs_state, time.time())
 
