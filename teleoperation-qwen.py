@@ -33,8 +33,6 @@ class Teleoperation(robot_execution.RobotExecution):
         meta['grip_pullback_mm'] = GRIP_PULLBACK_MM
 
         # RNG for target port selection
-        # targ_port = random.randint(1, 4)
-        # meta['target_port'] = targ_port
         return meta
 
     def pre_reset(self):
