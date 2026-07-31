@@ -1,14 +1,82 @@
 from agent.utils.robot_utils import interrupt
+from agent.model.qwen import QwenClient, ETHERNET_EVENTS
 import robot_execution
 from env import URPose, GRIP_OPEN, GRIP_CLOSED
 import argparse
+import collections
+import threading
+import time
+import cv2
 import numpy as np
 import os
+from PIL import Image
 
 GRIP_WIDTH_MM = 10
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 10
+
+
+class QwenWorker(threading.Thread):
+    """Runs the QwenClient off the control loop.
+
+    The main (20+ Hz) loop feeds recent frames via `submit_frame` and reads the
+    latest event probabilities via `get_probs`. The model runs slower than the
+    control loop, so it lives here on its own thread and simply publishes its most
+    recent result; the control loop never blocks on it.
+    """
+
+    def __init__(self, events=ETHERNET_EVENTS, window=8, **client_kwargs):
+        super().__init__(daemon=True)
+        self.events = list(events)
+        self.client_kwargs = client_kwargs
+
+        # Rolling buffer of recent frames (oldest -> newest). maxlen == window so
+        # we always hand the model a fixed-size clip.
+        self._frames = collections.deque(maxlen=window)
+        self._frame_lock = threading.Lock()
+
+        self._result_lock = threading.Lock()
+        self._probs = {e: None for e in self.events}
+        self._infer_hz = 0.0
+        self._ready = False
+
+        self._stop = threading.Event()
+
+    def submit_frame(self, image_bgr):
+        """Push a control-loop frame (BGR uint8) into the rolling buffer."""
+        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        with self._frame_lock:
+            self._frames.append(Image.fromarray(rgb))
+
+    def get_probs(self):
+        """Return (probs, infer_hz, ready) as a snapshot for overlaying."""
+        with self._result_lock:
+            return dict(self._probs), self._infer_hz, self._ready
+
+    def run(self):
+        # Heavy: loads the VLM weights. Done on this thread so __init__ of the
+        # teleop / robot setup isn't blocked by it.
+        client = QwenClient(**self.client_kwargs)
+        with self._result_lock:
+            self._ready = True
+
+        while not self._stop.is_set():
+            with self._frame_lock:
+                frames = list(self._frames)
+            if len(frames) < 2:  # video needs >= 2 frames
+                time.sleep(0.02)
+                continue
+
+            t0 = time.time()
+            probs = client.score_window(frames, self.events)
+            dt = time.time() - t0
+            with self._result_lock:
+                self._probs = probs
+                self._infer_hz = (1.0 / dt) if dt > 0 else 0.0
+
+    def stop(self):
+        self._stop.set()
 
 
 class Teleoperation(robot_execution.RobotExecution):
@@ -19,6 +87,10 @@ class Teleoperation(robot_execution.RobotExecution):
     unplug_pose = URPose(x=-0.1217, y=0.4901, z=0.0236, rx=1.7954, ry=1.8063, rz=-0.6346)
     release_pose1 = URPose(x=-0.0168, y=0.7714, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
     release_pose2 = URPose(x=-0.2665, y=0.6624, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
+
+    # How often to feed a frame to the Qwen worker (s). ~7 Hz spreads the 8-frame
+    # window over ~1s of motion without flooding the buffer at control rate.
+    QWEN_SUBMIT_INTERVAL = 0.15
 
     @staticmethod
     def add_args(parser):
@@ -73,6 +145,51 @@ class Teleoperation(robot_execution.RobotExecution):
             .then(lambda _: self.stop())
         return self.get_action()
 
+    def _draw_overlay(self, image):
+        """Draw the latest Qwen event probabilities onto a copy of `image`."""
+        img = image.copy()
+        probs, infer_hz, ready = self.qwen.get_probs()
+
+        x, y = 10, 24
+        if not ready:
+            cv2.putText(img, 'Qwen: loading model...', (x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
+            return img
+
+        bar_x = x + 60
+        bar_w = 140
+        for event in self.qwen.events:
+            p = probs.get(event)
+            label = f'{p:.2f}' if p is not None else ' -- '
+            # red (low) -> green (high) in BGR
+            color = (0, 0, 200) if p is None else (0, int(255 * p), int(255 * (1 - p)))
+
+            cv2.putText(img, label, (x, y + 6), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55, color, 2, cv2.LINE_AA)
+            # probability bar
+            cv2.rectangle(img, (bar_x, y - 8), (bar_x + bar_w, y + 4), (60, 60, 60), 1)
+            if p is not None:
+                cv2.rectangle(img, (bar_x, y - 8),
+                              (bar_x + int(bar_w * p), y + 4), color, -1)
+            # event text (truncated to fit)
+            cv2.putText(img, event[:42], (bar_x + bar_w + 8, y + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1, cv2.LINE_AA)
+            y += 26
+
+        cv2.putText(img, f'{infer_hz:.1f} Hz', (x, y + 6), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (200, 200, 200), 1, cv2.LINE_AA)
+        return img
+
+    def post_step(self, obs, action):
+        img = obs['image']
+
+        now = time.time()
+        if now - self._last_qwen_submit >= self.QWEN_SUBMIT_INTERVAL:
+            self.qwen.submit_frame(img)
+            self._last_qwen_submit = now
+
+        self.display_image = self._draw_overlay(img)
+
     def runtime_info(self):
         obs = self.last_obs
         st = obs['state']
@@ -81,9 +198,19 @@ class Teleoperation(robot_execution.RobotExecution):
         # print(f"Pose: {st['actual_pose']}", end='\r')
         print(f'URPose(x={p.x:.4f}, y={p.y:.4f}, z={p.z:.4f}, rx={p.rx:.4f}, ry={p.ry:.4f}, rz={p.rz:.4f})', end='\r')
 
+    def close(self):
+        self.qwen.stop()
+        super().close()
+
     def __init__(self, args):
         control_freq = 100
         home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see)
+
+        # Start the Qwen worker before super().__init__ so the (slow) model load
+        # overlaps with robot/camera bring-up.
+        self.qwen = QwenWorker(events=ETHERNET_EVENTS)
+        self._last_qwen_submit = 0.0
+        self.qwen.start()
 
         data_path = None if args.debug else args.path
         metadata = self.args2metadata(args)

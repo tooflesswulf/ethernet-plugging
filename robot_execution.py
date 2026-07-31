@@ -21,6 +21,7 @@ class RobotExecution:
         self.control_dt = 1 / control_freq
         self.home_pose = home_pose
         self.show_image = show_image
+        self.display_image = None
 
         # Robot control env
         self.env = Env(
@@ -107,7 +108,7 @@ class RobotExecution:
             self.iface.store_obs(self.last_obs)
             self.runtime_info()
             if self.show_image:
-                cv2.imshow('RGB', self.last_obs['image'])
+                cv2.imshow('RGB', self.display_image)
                 cv2.waitKey(1)
 
             self.env.wait_period()
@@ -134,7 +135,7 @@ class RobotExecution:
         pass
 
     def post_step(self, obs, action):
-        pass
+        self.display_image = obs['image']
 
     def runtime_info(self):
         obs = self.last_obs

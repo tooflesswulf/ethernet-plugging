@@ -81,6 +81,21 @@ class QwenClient:
         pair = torch.stack([logits[self._true_id], logits[self._false_id]])
         return torch.softmax(pair, dim=0)[0].item()
 
+    def score_window(self, frames, events: Sequence[str] = ETHERNET_EVENTS) -> dict:
+        """P(True) for each event given a single window of frames.
+
+        The real-time analog of score_events: instead of striding along a whole
+        trajectory, it scores one window (the last frame is treated as "now") and
+        returns {event: P(True)}. Intended for live use where a caller keeps a
+        rolling buffer of recent frames and wants the current event probabilities.
+
+        Args:
+            frames: recent frames (>= 2) as PIL Images / arrays, oldest first.
+            events: statements to score. Defaults to ETHERNET_EVENTS.
+        """
+        self.model.eval()
+        return {event: self._true_prob(frames, event) for event in events}
+
     def score_events(
         self,
         frames: Sequence,
