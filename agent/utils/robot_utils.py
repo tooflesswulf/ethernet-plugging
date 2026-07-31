@@ -43,7 +43,8 @@ def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda'):
     obs_deque: sequence of env obs dicts (len == policy.obs_horizon), each with
                'image' and 'state'. Images and the proprio state vector are built
                here; the state follows policy.obs_fields so it matches training.
-    Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,)) ready to execute.
+    Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,),
+    des_done (H,) end-of-episode score in [0, 1]) ready to execute.
     """
     img_size = policy.img_size
     images = np.stack([resize_image(o['image'], (img_size, img_size), flip_channel=True) for o in obs_deque])
