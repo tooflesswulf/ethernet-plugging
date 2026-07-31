@@ -211,6 +211,8 @@ class Teleoperation(robot_execution.RobotExecution):
         self.qwen = QwenWorker(events=ETHERNET_EVENTS)
         self._last_qwen_submit = 0.0
         self.qwen.start()
+        while not self.qwen._ready:
+            time.sleep(1)
 
         data_path = None if args.debug else args.path
         metadata = self.args2metadata(args)
