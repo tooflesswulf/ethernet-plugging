@@ -30,14 +30,28 @@ STATE_NOT_VISIBLE = "the ethernet cable is not visible"
 # Order: A (holding), B (plugged), C (on surface), D (not visible).
 ETHERNET_STATES = (STATE_HOLDING, STATE_PLUGGED, STATE_SURFACE, STATE_NOT_VISIBLE)
 
+# IMPORTANT: the prompts below deliberately never say "ethernet cable" (or
+# "RJ45"). On this wrist view the model does not recognize the plug as an
+# ethernet cable and, whenever that phrase appears, collapses every readout to
+# ~0 (measured P(holding) 0.01-0.15 on clearly-held frames). Asking about a
+# generic "object" instead restores the signal (P(holding) 0.4-0.9). We attach
+# the task label ("ethernet cable") ourselves via the STATE_* keys, since the
+# cable is the only manipulated object in this task. See git history / the
+# qwen-debug investigation for the ablation.
+#
 # Mutually-exclusive options for the cable-end LOCATION head. The order here is
 # the A/B/C/D letter order shown to the model; indices are referenced by
 # StateFilter (0=port, 1=surface, 2=mid-air, 3=not-visible).
+#
+# NOTE: the "inserted into a socket or port" option (-> STATE_PLUGGED) is the
+# weak one -- a single wrist frame cannot reliably tell plugged from
+# held-just-outside-the-port. For a trustworthy plugged signal, fuse force /
+# proximity-to-port_pose here rather than relying on this logit.
 _LOCATION_OPTIONS = (
-    "plugged into the ethernet switch port",
-    "resting on the cardboard surface",
-    "held in mid-air by the gripper",
-    "not visible in the frame",
+    "inserted into a socket or port",
+    "resting on the flat surface",
+    "held up in the air by the gripper",
+    "no such object is in view",
 )
 
 def _subsample(frames: Sequence, count: int) -> list:
@@ -179,10 +193,13 @@ class QwenClient:
             return self.model(**inputs).logits[0, -1].float()
 
     def _grasp_prob(self, frame, min_pixels, max_pixels) -> float:
-        """P(gripper is holding the cable) from a Yes/No readout on one frame."""
+        """P(gripper is holding the cable) from a Yes/No readout on one frame.
+
+        Phrased as a generic "object" on purpose -- see the note by
+        _LOCATION_OPTIONS about why "ethernet cable" must not appear here.
+        """
         prompt = (
-            "The image shows a robot arm performing an ethernet cable plugging task.\n"
-            "Question: Is the robot gripper currently grasping/holding the ethernet cable?\n"
+            "Is the robot gripper holding an object?\n"
             "Answer Yes or No."
         )
         content = [self._image_content(frame, min_pixels, max_pixels),
@@ -197,8 +214,8 @@ class QwenClient:
             f"{chr(ord('A') + i)}) {opt}" for i, opt in enumerate(_LOCATION_OPTIONS)
         )
         prompt = (
-            "The image shows a robot arm performing an ethernet cable plugging task.\n"
-            "Where is the end of the ethernet cable (the RJ45 connector) right now?\n"
+            "The robot gripper is working with a small object in an assembly task.\n"
+            "Where is that object right now?\n"
             f"{options}\n"
             "Answer with a single letter."
         )
