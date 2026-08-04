@@ -10,13 +10,14 @@ from PIL import Image
 # predicates can co-occur (e.g. held AND plugged during an A->B insertion),
 # which is exactly what happens at the transitions we care about. See
 # score_state().
-STATE_HOLDING = "the robot gripper is holding the ethernet cable"
-STATE_PLUGGED = "the ethernet cable is fully plugged into the ethernet switch"
+GRIP_STATUS = "gripper is holding the cable"
 STATE_SURFACE = "the ethernet cable is lying on the cardboard surface"
+STATE_HOLDING = "the robot gripper is holding the ethernet cable"
+STATE_VISIBLE_ELSE = "the ethernet cable is visible but not resting on the surface or held in the gripper"
 STATE_NOT_VISIBLE = "the ethernet cable is not visible"
 
 # Order: A (holding), B (plugged), C (on surface), D (not visible).
-ETHERNET_STATES = (STATE_HOLDING, STATE_PLUGGED, STATE_SURFACE, STATE_NOT_VISIBLE)
+ETHERNET_STATES = (GRIP_STATUS, STATE_SURFACE, STATE_HOLDING, STATE_VISIBLE_ELSE, STATE_NOT_VISIBLE)
 
 # IMPORTANT: the prompts below deliberately never say "ethernet cable" (or
 # "RJ45"). On this wrist view the model does not recognize the plug as an
@@ -36,9 +37,9 @@ ETHERNET_STATES = (STATE_HOLDING, STATE_PLUGGED, STATE_SURFACE, STATE_NOT_VISIBL
 # held-just-outside-the-port. For a trustworthy plugged signal, fuse force /
 # proximity-to-port_pose here rather than relying on this logit.
 _LOCATION_OPTIONS = (
-    "inserted into a socket or port",
     "resting on the flat surface",
     "held up in the air by the gripper",
+    "object is visible but not resting on the surface or held in the gripper",
     "no such object is in view",
 )
 
@@ -141,7 +142,7 @@ class QwenClient:
             f"{chr(ord('A') + i)}) {opt}" for i, opt in enumerate(_LOCATION_OPTIONS)
         )
         prompt = (
-            "The robot gripper is working with a small object in an assembly task.\n"
+            "The robot gripper is working with a small cable-like object in an assembly task.\n"
             "Where is that object right now?\n"
             f"{options}\n"
             "Answer with a single letter."
@@ -196,8 +197,9 @@ class QwenClient:
         p_grasp = self._grasp_prob(frame, min_pixels, max_pixels)
         loc = self._location_probs(frame, min_pixels, max_pixels)  # port/surface/mid-air/not-visible
         return {
-            STATE_HOLDING: p_grasp,
-            STATE_PLUGGED: loc[0],
-            STATE_SURFACE: loc[1],
+            GRIP_STATUS: p_grasp,
+            STATE_SURFACE: loc[0],
+            STATE_HOLDING: loc[1],
+            STATE_VISIBLE_ELSE: loc[2],
             STATE_NOT_VISIBLE: loc[3],
         }
