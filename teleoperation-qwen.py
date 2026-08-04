@@ -1,5 +1,5 @@
 from agent.utils.robot_utils import interrupt
-from agent.model.qwen import QwenClient, ETHERNET_EVENTS
+from agent.model.qwen import QwenClient, ETHERNET_STATES
 import robot_execution
 from env import URPose, GRIP_OPEN, GRIP_CLOSED
 import argparse
@@ -21,23 +21,23 @@ class QwenWorker(threading.Thread):
     """Runs the QwenClient off the control loop.
 
     The main (20+ Hz) loop feeds recent frames via `submit_frame` and reads the
-    latest event probabilities via `get_probs`. The model runs slower than the
+    latest state probabilities via `get_probs`. The model runs slower than the
     control loop, so it lives here on its own thread and simply publishes its most
     recent result; the control loop never blocks on it.
     """
 
-    def __init__(self, events=ETHERNET_EVENTS, window=8, **client_kwargs):
+    def __init__(self, states=ETHERNET_STATES, window=8, **client_kwargs):
         super().__init__(daemon=True)
-        self.events = list(events)
+        self.states = list(states)
         self.client_kwargs = client_kwargs
 
         # Rolling buffer of recent frames (oldest -> newest). maxlen == window so
-        # we always hand the model a fixed-size clip.
+        # score_state can pick the sharpest of the recent tail.
         self._frames = collections.deque(maxlen=window)
         self._frame_lock = threading.Lock()
 
         self._result_lock = threading.Lock()
-        self._probs = {e: None for e in self.events}
+        self._probs = {s: None for s in self.states}
         self._infer_hz = 0.0
         self._ready = False
 
@@ -64,12 +64,12 @@ class QwenWorker(threading.Thread):
         while not self._stop.is_set():
             with self._frame_lock:
                 frames = list(self._frames)
-            if len(frames) < 2:  # video needs >= 2 frames
+            if not frames:
                 time.sleep(0.02)
                 continue
 
             t0 = time.time()
-            probs = client.score_window(frames, self.events)
+            probs = client.score_state(frames)
             dt = time.time() - t0
             with self._result_lock:
                 self._probs = probs
@@ -146,7 +146,7 @@ class Teleoperation(robot_execution.RobotExecution):
         return self.get_action()
 
     def _draw_overlay(self, image):
-        """Draw the latest Qwen event probabilities onto a copy of `image`."""
+        """Draw the latest Qwen state probabilities onto a copy of `image`."""
         img = image.copy()
         probs, infer_hz, ready = self.qwen.get_probs()
 
@@ -158,8 +158,8 @@ class Teleoperation(robot_execution.RobotExecution):
 
         bar_x = x + 60
         bar_w = 140
-        for event in self.qwen.events:
-            p = probs.get(event)
+        for state in self.qwen.states:
+            p = probs.get(state)
             label = f'{p:.2f}' if p is not None else ' -- '
             # red (low) -> green (high) in BGR
             color = (0, 0, 200) if p is None else (0, int(255 * p), int(255 * (1 - p)))
@@ -171,8 +171,8 @@ class Teleoperation(robot_execution.RobotExecution):
             if p is not None:
                 cv2.rectangle(img, (bar_x, y - 8),
                               (bar_x + int(bar_w * p), y + 4), color, -1)
-            # event text (truncated to fit)
-            cv2.putText(img, event[:42], (bar_x + bar_w + 8, y + 4),
+            # state text (truncated to fit)
+            cv2.putText(img, state[:42], (bar_x + bar_w + 8, y + 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1, cv2.LINE_AA)
             y += 26
 
@@ -208,7 +208,7 @@ class Teleoperation(robot_execution.RobotExecution):
 
         # Start the Qwen worker before super().__init__ so the (slow) model load
         # overlaps with robot/camera bring-up.
-        self.qwen = QwenWorker(events=ETHERNET_EVENTS)
+        self.qwen = QwenWorker(states=ETHERNET_STATES)
         self._last_qwen_submit = 0.0
         self.qwen.start()
         while not self.qwen._ready:
