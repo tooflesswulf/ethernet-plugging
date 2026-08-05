@@ -15,10 +15,11 @@ class Teleoperation(robot_execution.RobotExecution):
     # port_pose = URPose(x=-0.1269, y=0.5979, z=0.0730, rx=1.7296, ry=1.7668, rz=-0.760357)
     # release_pose = URPose(x=-0.0297, y=0.7031, z=0.0813, rx=-2.1029, ry=-2.0230, rz=-0.4256)
 
-    port_pose = URPose(x=-0.1221, y=0.4944, z=0.0583, rx=1.8300, ry=1.6718, rz=-0.6700)
-    unplug_pose = URPose(x=-0.1217, y=0.4901, z=0.0236, rx=1.7954, ry=1.8063, rz=-0.6346)
-    release_pose1 = URPose(x=-0.0168, y=0.7714, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
-    release_pose2 = URPose(x=-0.2665, y=0.6624, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
+    port_pose = URPose(x=-0.1225, y=0.4358, z=0.0489, rx=1.7429, ry=1.5768, rz=-0.7897)
+    unplug_pose = URPose(x=-0.1242, y=0.4285, z=0.0053, rx=1.6390, ry=1.6874, rz=-0.7822)
+    release_pose1 = URPose(x=0.0120, y=0.7152, z=0.0271, rx=-1.8993, ry=-1.7929, rz=-0.4988)
+    release_pose2 = URPose(x=-0.2713, y=0.5808, z=0.0271, rx=-1.8993, ry=-1.7928, rz=-0.4988)
+    last_obs = None
 
     @staticmethod
     def add_args(parser):
@@ -43,6 +44,9 @@ class Teleoperation(robot_execution.RobotExecution):
         pass
 
     def get_action(self):
+        if self.last_obs and self.last_obs['network_status']:
+            print('Autodetected plugin!')
+            return self.unplug_and_release()
         if self.iface.dualsense.state.DpadDown:
             return self.move_to_port()
         if self.iface.dualsense.state.DpadUp:
@@ -61,6 +65,7 @@ class Teleoperation(robot_execution.RobotExecution):
 
     def unplug_and_release(self):
         seq = interrupt(self)
+        seq.gripper(GRIP_OPEN)
         seq.move_to(self.unplug_pose)
         seq.gripper(GRIP_CLOSED)
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
