@@ -11,6 +11,7 @@ import time
 import cv2
 import os
 
+from net_isup import is_network_up
 from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
 from camera import Camera
 import wsg
@@ -54,6 +55,7 @@ class Env:
         self,
         robot_ip="192.168.0.100",  # could be 101 or 100 depending on your setup
         gripper_ip="192.168.0.20",
+        network_iface='enx7cc2c6453f68',  # network interface to check for connectivity
         camera_crop_mode=1,  # crop on the right half of the image to focus on the workspace
         control_frequency=20,
         servo_frequency=500,
@@ -107,6 +109,9 @@ class Env:
         self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
         self.gripper = wsg.WSG(ip=gripper_ip)
         self.gripper_query_frequency = gripper_query_frequency
+        self.network_iface = network_iface
+        self.network_query_frequency = 2.0
+        self.network_status = False
 
         # ============================================================
         # Servo parameters
@@ -159,7 +164,8 @@ class Env:
                     'filtered_force': self.robot_obs[-1].filtered_force,
                     'gripper_width': self.gripper_obs[-1].gripper_width,
                     'gripper_force': self.gripper_obs[-1].gripper_force,
-                }
+                },
+                'network_status': self.network_status
             }
             return obs
 
@@ -203,9 +209,11 @@ class Env:
 
         self.stop_flag = False
         self.threads = [
-            threading.Thread(target=self._control_loop, daemon=True,),
-            threading.Thread(target=self._camera_loop, daemon=True,),
-            threading.Thread(target=self._gripper_loop, daemon=True,)]
+            threading.Thread(target=self._control_loop, daemon=True),
+            threading.Thread(target=self._camera_loop, daemon=True),
+            threading.Thread(target=self._gripper_loop, daemon=True),
+            threading.Thread(target=self._network_loop, daemon=True),
+        ]
         if self.dataset_path is not None:
             self.threads.append(threading.Thread(target=self._logger_loop, daemon=True,))
 
@@ -434,6 +442,14 @@ class Env:
                                                gripper_force=force.value))
             sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
             # print('============ QUERY RESOLVED ================')
+            time.sleep(sleep_dur)
+
+    def _network_loop(self):
+        while not self.stop_flag:
+            t0 = time.perf_counter()
+            status = is_network_up(self.network_iface)
+            self.network_status = status
+            sleep_dur = max(0, 1.0 / self.network_query_frequency - (time.perf_counter() - t0))
             time.sleep(sleep_dur)
 
     def _logger_loop(self):
