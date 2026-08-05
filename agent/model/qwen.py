@@ -8,21 +8,21 @@ from PIL import Image
 # --- score_state schema ---------------------------------------------------
 # Qwen is VISION-ONLY here: it answers WHERE the cable is (which region of the
 # workspace) and WHETHER it is visible. Grasp/holding is NOT asked -- the wrist
-# camera cannot resolve finger-closure (t0-empty and t60-held are the same
-# picture to the model), so that signal comes from the gripper width/force
+# camera cannot resolve finger-closure, so that signal comes from the gripper width/force
 # outside this module. Likewise "plugged vs approaching" and "dropped vs ok"
 # are not pixel-separable and are left to force/proprioception.
 #
-# The three states are chosen to match visually-separable regimes and, on the
-# labelled debug frames, separate cleanly (each ~1.0 on the correct class):
-#   near_gripper : cable up by the tool against the plain cardboard workspace
-#   at_switch    : cable over at the blue network switch / port area
-#   not_visible  : cable out of frame / occluded
+# The three states come from two robust, independent heads (see score_state):
+#   * visibility (Yes/No): is the cable/connector visible at all?
+#   * scene (plain vs cluttered): what is behind the gripper?
+# factored as:
+#   not_visible  = 1 - P(visible)                 cable out of frame / occluded
+#   near_gripper = P(visible) * P(plain scene)    up by the tool, plain workspace
+#   at_switch    = P(visible) * P(cluttered scene) at the port / work area
 STATE_NEAR_GRIPPER = "the cable is up near the gripper against the plain workspace"
 STATE_AT_SWITCH = "the cable is over at the network switch"
 STATE_NOT_VISIBLE = "the cable is not visible in the frame"
 
-# Order matches the A/B/C option letters shown to the model.
 ETHERNET_STATES = (STATE_NEAR_GRIPPER, STATE_AT_SWITCH, STATE_NOT_VISIBLE)
 
 # IMPORTANT: never say "ethernet cable" or "RJ45" in the prompt. On this wrist
@@ -30,16 +30,18 @@ ETHERNET_STATES = (STATE_NEAR_GRIPPER, STATE_AT_SWITCH, STATE_NOT_VISIBLE)
 # that phrase appears, collapses every readout to ~0. "cable/connector" is fine
 # and we attach the task label via the STATE_* keys.
 #
-# The prompt is also deliberately NEUTRAL: an earlier version framed it as "the
-# gripper is working with the object, where is that object", which presupposed
-# a grasp and collapsed every frame onto "held in the air" (0.57-0.92 even when
-# the cable was out of frame). Asking "where is the cable/connector" plainly is
-# what makes the three regions separate. Options are mutually exclusive; index
-# order (0=near-gripper, 1=at-switch, 2=not-visible) is referenced by score_state.
-_LOCATION_OPTIONS = (
-    "up near the robot gripper, against a plain background",
-    "over at the blue network switch with ports",
-    "not visible in the frame",
+# WHY SCENE-CLUTTER, NOT THE SWITCH: the region head used to key off "the blue
+# network switch". When the switch was swapped for a small BLACK one, that
+# anchor died -- the switch is now tiny, dark, and edge-of-frame, and the word
+# "blue" actively pointed the model at the blue bench clamps instead (at_switch
+# dropped to 0.18-0.38, port-jack detection to <0.35). What still separates
+# transport from the port region robustly is the BACKGROUND: plain cardboard vs
+# a cluttered bench. That scene question hits ~0.99 on both classes regardless
+# of the switch's colour/size, so the region is inferred from clutter, not the
+# switch. Keep these options switch-agnostic.
+_SCENE_OPTIONS = (
+    "a plain, mostly empty cardboard or desk surface",
+    "a cluttered bench of tools, clamps, wires and electronic equipment",
 )
 
 
@@ -71,13 +73,13 @@ class QwenClient:
 
         # Answer tokens for the readouts. The prompt is prefilled with
         # "The answer is:" so each continuation carries a leading space.
-        # Yes/No (grasp head) and A/B/C/D (location head) answer tokens.
+        # Yes/No (visibility head) and A/B/... (multiple-choice) answer tokens.
         tok = self.processor.tokenizer
         self._yes_id = tok(" Yes", add_special_tokens=False).input_ids[0]
         self._no_id = tok(" No", add_special_tokens=False).input_ids[0]
         self._letter_ids = [
             tok(f" {chr(ord('A') + i)}", add_special_tokens=False).input_ids[0]
-            for i in range(len(_LOCATION_OPTIONS))
+            for i in range(4)
         ]
 
     # --- single-frame state estimation ------------------------------------
@@ -119,14 +121,10 @@ class QwenClient:
         with torch.no_grad():
             return self.model(**inputs).logits[0, -1].float()
 
-    def _grasp_prob(self, frame, min_pixels, max_pixels) -> float:
-        """P(gripper is holding the cable) from a Yes/No readout on one frame.
-
-        Phrased as a generic "object" on purpose -- see the note by
-        _LOCATION_OPTIONS about why "ethernet cable" must not appear here.
-        """
+    def _visible_prob(self, frame, min_pixels, max_pixels) -> float:
+        """P(the cable/connector is visible somewhere in the frame)."""
         prompt = (
-            "Is the robot gripper holding an object?\n"
+            "Is a cable or its connector visible anywhere in this image?\n"
             "Answer Yes or No."
         )
         content = [self._image_content(frame, min_pixels, max_pixels),
@@ -135,21 +133,25 @@ class QwenClient:
         pair = torch.stack([logits[self._yes_id], logits[self._no_id]])
         return torch.softmax(pair, dim=0)[0].item()
 
-    def _location_probs(self, frame, min_pixels, max_pixels) -> list:
-        """Normalized distribution over _LOCATION_OPTIONS for the cable end."""
+    def _scene_cluttered_prob(self, frame, min_pixels, max_pixels) -> float:
+        """P(scene behind the gripper is the cluttered port/work area vs plain).
+
+        Region proxy that is robust to the switch's colour/size -- see the WHY
+        SCENE-CLUTTER note by _SCENE_OPTIONS.
+        """
         options = "\n".join(
-            f"{chr(ord('A') + i)}) {opt}" for i, opt in enumerate(_LOCATION_OPTIONS)
+            f"{chr(ord('A') + i)}) {opt}" for i, opt in enumerate(_SCENE_OPTIONS)
         )
         prompt = (
-            "Look at the whole image. Where is the cable/connector?\n"
+            "What is in the scene behind the robot gripper?\n"
             f"{options}\n"
             "Answer with a single letter."
         )
         content = [self._image_content(frame, min_pixels, max_pixels),
                    {"type": "text", "text": prompt}]
         logits = self._last_token_logits(content)
-        opt_logits = torch.stack([logits[i] for i in self._letter_ids])
-        return torch.softmax(opt_logits, dim=0).tolist()
+        pair = torch.stack([logits[self._letter_ids[0]], logits[self._letter_ids[1]]])
+        return torch.softmax(pair, dim=0)[1].item()  # index 1 == cluttered
 
     def score_state(
         self,
@@ -160,11 +162,15 @@ class QwenClient:
     ) -> dict:
         """Estimate WHERE the cable is from a single (sharp) frame.
 
-        Vision-only: a neutral multiple-choice location head returns a normalized
-        distribution over the three visually-separable regions
-        (near_gripper / at_switch / not_visible). Grasp/holding is intentionally
-        not scored here -- see the schema note at the top of the module -- and is
-        expected to come from the gripper width/force.
+        Vision-only, from two robust independent heads (see the schema note at
+        the top of the module) factored into three regions:
+
+            not_visible  = 1 - P(visible)
+            near_gripper = P(visible) * P(plain scene)
+            at_switch    = P(visible) * P(cluttered scene)
+
+        Grasp/holding is intentionally not scored here -- it comes from the
+        gripper width/force outside this module.
 
         Args:
             frames: recent frames (PIL Images / arrays), oldest first. Only one is
@@ -183,9 +189,10 @@ class QwenClient:
         max_pixels = self.max_pixels if max_pixels is None else max_pixels
 
         frame = self._select_frame(frames, pick_sharpest)
-        loc = self._location_probs(frame, min_pixels, max_pixels)  # near-gripper / at-switch / not-visible
+        p_visible = self._visible_prob(frame, min_pixels, max_pixels)
+        p_cluttered = self._scene_cluttered_prob(frame, min_pixels, max_pixels)
         return {
-            STATE_NEAR_GRIPPER: loc[0],
-            STATE_AT_SWITCH: loc[1],
-            STATE_NOT_VISIBLE: loc[2],
+            STATE_NEAR_GRIPPER: p_visible * (1.0 - p_cluttered),
+            STATE_AT_SWITCH: p_visible * p_cluttered,
+            STATE_NOT_VISIBLE: 1.0 - p_visible,
         }
