@@ -16,7 +16,7 @@ class Teleoperation(robot_execution.RobotExecution):
     # release_pose = URPose(x=-0.0297, y=0.7031, z=0.0813, rx=-2.1029, ry=-2.0230, rz=-0.4256)
 
     port_pose = URPose(x=-0.1225, y=0.4358, z=0.0489, rx=1.7429, ry=1.5768, rz=-0.7897)
-    unplug_pose = URPose(x=-0.1242, y=0.4285, z=0.0053, rx=1.6390, ry=1.6874, rz=-0.7822)
+    unplug_pose = URPose(x=-0.1223, y=0.4333, z=0.0055, rx=1.6390, ry=1.6874, rz=-0.7822)
     release_pose1 = URPose(x=0.0120, y=0.7152, z=0.0271, rx=-1.8993, ry=-1.7929, rz=-0.4988)
     release_pose2 = URPose(x=-0.2713, y=0.5808, z=0.0271, rx=-1.8993, ry=-1.7928, rz=-0.4988)
     last_obs = None
