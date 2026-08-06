@@ -1,82 +1,17 @@
 from agent.utils.robot_utils import interrupt
-from agent.model.qwen import QwenClient, ETHERNET_STATES
+from agent.model.grasp import GraspDetector, cable_region
 import robot_execution
 from env import URPose, GRIP_OPEN, GRIP_CLOSED
 import argparse
-import collections
-import threading
 import time
 import cv2
 import numpy as np
 import os
-from PIL import Image
 
 GRIP_WIDTH_MM = 10
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 10
-
-
-class QwenWorker(threading.Thread):
-    """Runs the QwenClient off the control loop.
-
-    The main (20+ Hz) loop feeds recent frames via `submit_frame` and reads the
-    latest state probabilities via `get_probs`. The model runs slower than the
-    control loop, so it lives here on its own thread and simply publishes its most
-    recent result; the control loop never blocks on it.
-    """
-
-    def __init__(self, states=ETHERNET_STATES, window=8, **client_kwargs):
-        super().__init__(daemon=True)
-        self.states = list(states)
-        self.client_kwargs = client_kwargs
-
-        # Rolling buffer of recent frames (oldest -> newest). maxlen == window so
-        # score_state can pick the sharpest of the recent tail.
-        self._frames = collections.deque(maxlen=window)
-        self._frame_lock = threading.Lock()
-
-        self._result_lock = threading.Lock()
-        self._probs = {s: None for s in self.states}
-        self._infer_hz = 0.0
-        self._ready = False
-
-        self._stop = threading.Event()
-
-    def submit_frame(self, image_bgr):
-        """Push a control-loop frame (BGR uint8) into the rolling buffer."""
-        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        with self._frame_lock:
-            self._frames.append(Image.fromarray(rgb))
-
-    def get_probs(self):
-        """Return (probs, infer_hz, ready) as a snapshot for overlaying."""
-        with self._result_lock:
-            return dict(self._probs), self._infer_hz, self._ready
-
-    def run(self):
-        # Heavy: loads the VLM weights. Done on this thread so __init__ of the
-        # teleop / robot setup isn't blocked by it.
-        client = QwenClient(**self.client_kwargs)
-        with self._result_lock:
-            self._ready = True
-
-        while not self._stop.is_set():
-            with self._frame_lock:
-                frames = list(self._frames)
-            if not frames:
-                time.sleep(0.02)
-                continue
-
-            t0 = time.time()
-            probs = client.score_state(frames)
-            dt = time.time() - t0
-            with self._result_lock:
-                self._probs = probs
-                self._infer_hz = (1.0 / dt) if dt > 0 else 0.0
-
-    def stop(self):
-        self._stop.set()
 
 
 class Teleoperation(robot_execution.RobotExecution):
@@ -88,9 +23,9 @@ class Teleoperation(robot_execution.RobotExecution):
     release_pose1 = URPose(x=-0.0168, y=0.7714, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
     release_pose2 = URPose(x=-0.2665, y=0.6624, z=0.0450, rx=-1.8849, ry=-1.8845, rz=-0.4705)
 
-    # How often to feed a frame to the Qwen worker (s). ~7 Hz spreads the 8-frame
-    # window over ~1s of motion without flooding the buffer at control rate.
-    QWEN_SUBMIT_INTERVAL = 0.15
+    # How often to run the (cheap) grasp detector, s. ~10 Hz so the debounce
+    # window spans ~0.5 s without adding overhead at the 100 Hz control rate.
+    GRASP_INTERVAL = 0.1
 
     @staticmethod
     def add_args(parser):
@@ -146,47 +81,40 @@ class Teleoperation(robot_execution.RobotExecution):
         return self.get_action()
 
     def _draw_overlay(self, image):
-        """Draw the latest Qwen state probabilities onto a copy of `image`."""
+        """Draw the latest grasp state + cable region onto a copy of `image`."""
         img = image.copy()
-        probs, infer_hz, ready = self.qwen.get_probs()
-
+        g = self._grasp
         x, y = 10, 24
-        if not ready:
-            cv2.putText(img, 'Qwen: loading model...', (x, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2, cv2.LINE_AA)
+        if g is None:
             return img
 
-        bar_x = x + 60
-        bar_w = 140
-        for state in self.qwen.states:
-            p = probs.get(state)
-            label = f'{p:.2f}' if p is not None else ' -- '
-            # red (low) -> green (high) in BGR
-            color = (0, 0, 200) if p is None else (0, int(255 * p), int(255 * (1 - p)))
+        # Draw the fixed finger-gap ROI the detector reads from.
+        x0, y0, x1, y1 = self.grasp.roi
+        cv2.rectangle(img, (x0, y0), (x1, y1), (0, 200, 255), 1)
 
-            cv2.putText(img, label, (x, y + 6), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55, color, 2, cv2.LINE_AA)
-            # probability bar
-            cv2.rectangle(img, (bar_x, y - 8), (bar_x + bar_w, y + 4), (60, 60, 60), 1)
-            if p is not None:
-                cv2.rectangle(img, (bar_x, y - 8),
-                              (bar_x + int(bar_w * p), y + 4), color, -1)
-            # state text (truncated to fit)
-            cv2.putText(img, state[:42], (bar_x + bar_w + 8, y + 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1, cv2.LINE_AA)
-            y += 26
-
-        cv2.putText(img, f'{infer_hz:.1f} Hz', (x, y + 6), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, (200, 200, 200), 1, cv2.LINE_AA)
+        held = g['held']
+        color = (0, 200, 0) if held else (0, 0, 200)  # green / red (BGR)
+        cv2.putText(img, f"HELD: {'YES' if held else 'no ':>3}   region: {g['region']}",
+                    (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+        cv2.putText(img, f"warm {g['warm']:.2f}  spec {g['spec']:.2f}   {g['hz']:.0f} Hz",
+                    (x, y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
         return img
 
     def post_step(self, obs, action):
         img = obs['image']
 
         now = time.time()
-        if now - self._last_qwen_submit >= self.QWEN_SUBMIT_INTERVAL:
-            self.qwen.submit_frame(img)
-            self._last_qwen_submit = now
+        if img is not None and now - self._last_grasp_t >= self.GRASP_INTERVAL:
+            # obs image is BGR (OpenCV); GraspDetector expects RGB.
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            held = self.grasp.update(rgb)                       # debounced bool
+            warm, spec = self.grasp.cues(rgb)                   # for the overlay
+            pose = obs['state']['actual_pose']
+            region = cable_region(pose, held, self.region_boxes)
+            dt = now - self._last_grasp_t
+            self._grasp = dict(held=held, region=region, warm=warm, spec=spec,
+                               hz=(1.0 / dt) if dt > 0 else 0.0)
+            self._last_grasp_t = now
 
         self.display_image = self._draw_overlay(img)
 
@@ -199,20 +127,33 @@ class Teleoperation(robot_execution.RobotExecution):
         print(f'URPose(x={p.x:.4f}, y={p.y:.4f}, z={p.z:.4f}, rx={p.rx:.4f}, ry={p.ry:.4f}, rz={p.rz:.4f})', end='\r')
 
     def close(self):
-        self.qwen.stop()
         super().close()
+
+    def _make_region_boxes(self):
+        """Axis-aligned xyz boxes for cable_region, derived from the task poses.
+
+        When the cable is grasped, its location is the EE region: near the port,
+        near the staging/release area, or in transit between them.
+        """
+        p = self.port_pose
+        r1, r2 = self.release_pose1, self.release_pose2
+        return {
+            "at_port": ((p.x - 0.03, p.y - 0.03, -0.01),
+                        (p.x + 0.03, p.y + 0.03, 0.12)),
+            "at_staging": ((min(r1.x, r2.x) - 0.04, min(r1.y, r2.y) - 0.04, -0.01),
+                           (max(r1.x, r2.x) + 0.04, max(r1.y, r2.y) + 0.04, 0.12)),
+        }
 
     def __init__(self, args):
         control_freq = 100
         home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see)
 
-        # Start the Qwen worker before super().__init__ so the (slow) model load
-        # overlaps with robot/camera bring-up.
-        self.qwen = QwenWorker(states=ETHERNET_STATES)
-        self._last_qwen_submit = 0.0
-        self.qwen.start()
-        while not self.qwen._ready:
-            time.sleep(1)
+        # Lightweight, training-free grasp/location estimation (replaces the Qwen
+        # VLM). Cheap enough to run inline in the control loop -- no worker thread.
+        self.grasp = GraspDetector()
+        self.region_boxes = self._make_region_boxes()
+        self._last_grasp_t = 0.0
+        self._grasp = None
 
         data_path = None if args.debug else args.path
         metadata = self.args2metadata(args)
