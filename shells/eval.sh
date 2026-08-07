@@ -1,3 +1,4 @@
 
 python agent/eval/eval.py \
-    --ckpt '//home/atkesonlab4/Desktop/YiqiProject/100%_Project/ckpts/yiqi_plugin_umi/h16/ckpt_ep_100.pth' 
+    --ckpt '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ckpts/yiqi_pluginv2_local_delta/ckpt_final.pth' \
+    --log_dir './logs_plugin_local_delta/'

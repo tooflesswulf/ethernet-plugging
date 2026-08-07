@@ -65,7 +65,7 @@ class Env:
         # Internal states
         # ============================================================
         self.t0 = None
-        self.open_width = gwidth + gpullback
+        self.open_width = gwidth + 2*gpullback
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
         self.gripper_state = 0  # 0=open, 1=closed
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
@@ -300,10 +300,6 @@ class Env:
                     kp * force_err
                     + kd * d_force_err
                 )
-                # print(f'Adaptive active. p={force_err:5.2f} d={d_force_err:5.2f} o={force_z_offset:5.5f}')
-                # if np.abs(force_z_offset) > self.max_position_step[2]:
-                # print('EXCEEDED SPEED LIMIT?')
-                # force_z_offset = np.clip(force_z_offset, -self.max_position_step[2], self.max_position_step[2])
 
                 command = URPose(
                     command.x,

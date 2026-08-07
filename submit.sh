@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1                      # Number of tasks 
 #SBATCH --cpus-per-task=8               # CPU cores per task 
 #SBATCH --mem=24G                       # Memory (RAM) limit 
-#SBATCH --time=2:05:00                         # Time limit (D-HH:MM:SS) 
+#SBATCH --time=8:05:00                         # Time limit (D-HH:MM:SS) 
 #SBATCH --gres=gpu:rtx_2080_ti:1              # Request 1 rtx_2080_ti/v100/a6000 GPU 
 
 #Envs  

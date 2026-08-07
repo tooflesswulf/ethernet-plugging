@@ -152,7 +152,9 @@ def denormalize(arr: np.ndarray, stats: dict) -> np.ndarray:
     return denormalized
 
 
-def resize_image(np_array, new_size=(128, 128)):
+def resize_image(np_array, new_size=(128, 128), flip_channel=False):
+    if flip_channel:
+        np_array = np_array[:, :, ::-1]
     img = Image.fromarray(np_array)
     img = img.resize(new_size, )
     return np.array(img)

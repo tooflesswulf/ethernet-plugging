@@ -2,6 +2,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from collections import namedtuple
 from PIL import Image
 import numpy as np
+import h5py
 import os
 
 
@@ -74,3 +75,12 @@ def dict2hdf5(h5group, data: dict):
         else:
             h5group.create_dataset(str(key), data=value)
 
+
+def hdf52dict(h5group):
+    data = {}
+    for key, item in h5group.items():
+        if isinstance(item, h5py.Group):
+            data[key] = hdf52dict(item)
+        else:
+            data[key] = item[()]
+    return data

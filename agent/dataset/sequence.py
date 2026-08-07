@@ -14,15 +14,35 @@ import os
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
+# def get_images(dir_path, total_num_steps=None, img_size=128):
+#     N = len(os.listdir(dir_path)) if total_num_steps is None else min(len(os.listdir(dir_path)), total_num_steps)
+#     images = []
+#     for i in tqdm(range(N), desc="loading images to RAM"):
+#         img = Image.open(os.path.join(dir_path, f'{i}.png')).resize((img_size, img_size))
+#         images.append(np.array(img))
+#     return np.array(images)
 
-def get_images(dir_path, total_num_steps=None, img_size=128):
-    N = len(os.listdir(dir_path)) if total_num_steps is None else min(len(os.listdir(dir_path)), total_num_steps)
-    images = []
-    for i in tqdm(range(N), desc="loading images to RAM"):
-        img = Image.open(os.path.join(dir_path, f'{i}.png')).resize((img_size, img_size))
-        images.append(np.array(img))
-    return np.array(images)
+def get_images(dir_path, total_num_steps=None, img_size=128, num_workers=8):
+    N = len(os.listdir(dir_path))
+    if total_num_steps is not None:
+        N = min(N, total_num_steps)
 
+    def load_one(i):
+        path = os.path.join(dir_path, f"{i}.png")
+        with Image.open(path) as img:
+            img = img.resize((img_size, img_size))
+            return np.asarray(img)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        images = list(
+            tqdm(
+                executor.map(load_one, range(N)),
+                total=N,
+                desc="loading images to RAM",
+            )
+        )
+
+    return np.stack(images)
 
 class StitchedSequenceDataset(torch.utils.data.Dataset):
     """
@@ -40,7 +60,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        dataset_path,
+        dataset_paths,
         horizon_steps=16,
         cond_steps=1,
         img_cond_steps=1,
@@ -60,28 +80,42 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.transform = transform
         self.img_size = img_size
         self.max_n_episodes = max_n_episodes
-        self.dataset_path = pathlib.Path(dataset_path)
+        self.g_thr = 18 # (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
+        self.indices = None; traj_start = 0
+        self.poses, self.g_widths, self.obs, self.images = None, None, None, None
+        for dataset_path in dataset_paths:
+            dataset_path = pathlib.Path(dataset_path)
 
-        # Load dataset to device
-        img_dir = self.dataset_path / 'images'
-        state_path = self.dataset_path / 'states.npz'
-        dataset = np.load(state_path, allow_pickle=False)  # only np arrays
-        traj_lengths = dataset['traj_length'][:max_n_episodes]  # 1-D array
-        total_num_steps = np.sum(traj_lengths)
-        obs = np.c_[*[dataset[key] for key in obs_fields]]  # Concat along columns, (total_num_steps, obs_dim)
+            # Load dataset to device
+            img_dir = dataset_path / 'images' ; state_path = dataset_path / 'states.npz'
+            dataset = np.load(state_path, allow_pickle=False)  # only np arrays
+            traj_lengths = dataset['traj_length'][:max_n_episodes]  # 1-D array
+            total_num_steps = np.sum(traj_lengths)
+            obs = np.c_[*[dataset[key] for key in obs_fields]]  # Concat along columns, (total_num_steps, obs_dim)
 
-        # Set up indices for sampling
-        self.indices = self.make_indices(traj_lengths, horizon_steps)
+            # Set up indices for sampling
+            indices = self.make_indices(traj_lengths, horizon_steps, traj_start=traj_start)
+            if self.indices is None:
+                self.indices = indices 
+            else:
+                self.indices = np.concatenate([self.indices, indices])
+            traj_start += total_num_steps
 
-        # Extract states and actions up to max_n_episodes
-        self.poses = dataset['pose'][:total_num_steps]  # (N, 6)
-        self.g_widths = dataset['gripper_width'][:total_num_steps]  # (N,)
-        self.obs = torch.from_numpy(obs[:total_num_steps]).float().to(device)  # (N, obs_dim)
-        self.images = torch.from_numpy(get_images(img_dir, total_num_steps, img_size=img_size)).to(device)  # (N, H, W, C)
-        self.obs_dim = self.obs.shape[1]
+            # Extract states and actions up to max_n_episodes
+            poses = dataset['pose'][:total_num_steps]  # (N, 6)
+            g_widths = dataset['gripper_width'][:total_num_steps]  # (N,)
+            obs = torch.from_numpy(obs[:total_num_steps]).float().to(device)  # (N, obs_dim)
+            images = torch.from_numpy(get_images(img_dir, total_num_steps, img_size=img_size)).to(device)  # (N, H, W, C)
+            if self.poses is None:
+                self.poses, self.g_widths, self.obs, self.images = poses, g_widths, obs, images 
+            else:
+                self.poses = np.concatenate([self.poses, poses])
+                self.g_widths = np.concatenate([self.g_widths, g_widths])
+                self.obs = torch.cat([self.obs, obs])
+                self.images = torch.cat([self.images, images]) 
+               
 
-        self.g_thr = 12 # (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
-        
+        self.obs_dim = self.obs.shape[-1]
         self._precompute_actions()  # precompute all actions for faster sampling during training
         self.act_dim = self.actions.shape[-1]
 
@@ -110,14 +144,14 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             batch = self.transform(batch)
         return batch
 
-    def make_indices(self, traj_lengths, horizon_steps):
+    def make_indices(self, traj_lengths, horizon_steps, traj_start = 0):
         """
         makes indices for sampling from dataset;
         each index maps to a datapoint and its bounds within the same trajectory.
         Returns list[(start_index, traj_start_index, traj_end_index)]
         """
         indices = []
-        traj_start = 0
+        
         for traj_length in traj_lengths:
             max_start = traj_start + traj_length - horizon_steps
             traj_end = traj_start + traj_length
