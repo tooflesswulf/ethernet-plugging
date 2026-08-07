@@ -1,159 +1,67 @@
-import interface
-import numpy as np
-from tqdm import tqdm
-from einops import rearrange
-import cv2
-import time
+from agent.utils.robot_utils import get_actions, wait_for_circle
+from agent.dataset.sequence import GripperStats
+from agent.model.policy import DiffusionPolicy
+import robot_execution
 import collections
 import argparse
-import os
-import wandb
 import torch
-import torch.nn as nn
-
-from env import Env, URPose
-from agent.utils.logging import NoOpLogger, setup_logger
-from agent.model.policy import DiffusionPolicy
-from agent.utils.utils import resize_image
-
-GRIP_WIDTH_MM = 8
-GRIP_FORCE_N = 40
-GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 5
+import os
 
 
-def get_actions(policy, num_diffusion_iters, nimages, nagent_poses, curr_pose, curr_gripper_width):
-    """
-    nimages:      (T, C, H, W) in [0, 255]
-    nagent_poses: (T, state_dim) raw/unnormalized
-    Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,)) ready to execute.
-    """
+class EvalPolicySerialChunks(robot_execution.RobotExecution):
+    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, done_threshold=0.5):
+        # Architecture config, weights, and normalization stats all come from the checkpoint.
+        self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
+        self.policy.eval()
+        self.device = device
+        self.done_threshold = done_threshold
+        grip = GripperStats(*self.policy.grip_stats)
 
-    conditions = {
-        'rgb': (nimages / 255.0).unsqueeze(0),  # (1, T, C, H, W)
-        'state': nagent_poses.unsqueeze(0),     # (1, T, state_dim); policy normalizes internally
-    }
-    naction = policy.predict_action(conditions, num_inference_steps=num_diffusion_iters)
-    naction = naction.detach().to('cpu').numpy()[0]
-    
-    # integrate deltas (per the policy's action_mode) into absolute poses + widths
-    return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
+        # super().__init__() resets & starts the robot.
+        super().__init__(
+            path=log_dir,
+            control_freq=control_freq,
+            gwidth=grip.grip_width_mm,
+            gforce=grip.grip_force_n,
+            gspeed=grip.grip_speed_mmps,
+            gpullback=grip.grip_pullback_mm,
+        )
 
+        self.action_chunk = []
+        self.obs_deque = collections.deque([self.env.get_obs()], maxlen=self.policy.obs_horizon)  # obs_horizon=1
 
-def wait_for_circle(env, iface, close_gripper=False):
-    freq = 250
-    print('Waiting the circle ...')
-    while True:
-        flag = iface.update(1 / freq)
-        if flag == -1:
-            raise RuntimeError('Square pressed, exiting.')
+    def pre_run(self):
+        wait_for_circle(self.env, self.iface, close_gripper=False)
+        print("Starting evaluation...")
 
-        des_pose = URPose(*iface.target_pose)
-        des_gripper = iface.gripper_state
-        if close_gripper:
-            obs = env.step(
-                des_pose=des_pose,
-                des_gripper_state=des_gripper,
-                des_zforce=iface.target_zforce,
-                adaptive_mode=iface.adaptive_mode,
-            )
-        if des_gripper == 1:
-            break
-        time.sleep(1 / 250)
+    def post_step(self, obs, act):
+        self.obs_deque.append(obs)
 
-    time.sleep(0.1)
-    env.gripper.wait_idle()
-    time.sleep(1)
+    def runtime_info(self):
+        return super().runtime_info()
 
+    def get_action(self):
+        if len(self.action_chunk) == 0:
+            self.obs_deque.append(self.env.get_obs())
+            self.action_chunk = self.do_prediction()[1:]
+        des_pose, des_width, done = self.action_chunk.pop(0)
+        if done > self.done_threshold:
+            print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
+            self.stop()
+        return des_pose, des_width
 
-def evaluate(policy, log_dir=None, fps=20, device='cuda'):
-    # network-specific parameters come from the loaded checkpoint
-    obs_horizon = policy.obs_horizon
-    action_horizon = policy.action_horizon
-    num_diffusion_iters = policy.num_diffusion_iters
-    img_size = policy.img_size
+    def do_prediction(self):
+        obs_horizon = self.policy.obs_horizon
+        action_horizon = self.policy.action_horizon
 
-    # home_pose = URPose(-0.125,0.545,0.305,2.44,2.44,0.653, )
-    home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see, Yiqi)
-    iface = interface.DualSenseInterface(
-        home_pose,
-        xyzspeed=0.01,
-        rpyspeed=0.1,
-    )  # press square to end evaluation
-    env = Env(
-        robot_ip="192.168.0.100",
-        gripper_ip="192.168.0.20",
-        camera_crop_mode=1,
-        dataset_path=log_dir,  # None disables robot data logging
-        save_interval=1.0 / fps,
-        gforce=GRIP_FORCE_N,
-        gwidth=GRIP_WIDTH_MM,
-        gspeed=GRIP_SPEED_MMPS,
-        gpullback=GRIP_PULLBACK_MM,
-    )
-    env.reset(home_pose)
-    env.start()  # start threads
-
-    wait_for_circle(env, iface, close_gripper=False)
-    print("Starting evaluation loop...")
-
-    obs_deque = collections.deque([env.get_obs()], maxlen=obs_horizon)  # obs_horizon=1
-    save_frames = []
-    while True:
-        if iface.update(.1) == -1:
-            break  # -1 indicates square is pressed and an error is thrown.
-
-        images = np.stack([resize_image(x['image'], (img_size, img_size), flip_channel=True) for x in obs_deque])
-
-        obs_state = np.stack([x['state']['actual_pose'] for x in obs_deque])
-        agent_gwidth = np.stack([[x['state']['gripper_width']] for x in obs_deque])
-        agent_force = np.stack([x['state']['actual_force'] for x in obs_deque])
-        agent_gforce = np.stack([[x['state']['gripper_force']] for x in obs_deque])
-
-        curr_pose, curr_gripper = obs_state[-1], agent_gwidth[-1][0]
-        # raw observations: normalization happens inside the policy
-        # agent_poses = np.c_[agent_poses, agent_gwidth, agent_force, agent_gforce, target_ix]
-        obs_state = np.c_[obs_state, agent_gwidth]
-
-        nimages = rearrange(torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
-        nobs_state = torch.from_numpy(obs_state).to(device, dtype=torch.float32)  # txd
+        # get_actions builds images + the obs_fields state vector from the deque.
         with torch.no_grad():
-            des_poses, des_widths = get_actions(
-                policy, num_diffusion_iters, nimages, nobs_state, curr_pose, curr_gripper)
+            des_poses, des_widths, des_done = get_actions(self.policy, self.obs_deque, self.device)
             start = obs_horizon - 1
             end = start + action_horizon
-            des_poses, des_widths = des_poses[start:end], des_widths[start:end]
-            print('des grippers:', des_widths)
+            des_poses, des_widths, des_done = des_poses[start:end], des_widths[start:end], des_done[start:end]
 
-            for i in tqdm(range(len(des_poses)), desc=f'Open-loop execution'):
-                t0 = time.perf_counter()
-                des_pose = URPose(*des_poses[i])  # already absolute: deltas integrated by the policy
-                obs = env.step(
-                    des_pose=des_pose,
-                    des_gripper_state=des_widths[i],
-                )
-
-                obs_deque.append(obs)
-                sleep_time = 0.2
-                time.sleep(sleep_time)
-                save_frames.append(obs['image'].astype(np.uint8))
-            obs_deque.append(env.get_obs())
-
-    # save video
-    if log_dir is not None and save_frames:
-        video_path = os.path.join(log_dir, 'evaluation_video.mp4')
-        # create mp4 from a list of HxWxC images
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        h, w, c = save_frames[0].shape
-
-        out = cv2.VideoWriter(video_path, fourcc, fps, (w, h))
-        for frame in save_frames:
-            # convert RGB to BGR for opencv
-            frame_bgr = frame  # [:, :, ::-1]
-            out.write(frame_bgr)
-        out.release()
-        print(f"Saved evaluation video → {video_path}")
-    env.close()
+        return [(p, w, d) for p, w, d in zip(des_poses, des_widths, des_done)]
 
 
 def parse_args():
@@ -162,16 +70,20 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_dir', type=str, default=None,
                         help='where to save robot log data + evaluation video (None disables logging)')
+    parser.add_argument('--control_freq', '--hz', type=float, default=10,
+                        help='control/command frequency (Hz) for the real-time loop')
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     args = parse_args()
-    # Architecture config, weights, and normalization stats all come from the checkpoint.
-    policy = DiffusionPolicy.from_checkpoint(args.ckpt, args.device)
-    policy.eval()
 
     if args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
-
-    evaluate(policy, log_dir=args.log_dir, device=args.device)
+    evaluation = EvalPolicySerialChunks(
+        ckpt=args.ckpt,
+        log_dir=args.log_dir,
+        control_freq=args.control_freq,
+        device=args.device,
+    )
+    evaluation.run()

@@ -5,11 +5,10 @@ In particular, we assume you are using a DualSense Wireless by default.
 
 """
 
+from enum import IntFlag
+import numpy as np
 import threading
 import time
-from enum import IntFlag
-
-import numpy as np
 
 from robosuite import make
 from robosuite.utils.log_utils import ROBOSUITE_DEFAULT_LOGGER

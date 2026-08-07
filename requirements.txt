@@ -4,10 +4,13 @@ h5py
 hidapi
 imageio
 matplotlib
+numpy==2.4
 opencv-python
 pyrealsense2
+qwen-vl-utils
 robosuite
 scipy
 tqdm
+transformers
 ur-rtde
 wandb

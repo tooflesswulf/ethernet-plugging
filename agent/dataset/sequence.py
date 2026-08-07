@@ -1,5 +1,6 @@
 
 from collections import namedtuple
+from dataclasses import dataclass
 from typing import Literal
 from PIL import Image
 from tqdm import tqdm
@@ -12,6 +13,7 @@ import os
 # from agent.utils.utils import get_chunk_actions
 
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
+GripperStats = namedtuple('GripperStats', ['grip_width_mm', 'grip_force_n', 'grip_speed_mmps', 'grip_pullback_mm'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
 # def get_images(dir_path, total_num_steps=None, img_size=128):
@@ -67,6 +69,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         max_n_episodes=10000,
         obs_fields=['pose', 'gripper_width'],
         action_mode: ActionMode = 'local_delta',
+        predict_done=True,
+        end_signal_steps=None,
         transform=None,
         img_size=96,
         device="cuda:0",
@@ -126,6 +130,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         """
         repeat states/images if using history observation at the beginning of the episode
         """
+        if self.h5 is None:
+            self.h5 = h5py.File(self.dataset_path / 'dataset.h5', 'r')
+
         start, ep_start, ep_end = self.indices[idx]
         end = min(start + self.horizon_steps, ep_end)
         if end > ep_end:
@@ -133,7 +140,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
 
         # Conditioning observations: current and history states + images
-        obs = torch.stack([self.obs[max(start - t, ep_start)]
+        obs_np = np.array([self.obs[max(start - t, ep_start)]
                           for t in reversed(range(self.cond_steps))])  # more recent is at the end, # cond_steps x dim
         images = torch.stack([self.images[max(start - t, ep_start)]
                              for t in reversed(range(self.img_cond_steps))])  # img_cond_steps x H x W x C
@@ -183,6 +190,16 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         """
         return 2 * (g_widths > threshold).astype(int).reshape(-1, 1) - 1
 
+    def done_action(self, start, end, ep_end):
+        """
+        Binary end-of-episode signal for the chunk covering absolute timesteps
+        [start, end). 1=task complete (within the final `end_signal_steps` frames
+        of the episode), -1=not done.
+        """
+        abs_t = np.arange(start, end)
+        done = abs_t >= (ep_end - self.end_signal_steps)
+        return 2 * done.astype(int).reshape(-1, 1) - 1
+
     def _pose_action_absolute(self, poses):
         # Returns (N, 6): [tx, ty, tz, rx, ry, rz]
         return poses
@@ -193,7 +210,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         t0 = transforms[0]
         deltas = [t0.inv() * t for t in transforms]
         return np.array([delta.as_exp_coords() for delta in deltas])
-    
+
     def _pose_action_umi(self, poses):
         # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
         delta_xyz = poses[1:, :3] - poses[:1, :3]
@@ -203,7 +220,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         # wrap to [-pi, pi]
         delta_euler = (delta_eulers + np.pi) % (2 * np.pi) - np.pi
         delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
-        return np.concatenate( [delta_umi, delta_umi[-1:]] ) # poor decision here, pad by 1 by repeating last one.
+        return np.concatenate([delta_umi, delta_umi[-1:]])  # poor decision here, pad by 1 by repeating last one.
 
     def _pose_action_global_delta(self, poses):
         # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
@@ -223,6 +240,67 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             return self._pose_action_umi(poses)
         else:
             raise ValueError(f"Invalid action_mode: {self.action_mode}")
+
+class FailureDetectDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        dataset_path,
+        label_path,
+        horizon_steps=8,
+        cond_steps=1,
+        force_cond_steps=8,
+        img_cond_steps=1,
+        obs_fields=['pose', 'gripper_width', 'force'],       
+        transform=None,
+        device="cuda:0",
+    ):
+        """
+        Return (obs=(images, ....), label=0/1) where 0 is success, 1 is failled
+        """
+        self.dataset_path = dataset_path
+        df = pd.read_csv(label_path)
+        episode_ids, fail_idx = df.episode.values, df.idx.values
+        self.ep_states = [
+            np.load(os.path.join(dataset_path, f"episode{int(episode_id):06d}", 'states.npz'))
+            for episode_id in episode_ids
+        ]
+        self.ep_lengths = [ len(ep_states['pose']) for ep_states in self.ep_states]
+        self.horizon_steps = horizon_steps
+        self.img_cond_steps = img_cond_steps; self.cond_steps = cond_steps; self.force_cond_steps = force_cond_steps
+        self.make_indices(episode_ids, fail_idx)
+        self.obs_fields = obs_fields
+        self.device = device
+
+    def make_indices(self, episode_ids, fail_idx):
+        self.indices = [] # list of item: [image_dir, state_idx, start, end, fail/success]
+        for i, episode_id in enumerate(episode_ids):
+            image_dir = os.path.join(self.dataset_path, f"episode{int(episode_id):06d}", "images")
+            state_idx = i 
+            ep_fail_idx = fail_idx[i]
+            for j in range(self.ep_lengths[i]-self.horizon_steps):
+                start = max(0, j-self.horizon_steps)
+                label = 0 if ep_fail_idx == -1 else int( j > ep_fail_idx) # if j > ep_fail_idx, 1 else 0
+                self.indices.append([image_dir, state_idx, start, j, label])
+    def get_image(self, image_path):
+        return np.array( Image.open(image_path).resize((IMAGE_SIZE, IMAGE_SIZE)) ) 
+    
+    def __getitem__(self, index):
+        image_dir, state_idx, start, end, label = self.indices[index]
+        image_indices = np.linspace(start, end, self.img_cond_steps, dtype=int) if self.img_cond_steps > 1 else [end]
+        force_indices = np.linspace(start, end, self.force_cond_steps, dtype=int) if self.force_cond_steps > 1 else [end]
+        cond_indices = np.linspace(start, end, self.cond_steps, dtype=int) if self.cond_steps > 1 else [end]
+        np_images = np.array(
+            [ self.get_image(os.path.join(image_dir, f'{i:06d}.png')) for i in image_indices] ) # TxHxWxC
+        data_dict = {'image': torch.from_numpy(np_images).float().to(self.device)}
+        states = self.ep_states[state_idx]
+        for k in self.obs_fields:
+            obs = states[k]; obs_index = cond_indices if 'force' not in k else force_indices
+            obs = np.array([obs[i] for i in obs_index])
+            data_dict[k] = torch.from_numpy(obs).float().to(self.device)
+        return data_dict, label
+    
+    def __len__(self):
+        return len(self.indices)
 
 
 if __name__ == '__main__':

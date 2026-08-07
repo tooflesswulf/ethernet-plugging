@@ -44,7 +44,6 @@ def save_checkpoint(
 
         filename = save_path / f"ckpt_ep_{epoch}.pth"
         torch.save({"epoch": epoch, "config": config, "model_state_dict": nets_copy.state_dict()}, filename)
-        print(f"[Checkpoint] Epoch {epoch} saved → {filename}")
 
     else:
         # --- Final save ---
@@ -53,7 +52,7 @@ def save_checkpoint(
 
         filename = save_path / f"ckpt_final.pth"
         torch.save({"config": config, "model_state_dict": nets.state_dict()}, filename)
-        print(f"[Checkpoint] Final model saved → {filename}")
+        print(f"\n[Checkpoint] Final model saved → {filename}")
 
 
 def load_checkpoint(
@@ -102,7 +101,7 @@ def compute_norm_stats(dataset) -> dict:
     """
     actions = np.asarray(dataset.actions)
     flat_actions = actions.reshape(-1, actions.shape[-1])
-    obs = dataset.obs.detach().cpu().numpy()
+    obs = dataset.obs
     return {
         'actions': {'min': flat_actions.min(0), 'max': flat_actions.max(0)},
         'states': {'min': obs.min(0), 'max': obs.max(0)},

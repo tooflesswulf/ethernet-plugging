@@ -2,6 +2,9 @@
 __pycache__/
 wandb/
 logs*/
+debug*/
 
 *.mp4
+*.pkl
 .DS_Store
+.ipynb_checkpoints/

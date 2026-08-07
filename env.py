@@ -1,3 +1,4 @@
+from scipy.spatial.transform import Rotation as R, Slerp
 from collections import namedtuple
 from typing import Literal
 import rtde_control
@@ -10,9 +11,15 @@ import time
 import cv2
 import os
 
-from util import URPose, blend, episode_index, dict2hdf5
+from net_isup import is_network_up
+from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
 from camera import Camera
 import wsg
+
+# Gripper command states (des_gripper_state / gripper_state)
+GRIP_OPEN = 0
+GRIP_CLOSED = 1
+GRIP_MOVING = -1
 
 
 class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
@@ -24,6 +31,10 @@ class GripperObs(namedtuple('GripperObs', ('time', 'gripper_width', 'gripper_for
 
 
 class CameraObs(namedtuple('CameraObs', ('time', 'image'))):
+    pass
+
+
+class Command(namedtuple('Command', ('time', 'des_pose', 'des_gripper', 'adaptive_mode', 'des_zforce', 'controller_state'))):
     pass
 
 
@@ -44,7 +55,9 @@ class Env:
         self,
         robot_ip="192.168.0.100",  # could be 101 or 100 depending on your setup
         gripper_ip="192.168.0.20",
+        network_iface='enx7cc2c6453f68',  # network interface to check for connectivity
         camera_crop_mode=1,  # crop on the right half of the image to focus on the workspace
+        control_frequency=20,
         servo_frequency=500,
         gripper_query_frequency=250,
         max_position_step=(0.008, 0.008, 0.008),
@@ -65,12 +78,14 @@ class Env:
         # Internal states
         # ============================================================
         self.t0 = None
-        self.open_width = gwidth + 2*gpullback
+        self.open_width = gwidth + 2 * gpullback
         self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
-        self.gripper_state = 0  # 0=open, 1=closed
+        self.gripper_state = GRIP_OPEN
         self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
         self.des_zforce = 0.
         self.adaptive_mode = False
+        self.last_step_t = time.perf_counter()
+        self._zero_ft_request = False  # serviced by _control_loop; see request_zero_ft()
 
         # ============================================================
         # Control parameters
@@ -94,10 +109,14 @@ class Env:
         self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
         self.gripper = wsg.WSG(ip=gripper_ip)
         self.gripper_query_frequency = gripper_query_frequency
+        self.network_iface = network_iface
+        self.network_query_frequency = 2.0
+        self.network_status = False
 
         # ============================================================
         # Servo parameters
         # ============================================================
+        self.input_frequency = control_frequency
         self.servo_frequency = servo_frequency
         self.dt = 1.0 / servo_frequency
         self.max_position_step = np.array(max_position_step)
@@ -125,6 +144,7 @@ class Env:
         self.robot_obs: list[RobotObs] = []
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
+        self.commands: list[Command] = []
         self.save_eps = save_eps
         self.image_idx = 0
         self.metadata = metadata
@@ -144,14 +164,35 @@ class Env:
                     'filtered_force': self.robot_obs[-1].filtered_force,
                     'gripper_width': self.gripper_obs[-1].gripper_width,
                     'gripper_force': self.gripper_obs[-1].gripper_force,
-                }
+                },
+                'network_status': self.network_status
             }
             return obs
 
         elif self.obs_mode == 'mean':
             raise NotImplementedError("Mean obs mode not implemented yet")
 
-    def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False):
+    def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False, dualsense=None):
+        """Args:
+            des_pose: URPose
+            des_gripper_state: int (GRIP_OPEN=0, GRIP_CLOSED=1)
+            des_zforce: float (desired z-force in N)
+            adaptive_mode: bool (whether to use adaptive z-force control)
+        """
+        log_cmd = Command(time=time.time() - self.t0,
+                          des_pose=des_pose, des_gripper=des_gripper_state,
+                          adaptive_mode=adaptive_mode, des_zforce=des_zforce,
+                          controller_state=dualsense)
+        self.commands.append(log_cmd)
+
+        if self.adaptive_mode and not adaptive_mode:
+            # Transitioning adaptive -> position
+            self.last_step_t = time.perf_counter()
+            self.last_step_end = des_pose
+        else:
+            self.last_step_t = time.perf_counter()
+            self.last_step_end = self.des_pose
+
         self.des_pose = des_pose
         self.des_gripper_state = des_gripper_state
         self.des_zforce = des_zforce
@@ -168,9 +209,11 @@ class Env:
 
         self.stop_flag = False
         self.threads = [
-            threading.Thread(target=self._control_loop, daemon=True,),
-            threading.Thread(target=self._camera_loop, daemon=True,),
-            threading.Thread(target=self._gripper_loop, daemon=True,)]
+            threading.Thread(target=self._control_loop, daemon=True),
+            threading.Thread(target=self._camera_loop, daemon=True),
+            threading.Thread(target=self._gripper_loop, daemon=True),
+            threading.Thread(target=self._network_loop, daemon=True),
+        ]
         if self.dataset_path is not None:
             self.threads.append(threading.Thread(target=self._logger_loop, daemon=True,))
 
@@ -199,13 +242,16 @@ class Env:
                 thr.join()
             if self.dataset_path is not None:
                 self.save_data()
-        self.camera = Camera(crop_mode=self.camera_crop_mode)
+        self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
 
         # ============================================================
         # Home / open gripper
         # ============================================================
-        if self.gripper.gripstate().value != wsg.GripperState.IDLE:
+        if self.gripper.gripstate().value != wsg.GripperState.IDLE.value:
             self.gripper.stop().wait()
+            while self.gripper.gripstate().value != wsg.GripperState.IDLE.value:
+                time.sleep(.1)
+
         g = self.gripper.home()
         g.ack.wait()
 
@@ -214,16 +260,21 @@ class Env:
         # ============================================================
         self.ctrl.moveL(home_pose, 0.1, 0.1)
         self.des_pose = home_pose  # Ensure robot doesn't move after homing
+        self.last_step_t = -1
 
         # Wait for gripper homing to finish
         g.finished.wait()
+        g = self.gripper.home()
+        g.wait()
 
         # ============================================================
         # Move gripper to default open width
         # ============================================================
         g = self.gripper.move(position=self.open_width, speed=self.g_speed)
         g.finished.wait()
-        self.gripper_state = 0
+        self.gripper_state = GRIP_OPEN
+
+        self.gripper.set_pwt(20)
 
         # ============================================================
         # Reset observations
@@ -231,18 +282,44 @@ class Env:
         self.robot_obs: list[RobotObs] = []
         self.gripper_obs: list[GripperObs] = []
         self.camera_obs: list[CameraObs] = []
+        self.commands: list[Command] = []
+        self.ctrl.zeroFtSensor()
+
+        print('payload kg', self.recv.getPayload())
+        print('payload cog', self.recv.getPayloadCog())
 
         print('Environment reset complete.')
 
     def close(self):
         self.stop_flag = True
+        # Bounded joins: a worker can be parked in a no-timeout blocking call
+        # (gripper query .wait(), or ctrl.servoL after a protective stop) and
+        # never re-check stop_flag. Since these are daemon threads, don't wait
+        # on them forever -- that wedges the main thread and forces a ctrl-Z.
         for thr in self.threads:
-            thr.join()
+            thr.join(timeout=2.0)
+            if thr.is_alive():
+                print(f'Warning: thread {thr.name} did not exit; leaving it to daemon cleanup.')
         self.camera.close()
         if self.dataset_path is not None:
             self.save_data()
 
-    _prev_force_err = 0.
+    def init_period(self):
+        self.period_init = time.perf_counter()
+
+    def wait_period(self):
+        """
+        Waits for a time corresponding to `input_frequency`. Expects `init_period()` to be called at the top of the loop.
+        """
+        delta = time.perf_counter() - self.period_init
+        sleep_time = max(0, 1 / self.input_frequency - delta)
+        time.sleep(sleep_time)
+
+    def interpolate(self):
+        t = time.perf_counter() - self.last_step_t
+        perc = min(1, t * self.input_frequency)
+        return interpolate(self.last_step_end, self.des_pose, perc)
+
     force_alpha = 0.03
     _force_filtered = np.zeros(6)
 
@@ -250,14 +327,44 @@ class Env:
         self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
         return self._force_filtered
 
+    _prev_force_err = 0.
+
+    def zforce_pid(self, actual_pose, filtered_force):
+        kp = .0007
+        kd = .00001
+        fz = filtered_force.z
+        force_err = fz - self.des_zforce
+        d_force_err = (force_err - self._prev_force_err) / self.dt
+        self._prev_force_err = force_err
+
+        zdes = actual_pose.z + kp * force_err + kd * d_force_err
+        return zdes
+    
+    def _set_gripstate(self, gs):
+        self.gripper_state = gs
+
+    def request_zero_ft(self):
+        """Ask the control loop to zero the F/T sensor at a safe point.
+
+        self.ctrl (RTDE control) is not thread-safe, so it must only be touched
+        from _control_loop. Callers on other threads (e.g. an interrupt-sequence
+        .then callback) set this flag instead of calling ctrl.zeroFtSensor()
+        directly, which would race with servoL() and can hang the RTDE handshake.
+        """
+        self._zero_ft_request = True
+
     def _control_loop(self):
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
+            if self._zero_ft_request:
+                self.ctrl.zeroFtSensor()
+                self._zero_ft_request = False
             actual_pose = URPose(*self.recv.getActualTCPPose())
             actual_force = URPose(*self.recv.getActualTCPForce())
             filtered_force = URPose(*self.filter_force(actual_force))
             self.robot_obs.append(RobotObs(time=time.time() - self.t0,
-                                  actual_pose=actual_pose, actual_force=actual_force, filtered_force=filtered_force))
+                                  actual_pose=actual_pose, actual_force=actual_force,
+                                  filtered_force=filtered_force))
 
             des_pose = self.des_pose
             des_gripper_state = self.des_gripper_state
@@ -266,18 +373,33 @@ class Env:
             # ----------------------------
             # gripper logic (non-blocking preferred)
             # ----------------------------
-            if gripper_state != des_gripper_state:
-                if gripper_state == 0:
-                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed)
-                    self.gripper_state = 1
+            if gripper_state != GRIP_MOVING and gripper_state != des_gripper_state:
+                self.gripper_state = GRIP_MOVING
+                if gripper_state == GRIP_OPEN:
+                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
+                        .finished.then(lambda _: self._set_gripstate(GRIP_CLOSED)) \
+                        .catch(lambda e: (
+                            self._set_gripstate(GRIP_CLOSED),
+                            print(f'Gripper GRIP failed: {e}'),
+                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                            ))
                 else:
-                    self.gripper.release(pullback=self.g_pullback, speed=self.g_speed)
-                    self.gripper_state = 0
+                    cur_width = self.gripper_obs[-1].gripper_width
+                    self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
+                        .finished.then(lambda _: self._set_gripstate(GRIP_OPEN)) \
+                        .catch(lambda e: (
+                            self._set_gripstate(GRIP_OPEN),
+                            print(f'Gripper RELEASE failed: {e}'),
+                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                        ))
 
             # ----------------------------
             # blend + servo
             # ----------------------------
-            command = blend(
+            if self.last_step_t > 0:
+                # Received at least 1 input
+                des_pose = self.interpolate()
+            command = clamp(
                 actual_pose,
                 des_pose,
                 self.max_position_step,
@@ -288,29 +410,8 @@ class Env:
             # adaptive z-force control
             # ----------------------------
             if self.adaptive_mode:
-                fz = filtered_force.z  # base-frame z force (N)
-                force_err = fz - self.des_zforce
-                d_force_err = (force_err - self._prev_force_err) / self.dt
-                self._prev_force_err = force_err
-
-                kp = .001
-                kd = .00001
-
-                force_z_offset = (
-                    kp * force_err
-                    + kd * d_force_err
-                )
-
-                command = URPose(
-                    command.x,
-                    command.y,
-                    actual_pose.z + force_z_offset,
-                    command.rx,
-                    command.ry,
-                    command.rz,
-                )
+                command = command._replace(z=self.zforce_pid(actual_pose, filtered_force))
             else:
-                self._force_z_offset = 0.
                 self._prev_force_err = 0.
 
             self.ctrl.servoL(
@@ -341,6 +442,14 @@ class Env:
                                                gripper_force=force.value))
             sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
             # print('============ QUERY RESOLVED ================')
+            time.sleep(sleep_dur)
+
+    def _network_loop(self):
+        while not self.stop_flag:
+            t0 = time.perf_counter()
+            status = is_network_up(self.network_iface)
+            self.network_status = status
+            sleep_dur = max(0, 1.0 / self.network_query_frequency - (time.perf_counter() - t0))
             time.sleep(sleep_dur)
 
     def _logger_loop(self):
@@ -411,6 +520,17 @@ class Env:
 
             f.create_dataset('camera_obs/time', data=[obs.time for obs in self.camera_obs])
             f.create_dataset('camera_obs/image_bgr', data=[obs.image for obs in self.camera_obs])
+
+            f.create_dataset('commands/time', data=[cmd.time for cmd in self.commands])
+            f.create_dataset('commands/des_pose', data=[cmd.des_pose for cmd in self.commands])
+            f.create_dataset('commands/des_gripper', data=[cmd.des_gripper for cmd in self.commands])
+            f.create_dataset('commands/adaptive_mode', data=[cmd.adaptive_mode for cmd in self.commands])
+            f.create_dataset('commands/des_zforce', data=[cmd.des_zforce for cmd in self.commands])
+
+            control = [vars(cmd.controller_state) for cmd in self.commands]
+            f.create_dataset('dualsense/time', data=[cmd.time for cmd in self.commands])
+            for key in control[0].keys():
+                f.create_dataset(f'dualsense/{key}', data=[item[key] for item in control])
 
             m = f.create_group('metadata')
             dict2hdf5(m, self.metadata)
