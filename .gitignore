@@ -4,6 +4,7 @@ wandb/
 logs*/
 debug*/
 
+*.gif
 *.mp4
 *.pkl
 .DS_Store
