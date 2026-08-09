@@ -18,6 +18,7 @@ For deep learning, install latest version of torch and torchvision.
 
 ```
 pip3 install torch torchvision
+pip install torchrl # replay buffer
 ```
 
 Lastly, add this line to ~/.bashrc

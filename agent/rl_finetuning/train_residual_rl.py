@@ -4,72 +4,26 @@
 
 from __future__ import annotations
 
-import os
+import os, pprint, random, shutil, time, torch, numpy as np, wandb
 
-import hashlib, json, logging, pprint
-import random, shutil, time
-from collections import defaultdict
-from contextlib import contextmanager
-from datetime import datetime
-from pathlib import Path
-
-
-import numpy as np
-import tensordict
-import torch
-import torchrl
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from omegaconf import OmegaConf
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
-from torchrl.data import LazyTensorStorage, ReplayBuffer, TensorDictPrioritizedReplayBuffer
+from torchrl.data import LazyTensorStorage, ReplayBuffer, TensorDictPrioritizedReplayBuffer, LazyMemmapStorage
 from tqdm import tqdm
+from env import Env, URPose, GRIP_OPEN
+from agent.model.policy import DiffusionPolicy
+from agent.dataset.sequence import GripperStats
 
-import wandb
-from resfit.dexmg.environments.dexmg import create_vectorized_env
-from resfit.lerobot.policies.act.configuration_act import ACTConfig
-from resfit.lerobot.policies.act.modeling_act import ACTPolicy
-from resfit.lerobot.utils.load_policy import download_policy_from_wandb, load_policy
-from resfit.rl_finetuning.config.residual_td3 import ResidualTD3DexmgConfig
-from resfit.rl_finetuning.off_policy.common_utils import utils
-from resfit.rl_finetuning.off_policy.rl.q_agent import QAgent
-from resfit.rl_finetuning.utils.dtype import to_uint8
-from resfit.rl_finetuning.utils.evaluate_dexmg import run_dexmg_evaluation
-from resfit.rl_finetuning.utils.hugging_face import (
-    _hf_download_buffer,
-    _hf_upload_buffer,
-    optimized_replay_buffer_dumps,
-    optimized_replay_buffer_loads,
-)
-from resfit.rl_finetuning.utils.normalization import ActionScaler, StateStandardizer
-from resfit.rl_finetuning.utils.rb_transforms import MultiStepTransform
-from resfit.rl_finetuning.wrappers.residual_env_wrapper import BasePolicyVecEnvWrapper
-# -----------------------------------------------------------------------------
-# Logging configuration -------------------------------------------------------
-# -----------------------------------------------------------------------------
-logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger(__name__)
+from agent.rl_finetuning.config.residual_td3 import ResidualTD3DexmgConfig
+from agent.rl_finetuning.off_policy.common_utils import utils
+from agent.rl_finetuning.off_policy.rl.q_agent import QAgent
+from agent.rl_finetuning.utils.dtype import to_uint8
+from agent.rl_finetuning.utils.normalization import ActionScaler, StateStandardizer
+from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
+from agent.rl_finetuning.wrappers.residual_env_wrapper import BasePolicyVecEnvWrapper
 
-# -----------------------------------------------------------------------------
-# Hugging Face buffer cache helpers (global) ---------------------------------
-# -----------------------------------------------------------------------------
-OFFLINE_HF_REPO = os.environ.get("HF_OFFLINE_BUFFER_REPO", None)
-ONLINE_HF_REPO = os.environ.get("HF_ONLINE_BUFFER_REPO", None)
-
-if OFFLINE_HF_REPO is not None:
-    logger.info(f"Using offline buffer from {OFFLINE_HF_REPO}")
-if ONLINE_HF_REPO is not None:
-    logger.info(f"Using online buffer from {ONLINE_HF_REPO}")
-
-# Generic environment variable (shared across algorithms) -------------------
-# ``CACHE_DIR`` specifies the root folder for **all** local caches.
-# Falls back to the current directory if unset.
-_CACHE_ROOT = Path(os.environ.get("CACHE_DIR", ".")).expanduser().resolve()
-
-# Dedicated sub-folders for the different cache types -----------------------
-OFFLINE_CACHE_DIR = _CACHE_ROOT / "offline_buffer_cache"
-ONLINE_CACHE_DIR = _CACHE_ROOT / "online_buffer_cache"
-
+rl_scratch_dir = "./../../rl_online_buffer"
 
 def _add_transitions_to_buffer(
     *,
@@ -144,30 +98,17 @@ def main(cfg: ResidualTD3DexmgConfig):
     # for residual learning.
     # ---------------------------------------------------------------------
     assert "base_policy" in cfg, "Base policy configuration is required"
-    policy_dir, _ = download_policy_from_wandb(
-        cfg.base_policy.wandb_id,
-        step=cfg.base_policy.wt_type,
-        artifact_version=cfg.base_policy.wt_version,
-    )
 
-    base_policy: ACTPolicy = load_policy(policy_dir)
+    base_policy = DiffusionPolicy.from_checkpoint(cfg.ckpt, device)
     base_policy.to(device)
     base_policy.eval()
-    eval_base_policy: ACTPolicy = load_policy(policy_dir)
-    eval_base_policy.to(device)
-    eval_base_policy.eval()
 
     # Extract the configuration from base policy
     base_cfg = base_policy.config
 
-    if isinstance(base_cfg, ACTConfig):
-        cfg.actor_name = "residual_act"
-    else:
-        raise ValueError(f"Unknown base policy type: {type(base_cfg)}")
-
     # Load dataset and get normalization functions early
     print("Loading dataset and setting up normalization...")
-    dataset = LeRobotDataset(cfg.offline_data.name)
+    dataset = None
 
     # Create action scaler from dataset statistics
     action_scaler = ActionScaler.from_dataset_stats(
@@ -187,7 +128,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     def get_envs(
         env_name: str,
         num_envs: int,
-        base_policy: ACTPolicy,
+        base_policy,
         device: str,
         video_key: str,
         debug: bool,
@@ -198,17 +139,23 @@ def main(cfg: ResidualTD3DexmgConfig):
         assert state_standardizer is not None, "state_standardizer must be provided for consistent normalization"
 
         # Create the vectorized environment
-        vec_env = create_vectorized_env(
-            env_name=env_name,
-            num_envs=num_envs,
-            device=device,
-            video_key=video_key,
-            debug=debug,
+        grip = GripperStats(*base_policy.grip_stats)
+        env = Env(
+            robot_ip="192.168.0.100",
+            gripper_ip="192.168.0.20",
+            camera_crop_mode=1,
+            dataset_path=None,
+            control_frequency=20,
+            save_interval=1.0 / 20,
+            gwidth=grip.grip_width_mm,
+            gforce=grip.grip_force_n,
+            gspeed=grip.grip_speed_mmps,
+            gpullback=grip.grip_pullback_mm,
         )
 
         # Wrap it with the base policy wrapper
         return BasePolicyVecEnvWrapper(
-            vec_env=vec_env,
+            vec_env=env,
             base_policy=base_policy,
             action_scaler=action_scaler,
             state_standardizer=state_standardizer,
@@ -247,28 +194,8 @@ def main(cfg: ResidualTD3DexmgConfig):
         debug=cfg.debug,
         action_scaler=action_scaler,
         state_standardizer=state_standardizer,
-    )
-    cfg.eval_num_envs = min(cfg.eval_num_envs, cfg.eval_num_episodes)
-    num_cpus_available = os.cpu_count() - 1 if os.cpu_count() is not None else 1
-    cfg.eval_num_envs = min(num_cpus_available, cfg.eval_num_envs)
-
-    eval_env = get_envs(
-        env_name=cfg.task,
-        num_envs=cfg.eval_num_envs,
-        base_policy=eval_base_policy,
-        device=device_str,
-        video_key=cfg.video_key,
-        debug=cfg.debug,
-        action_scaler=action_scaler,
-        state_standardizer=state_standardizer,
-    )
-
-    # Seed environments explicitly for reproducibility
-    if hasattr(env, "seed"):
-        env.seed(cfg.seed)
-    if hasattr(eval_env, "seed"):
-        eval_env.seed(cfg.seed + 1)  # Use different seed for eval env to avoid correlation
-
+    ); cfg.eval_num_envs = 1
+    
     # ---------------------------------------------------------------------
     # Observation / action dimensions -------------------------------------
     # ---------------------------------------------------------------------
@@ -280,10 +207,9 @@ def main(cfg: ResidualTD3DexmgConfig):
     else:
         image_keys = list(cfg.rl_camera)
     assert isinstance(image_keys, list)
-    lowdim_dim = env.observation_space["observation.state"].shape[1]
-    img_c, img_h, img_w = env.observation_space[image_keys[0]].shape[1:]
-    action_dim = env.action_space.shape[1]
-
+    lowdim_dim = None # TODO
+    img_c, img_h, img_w = None # TODO
+    action_dim = 7
     lowdim_keys = ["observation.state", "observation.base_action"]
 
     # ---------------------------------------------------------------------
@@ -297,8 +223,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         cfg=cfg.agent,
         residual_actor=True,  # Enable residual actor mode
     )
-    horizon = env.vec_env.metadata["horizon"]
-
+   
     # Set up actor learning rate warmup
     actor_updates = 0
     if cfg.algo.actor_lr_warmup_steps > 0:
@@ -324,8 +249,11 @@ def main(cfg: ResidualTD3DexmgConfig):
         print("Online-only training mode: offline_fraction=0.0")
 
     # Use TensorDictPrioritizedReplayBuffer with optimized prefetching
+    if os.path.isdir(rl_scratch_dir):
+        shutil.rmtree(rl_scratch_dir)
+    storage =  LazyMemmapStorage(cfg.algo.buffer_size, scratch_dir=rl_scratch_dir)
     online_rb = TensorDictPrioritizedReplayBuffer(
-        storage=LazyTensorStorage(max_size=cfg.algo.buffer_size, device="cpu"),
+        storage= storage, # on disk storage
         alpha=alpha,
         beta=beta,
         eps=1e-6,  # Small epsilon added to priorities to prevent zero values
@@ -335,93 +263,14 @@ def main(cfg: ResidualTD3DexmgConfig):
         prefetch=cfg.algo.prefetch_batches,  # Add prefetching
         batch_size=online_batch_size,
     )
+    
 
-    # ------------------------------------------------------------------
-    # Caching layer for online replay buffer ----------------------------
-    # ------------------------------------------------------------------
-    online_cache_meta = {
-        "task": cfg.task,
-        "image_keys": image_keys,
-        "n_step": cfg.algo.n_step,
-        "gamma": cfg.algo.gamma,
-        "horizon": horizon,
-        "size": cfg.algo.learning_starts,
-        "sampling_strategy": cfg.algo.sampling_strategy,
-        "buffer_size": cfg.algo.buffer_size,
-        "batch_size": online_batch_size,
-        # Include random action noise scale to prevent mixing data from different noise levels
-        "random_action_noise_scale": cfg.algo.random_action_noise_scale,
-        # Normalization parameters for consistency
-        "min_action_range": cfg.offline_data.min_action_range,
-        "min_state_std": cfg.offline_data.min_state_std,
-        "normalized_actions": True,
-        # Library versions for compatibility
-        "torchrl_version": torchrl.__version__,
-        "tensordict_version": tensordict.__version__,
-    }
-    if cfg.algo.sampling_strategy == "prioritized_replay":
-        online_cache_meta["priority_alpha"] = cfg.algo.priority_alpha
-        online_cache_meta["priority_beta"] = cfg.algo.priority_beta
-
-    pprint.pprint(online_cache_meta)
-    _online_meta_str = json.dumps(online_cache_meta, sort_keys=True)
-    online_cache_hash = hashlib.sha1(_online_meta_str.encode()).hexdigest()[:8]  # noqa: S324
-    # Base local path for the online buffer ------------------------------
-    online_cache_dir = ONLINE_CACHE_DIR / online_cache_hash
-
-    # Attempt to download/extract from HF every run (no-op if already cached)
-    dl_dir = None
-    if ONLINE_HF_REPO is not None:
-        print(f"Attempting to download online buffer {online_cache_hash} from {ONLINE_HF_REPO}...")
-        dl_dir = _hf_download_buffer(ONLINE_HF_REPO, online_cache_hash, ONLINE_CACHE_DIR)
-    if dl_dir is not None:
-        online_cache_dir = dl_dir
-
-    loaded_online_from_cache = False
-    if online_cache_dir.exists():
-        print(f"{online_cache_dir} found on disk. Attempting to load...")
-        online_rb.sampler._empty()
-        optimized_replay_buffer_loads(online_rb, online_cache_dir)
-        loaded_online_from_cache = True
-        print(f"Loaded online buffer from cache at {online_cache_dir} (size={len(online_rb)})")
-
-    # Offline data is required for normalization, but can be unused for training if offline_fraction=0
-    assert cfg.offline_data is not None and cfg.offline_data.num_episodes is not None
-
-    # Dataset and normalization already loaded above - use existing dataset
-
-    # Use actual dataset metadata for precise buffer sizing
-    if cfg.offline_data.num_episodes is not None:
-        # Only use subset of episodes if specified
-        total_frames = sum(
-            dataset.meta.episodes[ep_idx]["length"]
-            for ep_idx in range(min(cfg.offline_data.num_episodes, dataset.meta.total_episodes))
-        )
-        num_episodes = cfg.offline_data.num_episodes
-    else:
-        # Use entire dataset
-        total_frames = dataset.meta.total_frames
-        num_episodes = dataset.meta.total_episodes
-
-    # Calculate transitions: each episode contributes (episode_length - 1) transitions
-    estimated_transitions = max(0, total_frames - num_episodes)
-
-    print("Dataset buffer sizing:")
-    print(f"  Total frames to process: {total_frames}")
-    print(f"  Number of episodes: {num_episodes}")
-    print(f"  Estimated transitions: {estimated_transitions}")
 
     # Calculate buffer size for simplified approach (1 transition per frame pair)
-    max_offline_transitions = (
-        estimated_transitions if cfg.algo.offline_fraction > 0.0 else 1
-    )  # Minimum size for online-only mode
-    if cfg.algo.offline_fraction > 0.0:
-        print(f"Offline buffer sized for GT-as-base approach: {max_offline_transitions} transitions")
-    else:
-        print("Online-only mode: creating minimal offline buffer (unused)")
+    max_offline_transitions = None 
 
     offline_rb = TensorDictPrioritizedReplayBuffer(
-        storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"),
+        storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"), # keep in RAM
         alpha=alpha,
         beta=beta,
         eps=1e-6,  # Small epsilon added to priorities to prevent zero values
@@ -433,17 +282,16 @@ def main(cfg: ResidualTD3DexmgConfig):
     )
 
     # Normalization functions already defined above - use them
-
     # ------------------------------------------------------------------
     # Convert offline dataset episodes into transitions and fill buffer
     # ------------------------------------------------------------------
     def _populate_offline_buffer(
-        dataset: LeRobotDataset,
+        dataset,
         rb: ReplayBuffer,
         image_keys: list[str],
         num_episodes: int | None = None,
         use_base_policy_for_base_actions: bool = False,
-        base_policy: ACTPolicy | None = None,
+        base_policy = None,
     ) -> int:
         """
         Iterates through *dataset* sequentially, converts consecutive frames
@@ -557,92 +405,25 @@ def main(cfg: ResidualTD3DexmgConfig):
 
         return transitions
 
-    # ------------------------------------------------------------------
-    # Caching layer for offline replay buffer ---------------------------
-    # ------------------------------------------------------------------
-    # Build a metadata dictionary that uniquely identifies the buffer
-    offline_cache_meta = {
-        "task": cfg.task,
-        "dataset_name": cfg.offline_data.name,
-        "num_episodes": cfg.offline_data.num_episodes,
-        "use_base_policy_for_base_actions": cfg.offline_data.use_base_policy_for_base_actions,
-        "min_action_range": cfg.offline_data.min_action_range,
-        "min_state_std": cfg.offline_data.min_state_std,
-        "image_keys": image_keys,
-        "n_step": cfg.algo.n_step,
-        "gamma": cfg.algo.gamma,
-        "base_policy_wandb_id": cfg.base_policy.wandb_id,
-        "sampling_strategy": cfg.algo.sampling_strategy,
-        "normalized_actions": True,
-        "batch_size": offline_batch_size,
-        # Library versions for compatibility
-        "torchrl_version": torchrl.__version__,
-        "tensordict_version": tensordict.__version__,
-    }
-    if cfg.algo.sampling_strategy == "prioritized_replay":
-        offline_cache_meta["priority_alpha"] = cfg.algo.priority_alpha
-        offline_cache_meta["priority_beta"] = cfg.algo.priority_beta
-
-    pprint.pprint(offline_cache_meta)
-
-    # Deterministically hash the metadata to create a short cache directory name
-    meta_str = json.dumps(offline_cache_meta, sort_keys=True)
-    cache_hash = hashlib.sha1(meta_str.encode()).hexdigest()[:8]  # noqa: S324
-
-    # Base local path for this buffer ---------------------------------------
-    cache_dir = OFFLINE_CACHE_DIR / cache_hash
-
-    # Try to download/extract from the Hub (will no-op if file not there)
-    downloaded_dir = None
-    if OFFLINE_HF_REPO is not None:
-        print(f"Attempting to download offline buffer {cache_hash} from {OFFLINE_HF_REPO}...")
-        downloaded_dir = _hf_download_buffer(OFFLINE_HF_REPO, cache_hash, OFFLINE_CACHE_DIR)
-    if downloaded_dir is not None:
-        cache_dir = downloaded_dir  # use extracted location
-
-    loaded_from_cache = False
     added = 0
-
     if cfg.algo.offline_fraction > 0.0:
-        # Only populate offline buffer if we're using offline data
-        if cache_dir.exists():
-            print(f"{cache_dir} found on disk. Attempting to load...")
-            offline_rb.sampler._empty()
-            optimized_replay_buffer_loads(offline_rb, cache_dir)
-            loaded_from_cache = True
-            print(f"Loaded offline buffer from cache at {cache_dir} (size={len(offline_rb)})")
+        added = _populate_offline_buffer(
+            dataset=dataset,
+            rb=offline_rb,
+            image_keys=image_keys,
+            num_episodes=cfg.offline_data.num_episodes,
+            use_base_policy_for_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
+            base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
+        )
 
-        if not loaded_from_cache:
-            added = _populate_offline_buffer(
-                dataset=dataset,
-                rb=offline_rb,
-                image_keys=image_keys,
-                num_episodes=cfg.offline_data.num_episodes,
-                use_base_policy_for_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
-                base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
-            )
+        print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
 
-            print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
-
-            # Save buffer to disk for future runs + upload to Hub ----------------
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            optimized_replay_buffer_dumps(offline_rb, cache_dir)
-
-            with open(cache_dir / "user_metadata.json", "w") as f:
-                json.dump(offline_cache_meta, f, indent=2)
-
-            if OFFLINE_HF_REPO is not None:
-                _hf_upload_buffer(OFFLINE_HF_REPO, cache_dir, cache_hash)
-        else:
-            added = len(offline_rb)
-    else:
-        print("Skipping offline buffer population for online-only training")
 
     # ------------------------------------------------------------------
     # Warm-up phase (random policy) --------------------------------------
     # ------------------------------------------------------------------
 
-    if len(online_rb) < cfg.algo.learning_starts and not loaded_online_from_cache:
+    if len(online_rb) < cfg.algo.learning_starts :
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
         obs, _ = env.reset()
         # --------------------------------------------------------------
@@ -671,8 +452,8 @@ def main(cfg: ResidualTD3DexmgConfig):
                 ) * cfg.algo.random_action_noise_scale
                 rand_actions = pure_random - base_action
 
-            next_obs, reward, terminated, truncated, info = env.step(rand_actions)
-            done = terminated | truncated
+            next_obs, reward, terminated, info = env.step(rand_actions)
+            done = terminated 
 
             reward_sum += reward.sum().item()
             episode_count += done.float().sum().item()
@@ -707,41 +488,7 @@ def main(cfg: ResidualTD3DexmgConfig):
 
             obs = next_obs  # roll state
 
-        # Persist freshly-collected buffer (local + HF) --------------------
-        online_cache_dir.mkdir(parents=True, exist_ok=True)
-        optimized_replay_buffer_dumps(online_rb, online_cache_dir)
-        with open(online_cache_dir / "user_metadata.json", "w") as f:
-            json.dump(online_cache_meta, f, indent=2)
-        if ONLINE_HF_REPO is not None:
-            _hf_upload_buffer(ONLINE_HF_REPO, online_cache_dir, online_cache_hash)
-        print(f"Warm-up done. Online buffer size = {len(online_rb)} transitions")
-
-        loaded_online_from_cache = True  # treat as cached going forward
-
-    _hp_parts: list[str] = [
-        cfg.task,  # e.g. "TwoArmBoxCleanup"
-        f"n{cfg.algo.n_step}",  # n-step horizon
-        f"utd{cfg.algo.num_updates_per_iteration}",  # updates-to-data ratio
-        f"buf{cfg.algo.buffer_size}",  # replay buffer size
-    ]
-
-    # Offline dataset statistics (if any)
-    if cfg.offline_data is not None and cfg.offline_data.num_episodes is not None and cfg.algo.offline_fraction > 0.0:
-        _hp_parts.append(f"off{cfg.offline_data.num_episodes}ep")
-    elif cfg.algo.offline_fraction == 0.0:
-        _hp_parts.append("online_only")
-
-    # Learning-rate, expressed in scientific notation for brevity (e.g. 1e-4 → 1e-04)
-    _hp_parts.append(f"lr{cfg.agent.actor_lr:.0e}")
-
-    # Additional flags ---------------------------------------------------------
-    if cfg.agent.clip_q_target_to_reward_range:
-        _hp_parts.append("clipT")
-
-    hp_str = "_".join(_hp_parts)
-
-    run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}__{hp_str}__seed{cfg.seed}"
-
+    run_name = f"seed{cfg.seed}"
     if cfg.wandb.name is not None:
         run_name = f"{cfg.wandb.name}__{run_name}"
 
@@ -765,19 +512,6 @@ def main(cfg: ResidualTD3DexmgConfig):
         notes=cfg.wandb.notes,
         group=cfg.wandb.group,
     )
-
-    # Log horizon to wandb summary
-    wandb.summary["environment/horizon"] = env.vec_env.metadata["horizon"]
-
-    # Create a timestamped folder in CACHE_DIR for all outputs
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_cache_dir = _CACHE_ROOT / f"run_{timestamp}_{run_name}"
-
-    # Create subdirectories for models and outputs
-    model_save_dir = run_cache_dir / "models"
-    outputs_dir = run_cache_dir / "outputs"
-    model_save_dir.mkdir(parents=True, exist_ok=True)
-    outputs_dir.mkdir(parents=True, exist_ok=True)
 
     obs, _ = env.reset()
 
@@ -918,18 +652,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         # (3) Periodic evaluation ------------------------------------------
         # ------------------------------------------------------------------
         if global_step % cfg.eval_interval_every_steps == 0 and (cfg.eval_first or global_step > 0):
-        
-            eval_metrics = run_dexmg_evaluation(
-                env=eval_env,
-                agent=agent,
-                num_episodes=cfg.eval_num_episodes,
-                device=device,
-                global_step=global_step,
-                save_video=cfg.save_video,
-                save_q_plots=cfg.save_video,  # Enable Q-plots when video saving is enabled
-                run_name=run_name,
-                output_dir=outputs_dir,
-            )
+            eval_metrics = None
 
             # Handle model saving when success rate improves
             current_success_rate = eval_metrics["eval/success_rate"]
@@ -1083,13 +806,6 @@ def main(cfg: ResidualTD3DexmgConfig):
 
             print(print_msg)
 
-
-
-    # Clean up entire run directory after successful completion (videos/logs are saved to wandb)
-    if run_cache_dir.exists():
-        print(f"Cleaning up run directory: {run_cache_dir}")
-        shutil.rmtree(run_cache_dir)
-        print("Run directory cleaned up successfully.")
 
 
 # -----------------------------------------------------------------------------

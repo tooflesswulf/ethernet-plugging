@@ -6,13 +6,10 @@ from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers import DDIMScheduler
 
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
-<<<<<<< HEAD
 from agent.model.diffusion import build_encoder
 from agent.model.vit import RandomShiftsAug
-=======
 from agent.dataset.sequence import ActionMode, GripperStats
 from env import GRIP_OPEN, GRIP_CLOSED
->>>>>>> 0e1c919e0e8cb0e50b9ad45919e536b9f693f639
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
 
@@ -41,14 +38,10 @@ class DiffusionPolicy(nn.Module):
         norm_stats: dict | None = None,
         action_mode: ActionMode = 'local_delta',
         encoder_type='resnet',
-<<<<<<< HEAD
-        augment=True
-=======
         augment=True,
         grip_stats: GripperStats | None = None,
         obs_fields: list[str] | None = None,
         predict_done: bool | None = None,
->>>>>>> 0e1c919e0e8cb0e50b9ad45919e536b9f693f639
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
@@ -74,14 +67,11 @@ class DiffusionPolicy(nn.Module):
             num_diffusion_iters=num_diffusion_iters,
             action_mode=action_mode,
             encoder_type=encoder_type,
-<<<<<<< HEAD
             augment=augment
-=======
             augment=augment,
             obs_fields=obs_fields,
             grip_stats=list(self.grip_stats),
             predict_done=self.predict_done,
->>>>>>> 0e1c919e0e8cb0e50b9ad45919e536b9f693f639
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon

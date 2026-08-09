@@ -36,21 +36,22 @@ class BasePolicyVecEnvWrapper:
         self.state_standardizer = state_standardizer
 
         # Get action dimension from the environment
-        self.action_dim = env.action_space.shape[-1]
+        self.action_dim = 7
 
     def reset(self, **kwargs):
         """Reset environment and base policy."""
-        # Reset the underlying vectorized environment
-        raw_obs, info = self.env.reset(**kwargs)
+        # Reset the underlying environment
+        self.env.reset()
 
-        # Reset base policy
+        # Reset base policy (clear previously predicted actions)
         self.base_policy.reset()
 
         # Get base action from the base policy
         with torch.no_grad():
-            base_action = self.base_policy.select_action(raw_obs)
+            base_action = None
 
         base_naction = self.action_scaler.scale(base_action)
+        raw_obs = None 
 
         # Augment observations with base action and apply state standardization
         augmented_obs = self._augment_obs(raw_obs, base_naction)
@@ -58,7 +59,7 @@ class BasePolicyVecEnvWrapper:
         # Store for later use in step
         self._last_base_naction = base_naction
 
-        return augmented_obs, info
+        return augmented_obs, {}
 
     def step(
         self, residual_naction: torch.Tensor
@@ -88,7 +89,8 @@ class BasePolicyVecEnvWrapper:
         env_action = self.action_scaler.unscale(combined_naction)
 
         # Step the underlying vectorized environment
-        raw_obs, reward, terminated, truncated, info = self.env.step(env_action)
+        raw_obs = self.env.step(env_action)
+        reward, terminated, info = None, None, None # TODO
 
         # Store the scaled action for replay buffer (already computed above)
         info["scaled_action"] = combined_naction
@@ -114,7 +116,7 @@ class BasePolicyVecEnvWrapper:
         # Store for next step
         self._last_base_naction = base_naction
 
-        return augmented_obs, reward, terminated, truncated, info
+        return augmented_obs, reward, terminated, info
 
     def _augment_obs(self, raw_obs: dict[str, torch.Tensor], base_naction: torch.Tensor) -> dict[str, torch.Tensor]:
         """Augment observations with base actions."""
