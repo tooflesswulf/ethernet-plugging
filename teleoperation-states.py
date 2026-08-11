@@ -70,7 +70,7 @@ class StateEstimator:
     """
 
     # Grace after the triggering gripper event before trusting a decision sensor.
-    SETTLE_S = 0.5
+    SETTLE_S = 2.0
 
     def __init__(self):
         self.state = State.IDLE
@@ -95,7 +95,7 @@ class StateEstimator:
         if s == State.IDLE and grasp:
             self._pending = ("pickup", now)          # Cable? -> Approaching / Pickup error
         elif s == State.INSERTED and grasp:
-            self._pending = ("regrasp", now)         # Cable? -> Returning / (stay Inserted)
+            self._pending = ("unplug", now)         # Cable? -> Returning / (stay Inserted)
         elif s == State.APPROACHING and release:
             self._pending = ("network", now)         # Network? -> Inserted / Plugin Error
         elif s == State.RETURNING and release:
@@ -107,7 +107,7 @@ class StateEstimator:
         # An opposite gripper event cancels a still-pending decision.
         if self._pending is not None:
             kind = self._pending[0]
-            if kind in ("pickup", "regrasp") and release:
+            if kind in ("pickup", "unplug") and release:
                 self._pending = None
             elif kind == "network" and grasp:
                 self._pending = None
@@ -123,7 +123,7 @@ class StateEstimator:
                 elif elapsed >= self.SETTLE_S:
                     self.state = State.PICKUP_ERROR
                     self._pending = None
-            elif kind == "regrasp":
+            elif kind == "unplug":
                 if held:
                     self.state = State.RETURNING
                     self._pending = None
@@ -194,9 +194,7 @@ class Teleoperation(robot_execution.RobotExecution):
         rel[:2] = np.random.uniform([r1.x, r1.y], [r2.x, r2.y])
         seq.move_to(URPose(*rel))
         seq.gripper(GRIP_OPEN)
-        seq.wait(1) \
-            .then(lambda _: print('Released! Safe to exit.')) \
-            .then(lambda _: self.stop())
+        seq.wait(1)
         return self.get_action()
 
     def _draw_overlay(self, image):
