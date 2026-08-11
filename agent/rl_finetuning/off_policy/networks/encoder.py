@@ -5,8 +5,8 @@
 import torch
 from torch import nn
 
-from resfit.rl_finetuning.config.rlpd import VitEncoderConfig
-from resfit.rl_finetuning.off_policy.networks.min_vit import MinVit
+from agent.rl_finetuning.config.rlpd import VitEncoderConfig
+from agent.rl_finetuning.off_policy.networks.min_vit import MinVit
 
 
 class VitEncoder(nn.Module):

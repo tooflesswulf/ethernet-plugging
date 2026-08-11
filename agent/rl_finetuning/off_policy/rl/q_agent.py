@@ -10,12 +10,12 @@ from contextlib import contextmanager
 import torch
 from torch import nn
 
-from resfit.rl_finetuning.config.rlpd import QAgentConfig
-from resfit.rl_finetuning.off_policy import common_utils
-from resfit.rl_finetuning.off_policy.common_utils import utils
-from resfit.rl_finetuning.off_policy.networks.encoder import VitEncoder
-from resfit.rl_finetuning.off_policy.rl.actor import Actor
-from resfit.rl_finetuning.off_policy.rl.critic import Critic
+from agent.rl_finetuning.config.rlpd import QAgentConfig
+from agent.rl_finetuning.off_policy import common_utils
+from agent.rl_finetuning.off_policy.common_utils import utils
+from agent.rl_finetuning.off_policy.networks.encoder import VitEncoder
+from agent.rl_finetuning.off_policy.rl.actor import Actor
+from agent.rl_finetuning.off_policy.rl.critic import Critic
 
 
 class QAgent(nn.Module):

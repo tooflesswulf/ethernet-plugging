@@ -13,8 +13,8 @@ from torch import nn
 from torch.func import functional_call, stack_module_state, vmap
 from torch.nn import functional
 
-from resfit.rl_finetuning.config.rlpd import CriticConfig
-from resfit.rl_finetuning.off_policy.common_utils import utils
+from agent.rl_finetuning.config.rlpd import CriticConfig
+from agent.rl_finetuning.off_policy.common_utils import utils
 
 
 class HLGaussLoss(nn.Module):

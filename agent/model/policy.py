@@ -67,7 +67,6 @@ class DiffusionPolicy(nn.Module):
             num_diffusion_iters=num_diffusion_iters,
             action_mode=action_mode,
             encoder_type=encoder_type,
-            augment=augment
             augment=augment,
             obs_fields=obs_fields,
             grip_stats=list(self.grip_stats),

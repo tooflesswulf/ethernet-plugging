@@ -86,6 +86,7 @@ def _add_transitions_to_buffer(
 def main(cfg: ResidualTD3DexmgConfig):
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
+    assert False
 
     # Enable performance optimizations
     if device.type == "cuda":
@@ -499,17 +500,17 @@ def main(cfg: ResidualTD3DexmgConfig):
     print("Launching run with the following config:")
     pprint.pprint(_wandb_config)
 
-    wandb.init(
-        id=cfg.wandb.continue_run_id,
-        resume=None if cfg.wandb.continue_run_id is None else "allow",
-        project=cfg.wandb.project,
-        entity=cfg.wandb.entity,
-        config=_wandb_config,
-        name=run_name,
-        mode=cfg.wandb.mode if not cfg.debug else "disabled",
-        notes=cfg.wandb.notes,
-        group=cfg.wandb.group,
-    )
+    # wandb.init(
+    #     id=cfg.wandb.continue_run_id,
+    #     resume=None if cfg.wandb.continue_run_id is None else "allow",
+    #     project=cfg.wandb.project,
+    #     entity=cfg.wandb.entity,
+    #     config=_wandb_config,
+    #     name=run_name,
+    #     mode=cfg.wandb.mode if not cfg.debug else "disabled",
+    #     notes=cfg.wandb.notes,
+    #     group=cfg.wandb.group,
+    # )
 
     obs, _ = env.reset()
 
@@ -811,5 +812,5 @@ def main(cfg: ResidualTD3DexmgConfig):
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    cfg_conf = None # instance of a config
+    cfg_conf = OmegaConf.structured(ResidualTD3DexmgConfig)
     main(cfg_conf)
