@@ -7,7 +7,7 @@ import os
 import copy
 import numpy as np
 from diffusers.training_utils import EMAModel
-
+from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 
 def save_checkpoint(
     nets: nn.ModuleDict,
@@ -157,3 +157,42 @@ def resize_image(np_array, new_size=(128, 128), flip_channel=False):
     img = Image.fromarray(np_array)
     img = img.resize(new_size, )
     return np.array(img)
+
+def gripper_action(g_widths, threshold=20):
+    """
+    Binary gripper predictions. 1=open, -1=closed
+    """
+    return 2 * (g_widths > threshold).astype(int).reshape(-1, 1) - 1
+
+def _pose_action_local_delta( poses):
+    # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
+    transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
+    t0 = transforms[0]
+    deltas = [t0.inv() * t for t in transforms]
+    return np.array([delta.as_exp_coords() for delta in deltas])
+
+def get_pose_action(poses, action_mode):
+    
+    if action_mode == 'local_delta':
+        return _pose_action_local_delta(poses)
+    
+    else:
+        raise ValueError(f"Invalid action_mode: {action_mode}")
+
+def get_dataset(dataset_path, lowdim_keys, action_mode, num_episodes, g_thr=18):
+    # return individual episode path, and total count of transitions
+    episode_names = sorted( os.listdir(dataset_path), key = lambda x: int(x.replace('episode', '')) )[:num_episodes]
+    total_transitions = 0
+    episode_paths, states, actions = [], [], []
+    for episode_name in episode_names:
+        episode_path = os.path.join(dataset_path, episode_name)
+        episode_paths.append(episode_path)
+
+        loaded = np.load(os.path.join( episode_path, 'states.npz'))
+        state =  np.concatenate( [ loaded[k] if loaded[k].ndim == 2 else loaded[k][:, None] for k in lowdim_keys    ] , -1)
+        pose_action = get_pose_action(loaded['pose'], action_mode); g_action = gripper_action(loaded['gripper_width'], threshold=g_thr)
+        action = np.concatenate([pose_action, g_action ], -1)
+        states.append(state); actions.append(action); total_transitions += len(action)
+    print('Loaded episode count:', len(episode_paths), '\tTotal transitions:', total_transitions)
+    return episode_paths, states, actions, total_transitions
+    

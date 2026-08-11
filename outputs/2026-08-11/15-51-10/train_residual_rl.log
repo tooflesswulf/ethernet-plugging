@@ -1,0 +1,16 @@
+[2026-08-11 15:51:10,693][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 760, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 110, in main
+    offline_dataset_basics = get_dataset_basic(offline_dataset_path, cfg.offline_data.num_episodes)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/utils/utils.py", line 171, in get_dataset_basic
+    assert False, f"{loaded['traj_length']}"
+                     ~~~~~~^^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/numpy/lib/_npyio_impl.py", line 243, in __getitem__
+    raise KeyError(f"{key} is not a file in the archive") from None
+KeyError: 'traj_length is not a file in the archive'

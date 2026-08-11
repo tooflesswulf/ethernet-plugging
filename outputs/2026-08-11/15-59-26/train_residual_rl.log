@@ -1,0 +1,26 @@
+[2026-08-11 15:59:26,980][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 761, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 112, in main
+    offline_dataset_basics = get_dataset_basic(offline_dataset_path, lowdim_keys, cfg.offline_data.num_episodes)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/utils/utils.py", line 182, in get_dataset_basic
+    assert False, f"{state}"
+           ^^^^^
+AssertionError: [[-1.46966178e-01  6.11998945e-01  1.83979628e-01 ... -1.92993669e+00
+  -5.00664305e-01  3.00600000e+01]
+ [-1.47006620e-01  6.11993478e-01  1.83997012e-01 ... -1.92999869e+00
+  -5.00653001e-01  3.00100000e+01]
+ [-1.46979220e-01  6.11989996e-01  1.84011677e-01 ... -1.92994568e+00
+  -5.00740096e-01  3.00000000e+01]
+ ...
+ [-2.53276596e-01  6.68973126e-01  2.70974714e-02 ... -1.79291886e+00
+  -4.98797440e-01  3.00000000e+01]
+ [-2.53254635e-01  6.68982073e-01  2.70863345e-02 ... -1.79293056e+00
+  -4.98830799e-01  3.00000000e+01]
+ [-2.53246011e-01  6.68962034e-01  2.70759241e-02 ... -1.79298069e+00
+  -4.98826499e-01  3.00000000e+01]]

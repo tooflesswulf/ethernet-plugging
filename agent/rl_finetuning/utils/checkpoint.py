@@ -13,7 +13,7 @@ from typing import Any
 import torch
 import wandb
 
-from resfit.rl_finetuning.off_policy.rl.q_agent import QAgent
+from agent.rl_finetuning.off_policy.rl.q_agent import QAgent
 
 
 def _download_from_wandb(checkpoint_spec: str) -> tuple[Path, dict]:

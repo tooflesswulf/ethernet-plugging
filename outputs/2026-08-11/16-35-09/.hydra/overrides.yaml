@@ -1,0 +1,2 @@
+- seed=0
+- base_policy.ckpt=/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ckpts/cableflat-50-pose/ckpt_final.pth

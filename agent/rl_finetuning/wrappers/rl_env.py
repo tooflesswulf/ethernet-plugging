@@ -17,23 +17,15 @@ class BasePolicyVecEnvWrapper:
         self,
         env,
         base_policy,
-        action_scaler,
-        state_standardizer,
+  
     ):
         """
         Args:
-            vec_env: Vectorized environment from create_vectorized_env
+            env: Vectorized environment from create_vectorized_env
             base_policy: Base policy (e.g., ACTPolicy) to augment with residual actions
-            action_scaler: ActionScaler object for scaling/unscaling actions (REQUIRED)
-            state_standardizer: StateStandardizer object for standardizing states (REQUIRED)
         """
-        assert action_scaler is not None, "action_scaler is required for consistent normalization"
-        assert state_standardizer is not None, "state_standardizer is required for consistent normalization"
-
         self.env = env
         self.base_policy = base_policy
-        self.action_scaler = action_scaler
-        self.state_standardizer = state_standardizer
 
         # Get action dimension from the environment
         self.action_dim = 7

@@ -1,0 +1,16 @@
+[2026-08-11 16:11:00,395][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 761, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 112, in main
+    offline_dataset_basics = get_dataset(offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/utils/utils.py", line 195, in get_dataset
+    g_action = gripper_action(loaded['g_width'], threshold=g_thr)
+                              ~~~~~~^^^^^^^^^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/numpy/lib/_npyio_impl.py", line 243, in __getitem__
+    raise KeyError(f"{key} is not a file in the archive") from None
+KeyError: 'g_width is not a file in the archive'

@@ -1,0 +1,16 @@
+[2026-08-11 15:50:45,022][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 760, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 110, in main
+    offline_dataset_basics = get_dataset_basic(offline_dataset_path, cfg.offline_data.num_episodes)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/utils/utils.py", line 170, in get_dataset_basic
+    loaded = np.load(episode_path)
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/numpy/lib/_npyio_impl.py", line 454, in load
+    fid = stack.enter_context(open(os.fspath(file), "rb"))
+                              ~~~~^^^^^^^^^^^^^^^^^^^^^^^
+IsADirectoryError: [Errno 21] Is a directory: '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/cableflat-smallrouter/episode000001'

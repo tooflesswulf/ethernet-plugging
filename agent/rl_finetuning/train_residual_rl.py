@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: CC-BY-NC-4.0
 
 from __future__ import annotations
-
-import os, pprint, random, shutil, time, torch, numpy as np, wandb
+from PIL import Image
+from einops import rearrange
+import os, pprint, random, shutil, time, torch, numpy as np, wandb, hydra
 
 from omegaconf import OmegaConf
 from tensordict import TensorDict
@@ -14,12 +15,11 @@ from tqdm import tqdm
 from env import Env, URPose, GRIP_OPEN
 from agent.model.policy import DiffusionPolicy
 from agent.dataset.sequence import GripperStats
-
+from agent.utils.utils import get_dataset
 from agent.rl_finetuning.config.residual_td3 import ResidualTD3DexmgConfig
 from agent.rl_finetuning.off_policy.common_utils import utils
 from agent.rl_finetuning.off_policy.rl.q_agent import QAgent
 from agent.rl_finetuning.utils.dtype import to_uint8
-from agent.rl_finetuning.utils.normalization import ActionScaler, StateStandardizer
 from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
 from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
 
@@ -86,8 +86,7 @@ def _add_transitions_to_buffer(
 def main(cfg: ResidualTD3DexmgConfig):
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
-    assert False
-
+    
     # Enable performance optimizations
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -99,46 +98,24 @@ def main(cfg: ResidualTD3DexmgConfig):
     # for residual learning.
     # ---------------------------------------------------------------------
     assert "base_policy" in cfg, "Base policy configuration is required"
-
-    base_policy = DiffusionPolicy.from_checkpoint(cfg.ckpt, device)
+    base_policy = DiffusionPolicy.from_checkpoint(cfg.base_policy.ckpt, device)
     base_policy.to(device)
     base_policy.eval()
-
-    # Extract the configuration from base policy
-    base_cfg = base_policy.config
+    lowdim_dim, action_dim, img_c, img_h, img_w =base_policy.state_min.shape[-1],  base_policy.action_min.shape[-1], 3, base_policy.img_size, base_policy.img_size
+    lowdim_keys = base_policy.obs_fields #  ["observation.state", "observation.base_action"]
 
     # Load dataset and get normalization functions early
     print("Loading dataset and setting up normalization...")
-    dataset = None
-
-    # Create action scaler from dataset statistics
-    action_scaler = ActionScaler.from_dataset_stats(
-        action_stats=dataset.meta.stats["action"],
-        action_scale=cfg.agent.actor.action_scale,
-        min_range_per_dim=cfg.offline_data.min_action_range,
-        device=device,
-    )
-
-    # Create state standardizer from dataset statistics
-    state_standardizer = StateStandardizer.from_dataset_stats(
-        state_stats=dataset.meta.stats["observation.state"],
-        min_std=cfg.offline_data.min_state_std,
-        device=device,
-    )
-
+    print("#"*20)
+    print('No Normalization is done to the dataset!!!!!')
+    print("#"*20)
+    offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
+    offline_episodes, ep_states, ep_actions, total_transitions = get_dataset(offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
+   
     def get_envs(
-        env_name: str,
-        num_envs: int,
         base_policy,
-        device: str,
-        video_key: str,
-        debug: bool,
-        action_scaler: ActionScaler,
-        state_standardizer: StateStandardizer,
     ):
-        assert action_scaler is not None, "action_scaler must be provided for consistent normalization"
-        assert state_standardizer is not None, "state_standardizer must be provided for consistent normalization"
-
+       
         # Create the vectorized environment
         grip = GripperStats(*base_policy.grip_stats)
         env = Env(
@@ -155,12 +132,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         )
 
         # Wrap it with the base policy wrapper
-        return BasePolicyVecEnvWrapper(
-            vec_env=env,
-            base_policy=base_policy,
-            action_scaler=action_scaler,
-            state_standardizer=state_standardizer,
-        )
+        return BasePolicyVecEnvWrapper(env=env, base_policy=base_policy)
 
     # ---------------------------------------------------------------------
     # Seeding (must be done before environment creation) ------------------
@@ -169,9 +141,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         cfg.seed = random.randint(0, 2**32 - 1)
 
     # Comprehensive seeding for reproducibility
-    random.seed(cfg.seed)
-    np.random.seed(cfg.seed)
-    torch.manual_seed(cfg.seed)
+    random.seed(cfg.seed); np.random.seed(cfg.seed); torch.manual_seed(cfg.seed)
 
     # CUDA seeding for multi-GPU reproducibility
     if torch.cuda.is_available():
@@ -186,33 +156,8 @@ def main(cfg: ResidualTD3DexmgConfig):
     # Environment setup ----------------------------------------------------
     # ---------------------------------------------------------------------
     assert cfg.num_envs == 1, "Only support 1 environment for now because of how n_step is implemented"
-    env = get_envs(
-        env_name=cfg.task,
-        num_envs=cfg.num_envs,
-        base_policy=base_policy,
-        device=device_str,
-        video_key=cfg.video_key,
-        debug=cfg.debug,
-        action_scaler=action_scaler,
-        state_standardizer=state_standardizer,
-    ); cfg.eval_num_envs = 1
-    
-    # ---------------------------------------------------------------------
-    # Observation / action dimensions -------------------------------------
-    # ---------------------------------------------------------------------
-    # Determine which image keys (camera observations) will be used. The
-    # configuration can specify either a single camera name (str) or a list of
-    # names.
-    if isinstance(cfg.rl_camera, str):
-        image_keys: list[str] = [cfg.rl_camera]
-    else:
-        image_keys = list(cfg.rl_camera)
-    assert isinstance(image_keys, list)
-    lowdim_dim = None # TODO
-    img_c, img_h, img_w = None # TODO
-    action_dim = 7
-    lowdim_keys = ["observation.state", "observation.base_action"]
-
+    env = get_envs(base_policy=base_policy); cfg.eval_num_envs = 1
+ 
     # ---------------------------------------------------------------------
     # Networks ------------------------------------------------------------
     # ---------------------------------------------------------------------
@@ -220,7 +165,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         obs_shape=(img_c, img_h, img_w),
         prop_shape=(lowdim_dim,),
         action_dim=action_dim,
-        rl_cameras=image_keys,
+        rl_cameras=['rgb'],
         cfg=cfg.agent,
         residual_actor=True,  # Enable residual actor mode
     )
@@ -264,10 +209,10 @@ def main(cfg: ResidualTD3DexmgConfig):
         prefetch=cfg.algo.prefetch_batches,  # Add prefetching
         batch_size=online_batch_size,
     )
+    
 
     # Calculate buffer size for simplified approach (1 transition per frame pair)
-    max_offline_transitions = None 
-
+    max_offline_transitions = total_transitions
     offline_rb = TensorDictPrioritizedReplayBuffer(
         storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"), # keep in RAM
         alpha=alpha,
@@ -280,17 +225,18 @@ def main(cfg: ResidualTD3DexmgConfig):
         batch_size=max(offline_batch_size, 1),  # Ensure batch_size is at least 1
     )
 
-    # Normalization functions already defined above - use them
+ 
     # ------------------------------------------------------------------
     # Convert offline dataset episodes into transitions and fill buffer
     # ------------------------------------------------------------------
     def _populate_offline_buffer(
-        dataset,
+        ep_paths,
+        ep_states,
+        ep_actions,
         rb: ReplayBuffer,
-        image_keys: list[str],
-        num_episodes: int | None = None,
         use_base_policy_for_base_actions: bool = False,
         base_policy = None,
+        img_h=128, img_w=128
     ) -> int:
         """
         Iterates through *dataset* sequentially, converts consecutive frames
@@ -312,92 +258,81 @@ def main(cfg: ResidualTD3DexmgConfig):
 
         # Populate buffer from pre-loaded dataset
         print("Populating offline buffer from dataset...")
-        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
 
-        episode_cache: dict[int, dict] = {}
-        transitions = 0
-        step_id = 0
+        episode_cache: dict[int, dict] = {}; transitions = 0; step_id = 0
 
-        for sample in tqdm(loader, desc="Processing offline dataset"):
-            ep_idx = int(sample["episode_index"].item())
-            if num_episodes is not None and ep_idx == num_episodes:
-                break
+        for ep_idx, ep_path in enumerate(tqdm(ep_paths, desc="Processing offline dataset") ):
+            ep_image_dir = os.path.join(ep_path, 'images'); ep_state = torch.tensor( ep_states[ep_idx]).float(); ep_action = torch.tensor( ep_actions[ep_idx] ).float()
+            images = torch.tensor( np.array( [ Image.open( os.path.join(ep_image_dir, n) ).resize((img_h, img_w)) for n in sorted(os.listdir(ep_image_dir), key = lambda x: int( x.replace('.png', '')) ) ] ) ).float()
+            assert len(images) == len(ep_state)
+            base_actions = None
+            for step, (image, state, action) in enumerate(zip(images, ep_state, ep_action)):
+               
+                # ------------------------------------------------------------------
+                # Build observation and action directly for replay buffer ----------
+                # ------------------------------------------------------------------
+                # Extract data and keep on CPU (replay buffer uses CPU storage)
+                done_flag = step == len(images)-1
 
-            # ------------------------------------------------------------------
-            # Build observation and action directly for replay buffer ----------
-            # ------------------------------------------------------------------
-            # Extract data and keep on CPU (replay buffer uses CPU storage)
-            _gt_action: torch.Tensor = sample["action"].float().squeeze(0)
-            gt_action_scaled = action_scaler.scale(_gt_action)
-            done_flag = bool(sample["next.done"].item())
+                # Generate base action based on the selected mode
+                if use_base_policy_for_base_actions:
+                    # Use base policy to generate base action from current observation
+                    # Build raw observation first for base policy inference
+                    raw_obs = {'rgb': rearrange( image.unsqueeze(0).unsqueeze(0).to(device) / 255.0, 'B T H W C -> B T C H W'), 'state': state.unsqueeze(0).unsqueeze(0).to(device),}
 
-            # Generate base action based on the selected mode
-            if use_base_policy_for_base_actions:
-                # Use base policy to generate base action from current observation
-                # Build raw observation first for base policy inference
-                raw_obs = {}
-                for k in sample:
-                    if "observation" in k:
-                        raw_obs[k] = sample[k].to(device)  # Keep batch dimension for base policy
+                    # Get base action from base policy
+                    if base_actions is None:
+                        with torch.no_grad():
+                            base_actions = base_policy.predict_action(raw_obs).squeeze(0).to(device)
+                    base_action = base_actions[0]
+                    base_actions =  base_actions[1:] if len(base_actions) > 1 else None
+                else:
+                   assert False, f"Not Implemented"
+                
+                # Build observation dict directly in target format
+                curr_obs = { "observation.state": state.cpu(), "observation.base_action": base_action.cpu(), "observation.rgb": image.cpu() }
+                # Convert images to uint8 for memory-efficient storage
+                to_uint8(curr_obs, ["observation.rgb"])
 
-                # Get base action from base policy
-                with torch.no_grad():
-                    base_action = base_policy.select_action(raw_obs)
-                base_action_scaled = action_scaler.scale(base_action.squeeze(0).cpu())
-            else:
-                # Use GT action as base action (original behavior)
-                base_action_scaled = gt_action_scaled
+                # ------------------------------------------------------------------
+                # If we already cached the *previous* frame for this episode we can
+                # create transitions now.
+                # ------------------------------------------------------------------
+                if ep_idx in episode_cache:
+                    # Create transitions for each combination of prev and current variants
+                    prev_obs = episode_cache[ep_idx]["obs"]
+                    prev_action_scaled = episode_cache[ep_idx]["action"]
+                    transition = TensorDict(
+                        {
+                            "obs": TensorDict(prev_obs, batch_size=[]),
+                            "action": prev_action_scaled,
+                            "next": TensorDict(
+                                {
+                                    "obs": TensorDict(curr_obs, batch_size=[]),
+                                    "done": torch.tensor(done_flag, dtype=torch.bool),
+                                    "reward": torch.tensor(float(done_flag), dtype=torch.float32),
+                                },
+                                batch_size=[],
+                            ),
+                            "_priority": torch.tensor(10.0, dtype=torch.float32),  # High initial priority for new samples
+                        },
+                        batch_size=[],
+                    ).unsqueeze(0)
 
-            # Build observation dict directly in target format
-            curr_obs = {
-                "observation.state": state_standardizer.standardize(sample["observation.state"].float().squeeze(0)),
-                "observation.base_action": base_action_scaled,
-            }
-            for k in image_keys:
-                curr_obs[k] = sample[k].squeeze(0)
+                    rb.add(transition)
+                    transitions += 1
 
-            # Convert images to uint8 for memory-efficient storage
-            to_uint8(curr_obs, image_keys)
+                    step_id += 1
+                else:
+                    step_id = 0
 
-            # ------------------------------------------------------------------
-            # If we already cached the *previous* frame for this episode we can
-            # create transitions now.
-            # ------------------------------------------------------------------
-            if ep_idx in episode_cache:
-                # Create transitions for each combination of prev and current variants
-                prev_obs = episode_cache[ep_idx]["obs"]
-                prev_action_scaled = episode_cache[ep_idx]["action"]
-                transition = TensorDict(
-                    {
-                        "obs": TensorDict(prev_obs, batch_size=[]),
-                        "action": prev_action_scaled,
-                        "next": TensorDict(
-                            {
-                                "obs": TensorDict(curr_obs, batch_size=[]),
-                                "done": torch.tensor(done_flag, dtype=torch.bool),
-                                "reward": torch.tensor(float(done_flag), dtype=torch.float32),
-                            },
-                            batch_size=[],
-                        ),
-                        "_priority": torch.tensor(10.0, dtype=torch.float32),  # High initial priority for new samples
-                    },
-                    batch_size=[],
-                ).unsqueeze(0)
-
-                rb.add(transition)
-                transitions += 1
-
-                step_id += 1
-            else:
-                step_id = 0
-
-            # Cache current frame for pairing with the next one ---------------
-            episode_cache[ep_idx] = {
-                "obs": curr_obs,
-                "action": gt_action_scaled,
-                "done": done_flag,
-                "step_id": step_id,
-            }
+                # Cache current frame for pairing with the next one ---------------
+                episode_cache[ep_idx] = {
+                    "obs": curr_obs,
+                    "action": action,
+                    "done": done_flag,
+                    "step_id": step_id,
+                }
 
         # Log final statistics
         print(f"Added {transitions} transitions")
@@ -407,16 +342,14 @@ def main(cfg: ResidualTD3DexmgConfig):
     added = 0
     if cfg.algo.offline_fraction > 0.0:
         added = _populate_offline_buffer(
-            dataset=dataset,
+            offline_episodes, ep_states, ep_actions,
             rb=offline_rb,
-            image_keys=image_keys,
-            num_episodes=cfg.offline_data.num_episodes,
             use_base_policy_for_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
             base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
         )
 
         print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
-
+    assert False
 
     # ------------------------------------------------------------------
     # Warm-up phase (random policy) --------------------------------------
@@ -810,7 +743,11 @@ def main(cfg: ResidualTD3DexmgConfig):
 # -----------------------------------------------------------------------------
 # Hydra entry point -----------------------------------------------------------
 # -----------------------------------------------------------------------------
+@hydra.main(version_base=None, config_name="residual_td3_dexmg_config")
+def hydra_entry(cfg: ResidualTD3DexmgConfig):
+    cfg_conf = OmegaConf.structured(cfg)
+    main(cfg_conf)
+
 
 if __name__ == "__main__":
-    cfg_conf = OmegaConf.structured(ResidualTD3DexmgConfig)
-    main(cfg_conf)
+    hydra_entry()

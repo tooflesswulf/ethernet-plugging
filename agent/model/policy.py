@@ -117,7 +117,7 @@ class DiffusionPolicy(nn.Module):
         Rebuild a policy entirely from a checkpoint: architecture config, weights,
         and normalization stats all come from the file.
         """
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint = torch.load(ckpt_path, weights_only=False, map_location=device)
         assert 'config' in checkpoint, (
             f"Checkpoint {ckpt_path} has no 'config' entry; it predates config-saving. "
             "Construct DiffusionPolicy with explicit dims and use load_checkpoint instead.")

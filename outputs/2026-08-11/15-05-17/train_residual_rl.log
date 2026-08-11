@@ -1,0 +1,20 @@
+[2026-08-11 15:05:17,724][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 815, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 101, in main
+    base_policy = DiffusionPolicy.from_checkpoint(cfg.base_policy.ckpt, device)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/model/policy.py", line 120, in from_checkpoint
+    checkpoint = torch.load(ckpt_path, map_location=device)
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torch/serialization.py", line 1578, in load
+    raise pickle.UnpicklingError(_get_wo_message(str(e))) from None
+_pickle.UnpicklingError: Weights only load failed. This file can still be loaded, to do so you have two options, [1mdo those steps only if you trust the source of the checkpoint[0m. 
+	(1) In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.
+	(2) Alternatively, to load with `weights_only=True` please check the recommended steps in the following error message.
+	WeightsUnpickler error: Unsupported global: GLOBAL agent.dataset.sequence.GripperStats was not an allowed global by default. Please use `torch.serialization.add_safe_globals([agent.dataset.sequence.GripperStats])` or the `torch.serialization.safe_globals([agent.dataset.sequence.GripperStats])` context manager to allowlist this global if you trust this class/function.
+
+Check the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html.

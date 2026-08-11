@@ -1,0 +1,49 @@
+[2026-08-11 16:47:20,038][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 754, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 349, in main
+    added = _populate_offline_buffer(
+        offline_episodes, ep_states, ep_actions,
+    ...<2 lines>...
+        base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
+    )
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 285, in _populate_offline_buffer
+    base_actions = base_policy.predict_action(raw_obs)
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/model/policy.py", line 196, in predict_action
+    obs_cond = self.encode_obs(conditions)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/model/policy.py", line 168, in encode_obs
+    image_features = self.nets['vision_encoder'](flatten_images).reshape(*images.shape[:2], -1)
+                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torchvision/models/resnet.py", line 285, in forward
+    return self._forward_impl(x)
+           ~~~~~~~~~~~~~~~~~~^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torchvision/models/resnet.py", line 268, in _forward_impl
+    x = self.conv1(x)
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torch/nn/modules/module.py", line 1789, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torch/nn/modules/conv.py", line 565, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/torch/nn/modules/conv.py", line 560, in _conv_forward
+    return F.conv2d(
+           ~~~~~~~~^
+        input, weight, bias, self.stride, self.padding, self.dilation, self.groups
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+RuntimeError: Expected 3D (unbatched) or 4D (batched) input to conv2d, but got input of size: [16384, 3]

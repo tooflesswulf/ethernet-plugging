@@ -1,0 +1,14 @@
+[2026-08-11 15:48:29,281][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 760, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 110, in main
+    offline_dataset_basics = get_dataset_basic(offline_dataset_path, cfg.offline_data.num_episodes)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/utils/utils.py", line 164, in get_dataset_basic
+    assert False, f"{episode_names}"
+           ^^^^^
+AssertionError: ['episode000001', 'episode000002', 'episode000003', 'episode000004', 'episode000005', 'episode000006', 'episode000007', 'episode000008', 'episode000009', 'episode000010', 'episode000011', 'episode000012', 'episode000013', 'episode000014', 'episode000015', 'episode000016', 'episode000017', 'episode000018', 'episode000019', 'episode000020', 'episode000021', 'episode000022', 'episode000023', 'episode000024', 'episode000025', 'episode000026', 'episode000027', 'episode000028', 'episode000029', 'episode000030', 'episode000031', 'episode000032', 'episode000033', 'episode000034', 'episode000035', 'episode000036', 'episode000037', 'episode000038', 'episode000039', 'episode000040', 'episode000041', 'episode000042', 'episode000043', 'episode000044', 'episode000045', 'episode000046', 'episode000047', 'episode000048', 'episode000049', 'episode000050']
