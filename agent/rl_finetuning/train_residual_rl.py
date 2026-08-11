@@ -21,7 +21,7 @@ from agent.rl_finetuning.off_policy.rl.q_agent import QAgent
 from agent.rl_finetuning.utils.dtype import to_uint8
 from agent.rl_finetuning.utils.normalization import ActionScaler, StateStandardizer
 from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
-from agent.rl_finetuning.wrappers.residual_env_wrapper import BasePolicyVecEnvWrapper
+from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
 
 rl_scratch_dir = "./../../rl_online_buffer"
 
@@ -253,7 +253,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         shutil.rmtree(rl_scratch_dir)
     storage =  LazyMemmapStorage(cfg.algo.buffer_size, scratch_dir=rl_scratch_dir)
     online_rb = TensorDictPrioritizedReplayBuffer(
-        storage= storage, # on disk storage
+        storage=storage, # on disk storage
         alpha=alpha,
         beta=beta,
         eps=1e-6,  # Small epsilon added to priorities to prevent zero values
@@ -263,8 +263,6 @@ def main(cfg: ResidualTD3DexmgConfig):
         prefetch=cfg.algo.prefetch_batches,  # Add prefetching
         batch_size=online_batch_size,
     )
-    
-
 
     # Calculate buffer size for simplified approach (1 transition per frame pair)
     max_offline_transitions = None 

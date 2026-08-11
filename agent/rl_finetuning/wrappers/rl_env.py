@@ -30,7 +30,7 @@ class BasePolicyVecEnvWrapper:
         assert action_scaler is not None, "action_scaler is required for consistent normalization"
         assert state_standardizer is not None, "state_standardizer is required for consistent normalization"
 
-        self.env =env
+        self.env = env
         self.base_policy = base_policy
         self.action_scaler = action_scaler
         self.state_standardizer = state_standardizer
