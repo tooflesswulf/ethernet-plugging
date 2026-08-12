@@ -1,4 +1,42 @@
-import torch 
+import torch, numpy as np
+from PIL import Image
+from pathlib import Path
+from einops import rearrange
+
+
+
+
+def check_link( interface = "enx7cc2c6453f68"):
+    state = Path(f"/sys/class/net/{interface}/operstate").read_text().strip()
+    assert state in ['up', 'down'], 'a invalid link state is found: {state}'
+    return state
+
+
+class BasePolicy:
+    def __init__(self, base_policy, device='cuda'):
+        self.base_policy = base_policy
+        self.device = device
+        self.base_actions = []
+
+    def get_action(self, image, state):
+
+        # Get base action from base policy
+        if len( self.base_actions) == 0:
+            assert image.max() > 1, f"{image.max()}"
+            if isinstance(image, np.ndarray):
+                image = torch.from_numpy(image).float() 
+            if isinstance(state, np.ndarray):
+                state = torch.from_numpy(state).float() 
+            raw_obs = {'rgb': rearrange( image.unsqueeze(0).unsqueeze(0).to(self.device) / 255.0, 'B T H W C -> B T C H W'), 'state': state.unsqueeze(0).unsqueeze(0).to(self.device),}
+            with torch.no_grad():
+                self.base_actions = self.base_policy.predict_action(raw_obs).squeeze(0).cpu().numpy()
+        base_action = self.base_actions[0]
+        self.base_actions =  self.base_actions[1:] if len(self.base_actions) > 1 else []
+        return base_action
+
+    def reset(self):
+        self.base_actions = []
+
 
 class BasePolicyVecEnvWrapper:
     """
@@ -16,7 +54,11 @@ class BasePolicyVecEnvWrapper:
     def __init__(
         self,
         env,
+        iface,
         base_policy,
+        image_size,
+        lowdim_keys,
+        device='cuda'
   
     ):
         """
@@ -24,34 +66,51 @@ class BasePolicyVecEnvWrapper:
             env: Vectorized environment from create_vectorized_env
             base_policy: Base policy (e.g., ACTPolicy) to augment with residual actions
         """
-        self.env = env
-        self.base_policy = base_policy
+        self.env = env; self.iface = iface
+        self.base_policy = BasePolicy(base_policy, device=device)
+        self.device = device
+        self.image_size = image_size
+        self.lowdim_keys = lowdim_keys
+        self.task_stage = 0; self.link_state = 'down'
+        # iface parameters
+        control_freq = 20
+        self.control_freq = control_freq
+        self.control_dt = 1 / control_freq
 
-        # Get action dimension from the environment
-        self.action_dim = 7
+    def _process_obs(self, obs_dict):
+        rgb = np.array( Image.fromarray( obs_dict['image'] ).resize(self.image_size) )
+        state = np.concatenate([ obs_dict[k] if obs_dict[k].ndim == 2 else obs_dict[k][:, None] for k in self.lowdim_keys], -1)
+        assert False, f"{rgb.shape} {rgb.max()} {state.shape}"
+        return {
+            "observation.state" : state,
+             "observation.rgb"  : rgb
+        }
+
 
     def reset(self, **kwargs):
         """Reset environment and base policy."""
         # Reset the underlying environment
         self.env.reset()
-
         # Reset base policy (clear previously predicted actions)
         self.base_policy.reset()
-
+        raw_obs = self._process_obs( self.env.get_obs() )
         # Get base action from the base policy
         with torch.no_grad():
-            base_action = None
-
-        base_naction = self.action_scaler.scale(base_action)
-        raw_obs = None 
+            base_action = self.base_policy.get_action()
 
         # Augment observations with base action and apply state standardization
-        augmented_obs = self._augment_obs(raw_obs, base_naction)
+        augmented_obs = self._augment_obs(raw_obs, base_action)
 
         # Store for later use in step
         self._last_base_naction = base_naction
+        self.task_stage = 0; self.link_state = 'down' #  clear the task stage
 
         return augmented_obs, {}
+
+    def step_task_stage(self):
+        prev_state = self.linK_state; curr_state = check_link()
+        if prev_state != curr_state:
+            self.task_stage += 1; prev_state = curr_state
 
     def step(
         self, residual_naction: torch.Tensor
@@ -70,19 +129,13 @@ class BasePolicyVecEnvWrapper:
             info: Info dict
         """
         # Combine base and residual actions
-        # Residual action is already scaled inside the Actor class
-        # To ensure that we can use the same exploration for all dimensions,
-        # we use the normalized actions as the action space
-        # The normalized base action is stored as [-1, 1] in the replay buffer
-        # and the residual action is predicted as action_scale * [-1, 1]
         combined_naction = self._last_base_naction + residual_naction
+        # do we need clipping here?
 
-        # Unscale back to original action space for environment execution
-        env_action = self.action_scaler.unscale(combined_naction)
-
-        # Step the underlying vectorized environment
-        raw_obs = self.env.step(env_action)
-        reward, terminated, info = None, None, None # TODO
+        # Step the underlying environment
+        raw_obs = self._process_obs(self.env.step(combined_naction)); self.step_task_stage()
+        reward = self.task_stage
+        terminated = False if self.iface # use iface for this
 
         # Store the scaled action for replay buffer (already computed above)
         info["scaled_action"] = combined_naction
@@ -116,7 +169,6 @@ class BasePolicyVecEnvWrapper:
         # New way to do this is to just add the base action to the state under its own key
         augmented_obs = raw_obs.copy()
         augmented_obs["observation.base_action"] = base_naction
-        augmented_obs["observation.state"] = self.state_standardizer.standardize(augmented_obs["observation.state"])
 
         return augmented_obs
 

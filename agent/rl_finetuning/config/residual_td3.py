@@ -12,7 +12,7 @@ from agent.rl_finetuning.config.rlpd import ActorConfig, QAgentConfig, RLPDAlgoC
 class OfflineDataConfig:
     name: str = "cableflat-smallrouter"
     dir_path: str = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset'
-    num_episodes: int | None = 300
+    num_episodes: int | None = 3
     # Offline data action labeling options
     use_base_policy_for_base_actions: bool = True
     # Normalization safeguards

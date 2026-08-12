@@ -5,7 +5,7 @@
 from __future__ import annotations
 from PIL import Image
 from einops import rearrange
-import os, pprint, random, shutil, time, torch, numpy as np, wandb, hydra
+import os, pprint, random, shutil, time, torch, numpy as np, wandb, hydra, interface
 
 from omegaconf import OmegaConf
 from tensordict import TensorDict
@@ -130,9 +130,10 @@ def main(cfg: ResidualTD3DexmgConfig):
             gspeed=grip.grip_speed_mmps,
             gpullback=grip.grip_pullback_mm,
         )
+        iface = interface.DualSenseInterface( env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5. )
 
         # Wrap it with the base policy wrapper
-        return BasePolicyVecEnvWrapper(env=env, base_policy=base_policy)
+        return BasePolicyVecEnvWrapper(env=env, iface=iface, base_policy=base_policy, image_size = (img_h, img_w), lowdim_keys=lowdim_keys, device=device)
 
     # ---------------------------------------------------------------------
     # Seeding (must be done before environment creation) ------------------
@@ -349,15 +350,14 @@ def main(cfg: ResidualTD3DexmgConfig):
         )
 
         print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
-    assert False
-
+    
     # ------------------------------------------------------------------
     # Warm-up phase (random policy) --------------------------------------
     # ------------------------------------------------------------------
 
     if len(online_rb) < cfg.algo.learning_starts :
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
-        obs, _ = env.reset()
+        obs = env.reset()
         # --------------------------------------------------------------
         # Logging helper: print progress every 1 000 collected transitions
         # --------------------------------------------------------------
@@ -433,17 +433,17 @@ def main(cfg: ResidualTD3DexmgConfig):
     print("Launching run with the following config:")
     pprint.pprint(_wandb_config)
 
-    # wandb.init(
-    #     id=cfg.wandb.continue_run_id,
-    #     resume=None if cfg.wandb.continue_run_id is None else "allow",
-    #     project=cfg.wandb.project,
-    #     entity=cfg.wandb.entity,
-    #     config=_wandb_config,
-    #     name=run_name,
-    #     mode=cfg.wandb.mode if not cfg.debug else "disabled",
-    #     notes=cfg.wandb.notes,
-    #     group=cfg.wandb.group,
-    # )
+    wandb.init(
+        id=cfg.wandb.continue_run_id,
+        resume=None if cfg.wandb.continue_run_id is None else "allow",
+        project=cfg.wandb.project,
+        entity=cfg.wandb.entity,
+        config=_wandb_config,
+        name=run_name,
+        mode=cfg.wandb.mode if not cfg.debug else "disabled",
+        notes=cfg.wandb.notes,
+        group=cfg.wandb.group,
+    )
 
     obs, _ = env.reset()
 

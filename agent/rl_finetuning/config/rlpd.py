@@ -144,7 +144,7 @@ class RLPDAlgoConfig:
     # Training ---------------------------------------------------------------
     total_timesteps: int = 300_000
     batch_size: int = 256
-    buffer_size: int = 200_000
+    buffer_size: int = 100_000 # 200_000
     learning_starts: int = 10_000
 
     # Discounting / target updates ------------------------------------------
@@ -162,7 +162,7 @@ class RLPDAlgoConfig:
     # N-step returns ----------------------------------------------------
     # ------------------------------------------------------------------
     # Horizon used by the MultiStep transform in our replay buffers.
-    n_step: int = 3
+    n_step: int = 5 # 3
 
     # ------------------------------------------------------------------
     # Critic warmup phase ----------------------------------------------
