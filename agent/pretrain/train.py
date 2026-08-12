@@ -36,7 +36,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
     obs_fields = ['pose', 'gripper_width']
-    obs_horizon = 3
+    obs_horizon = 1
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                       cond_steps=obs_horizon, img_cond_steps=obs_horizon,
                                       predict_done=predict_done, end_signal_steps=end_signal_steps,
