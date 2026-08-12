@@ -14,8 +14,10 @@ separate threads at their own rates. The camera stream defines the timeline here
 sample per image, no resampling to a fixed framerate), and every other signal is
 zero-order held onto the camera timestamps -- for each image at time t, the most recent
 gripper/robot sample at or before t is used, which is the same rule
-`rawdata_to_dataset.py` uses. `gripper_dt` stores how stale that gripper sample was, so
-frames logged across a gap can be dropped downstream.
+`rawdata_to_dataset.py` uses. Frames whose nearest gripper sample is more than
+`--max-gripper-dt` away are dropped: the gripper log has occasional gaps, and a label
+extrapolated across one is not trustworthy. The staleness that survived the cut is kept
+per frame in `gripper_dt`.
 
 As in `concat_datasets.py`, images are linked into the output with HDF5 virtual datasets
 (one mapping per episode), so no image data is copied to disk -- only labels, the small
@@ -80,13 +82,25 @@ def zero_order_hold(src_times, src_values, query_times):
 @dataclass
 class EpisodeInfo:
     h5_path: pathlib.Path
-    n_frames: int
+    keep: np.ndarray          # indices of the source frames kept, (n_frames,), ascending
+    n_dropped: int            # source frames rejected for a stale gripper sample
     img_shape: tuple          # full shape of camera_obs/image_bgr, including the time axis
     img_dtype: np.dtype
     times: np.ndarray         # camera timestamps, (n_frames,)
     fields: dict              # resampled RESAMPLED_FIELDS, each (n_frames, ...)
     gripper_dt: np.ndarray    # staleness of the held gripper sample, (n_frames,)
     meta: dict
+
+    @property
+    def n_frames(self):
+        return len(self.keep)
+
+    def keep_runs(self):
+        """The kept frames as contiguous [start, stop) runs of source indices."""
+        if self.n_frames == 0:
+            return []
+        breaks = np.flatnonzero(np.diff(self.keep) != 1) + 1
+        return [(int(run[0]), int(run[-1]) + 1) for run in np.split(self.keep, breaks)]
 
 
 @dataclass
@@ -112,7 +126,7 @@ class SourceInfo:
         return np.concatenate([ep.fields['gripper_width'] for ep in self.episodes])
 
 
-def inspect_episode(h5_path: pathlib.Path, force_alpha: float) -> EpisodeInfo:
+def inspect_episode(h5_path: pathlib.Path, force_alpha: float, max_gripper_dt: float) -> EpisodeInfo:
     with h5py.File(h5_path, 'r') as f:
         img_shape = f[IMAGE_FIELD].shape
         img_dtype = f[IMAGE_FIELD].dtype
@@ -133,7 +147,14 @@ def inspect_episode(h5_path: pathlib.Path, force_alpha: float) -> EpisodeInfo:
 
     if img_shape[0] != len(cam_times):
         raise ValueError(f'{h5_path}: {img_shape[0]} images but {len(cam_times)} camera timestamps')
-    return EpisodeInfo(h5_path, img_shape[0], img_shape, img_dtype, cam_times, fields, gripper_dt, meta)
+
+    # Drop frames whose gripper sample is too far away in time to trust: the label would
+    # be extrapolated across a gap in the gripper log (or backwards, before its first
+    # sample), and the gripper may well have moved during it.
+    keep = np.flatnonzero(np.abs(gripper_dt) <= max_gripper_dt)
+    fields = {name: values[keep] for name, values in fields.items()}
+    return EpisodeInfo(h5_path, keep, img_shape[0] - len(keep), img_shape, img_dtype,
+                       cam_times[keep], fields, gripper_dt[keep], meta)
 
 
 def read_group(h5group: h5py.Group) -> dict:
@@ -149,7 +170,8 @@ def find_episodes(dataset_dir: pathlib.Path) -> list[pathlib.Path]:
             if p.is_dir() and p.name.startswith('episode')]
 
 
-def inspect_source(dataset_dir: str, ep_slice: slice, is_empty: bool, force_alpha: float) -> SourceInfo:
+def inspect_source(dataset_dir: str, ep_slice: slice, is_empty: bool,
+                   force_alpha: float, max_gripper_dt: float) -> SourceInfo:
     dataset_dir = pathlib.Path(dataset_dir).resolve()
     ep_paths = find_episodes(dataset_dir)
     if not ep_paths:
@@ -161,9 +183,11 @@ def inspect_source(dataset_dir: str, ep_slice: slice, is_empty: bool, force_alph
         if not h5_path.exists():
             print(f'Warning: skipping {h5_path.parent.name} -- no rawdata.h5 (episode never finished saving?)')
             continue
-        episode = inspect_episode(h5_path, force_alpha)
+        episode = inspect_episode(h5_path, force_alpha, max_gripper_dt)
         if episode.n_frames == 0:
-            print(f'Warning: skipping {h5_path.parent.name} -- no camera frames')
+            reason = ('every frame dropped for a stale gripper sample' if episode.n_dropped
+                      else 'no camera frames')
+            print(f'Warning: skipping {h5_path.parent.name} -- {reason}')
             continue
         episodes.append(episode)
 
@@ -217,8 +241,11 @@ def build_images_vds(out_f: h5py.File, episodes: list[EpisodeInfo]):
     offset = 0
     for ep in episodes:
         vsource = h5py.VirtualSource(str(ep.h5_path), IMAGE_FIELD, shape=ep.img_shape, dtype=dtype)
-        layout[offset:offset + ep.n_frames] = vsource
-        offset += ep.n_frames
+        # One mapping per contiguous run of kept frames -- filtering punches holes in
+        # otherwise-contiguous episodes.
+        for start, stop in ep.keep_runs():
+            layout[offset:offset + (stop - start)] = vsource[start:stop]
+            offset += stop - start
     ds = out_f.create_virtual_dataset('images', layout)
     ds.attrs['stored_as'] = 'image'
     ds.attrs['color_order'] = 'bgr'  # raw camera_obs/image_bgr, un-flipped by the virtual mapping
@@ -263,9 +290,10 @@ def build_grasp_dataset(sources: list[SourceInfo], out_dir: pathlib.Path, thresh
         for name in RESAMPLED_FIELDS:
             f.create_dataset(name, data=np.concatenate([ep.fields[name] for ep in episodes]))
         f.create_dataset('time', data=np.concatenate([ep.times for ep in episodes]))
+        f.create_dataset('frame_index', data=np.concatenate([ep.keep for ep in episodes]))
         ds = f.create_dataset('gripper_dt', data=np.concatenate([ep.gripper_dt for ep in episodes]))
         ds.attrs['meaning'] = ('seconds between an image and the gripper sample held onto it; '
-                               'large values mean the label is extrapolated across a logging gap')
+                               'frames where this exceeded --max-gripper-dt were dropped')
 
         ds = f.create_dataset('label', data=labels)
         ds.attrs['meaning'] = '1 = cable held between the gripper fingers, 0 = not'
@@ -324,6 +352,12 @@ if __name__ == '__main__':
     parser.add_argument('--gripper-thr', type=float, default=None,
                         help='gripper_width below which the cable counts as grasped. Default: midpoint '
                              'between the min and max gripper width over the successful demos.')
+    parser.add_argument('--max-gripper-dt', type=float, default=0.02,
+                        help='Drop frames whose held gripper sample is more than this many seconds away '
+                             'from the image. The gripper is polled at ~250 Hz, so a healthy hold is ~2 ms '
+                             'old; the 20 ms default is 5 poll periods, past which the gap is a stall in '
+                             'the logging thread and the label cannot be trusted. Pass 0 or inf to keep '
+                             'every frame (useful for seeing the full lag distribution first).')
     parser.add_argument('--force-alpha', type=float, default=0.03,
                         help='EWMA smoothing factor applied to the force before resampling, matching '
                              'rawdata_to_dataset.py. Pass 0 to keep the raw force.')
@@ -342,20 +376,25 @@ if __name__ == '__main__':
         parser.error(f'{out_h5} already exists; pass --force to overwrite')
 
     force_alpha = args.force_alpha if args.force_alpha > 0 else None
-    sources = [inspect_source(path, parse_episode_slice(spec), is_empty, force_alpha)
+    max_gripper_dt = args.max_gripper_dt if args.max_gripper_dt > 0 else np.inf
+    sources = [inspect_source(path, parse_episode_slice(spec), is_empty, force_alpha, max_gripper_dt)
                for (path, spec), is_empty in specs]
     labels = build_grasp_dataset(sources, out_dir, args.gripper_thr)
 
     n_pos = int(labels.sum())
+    n_dropped = sum(ep.n_dropped for s in sources for ep in s.episodes)
     print(f'Wrote {out_h5}')
+    limit = 'no gripper_dt limit' if np.isinf(max_gripper_dt) else f'|gripper_dt| > {max_gripper_dt}s'
     print(f'{sum(s.n_episodes for s in sources)} episodes, {len(labels)} images '
-          f'({n_pos} in-gripper, {len(labels) - n_pos} not):')
+          f'({n_pos} in-gripper, {len(labels) - n_pos} not); {n_dropped} frames dropped ({limit}):')
     offset = 0
     for ((path, spec), _), s in zip(specs, sources):
         kind = 'empty  ' if s.is_empty else 'success'
         pos = int(labels[offset:offset + s.n_steps].sum())
         offset += s.n_steps
-        dts = np.concatenate([ep.gripper_dt for ep in s.episodes]) if s.episodes else np.zeros(0)
-        stale = f'gripper lag med {np.median(dts) * 1e3:.0f} ms, max {dts.max() * 1e3:.0f} ms' if dts.size else 'no frames'
+        dts = np.abs(np.concatenate([ep.gripper_dt for ep in s.episodes])) if s.episodes else np.zeros(0)
+        stale = (f'gripper lag med {np.median(dts) * 1e3:.1f} ms, p99 {np.percentile(dts, 99) * 1e3:.1f} ms, '
+                 f'max {dts.max() * 1e3:.1f} ms' if dts.size else 'no frames')
         print(f'  [{kind}] {path} [{spec}] -> episodes {s.start_ep}:{s.stop_ep} '
-              f'({s.n_episodes} kept, {s.n_steps} images, {pos} in-gripper; {stale})')
+              f'({s.n_episodes} kept, {s.n_steps} images, {pos} in-gripper, '
+              f'{sum(ep.n_dropped for ep in s.episodes)} dropped; {stale})')
