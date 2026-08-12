@@ -1,0 +1,48 @@
+[2026-08-12 15:16:39,644][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-12 15:16:39,928][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-12 15:16:55,623][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 748, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 387, in main
+    next_obs, reward, terminated, info = env.step(rand_actions)
+                                         ~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/wrappers/rl_env.py", line 135, in step
+    assert False, f"{action2execute}"
+           ^^^^^
+AssertionError: [[-0.18490356  0.02634276  0.07371327 -0.16383938  0.09769812 -0.1078282
+   1.0480788  -0.898871  ]
+ [-0.18540412  0.02561766  0.07415871 -0.16343983  0.09904637 -0.10624857
+   1.0476658  -0.898871  ]
+ [-0.18547896  0.02485344  0.0735717  -0.16304731  0.10020532 -0.10424794
+   1.0474539  -0.89820445]
+ [-0.18575773  0.02361265  0.07357264 -0.16315842  0.10100073 -0.10194825
+   1.0479887  -0.8985459 ]
+ [-0.18568882  0.02393717  0.07339292 -0.16349415  0.10135972 -0.09932709
+   1.0475409  -0.89860827]
+ [-0.18607718  0.02216977  0.07340129 -0.16408874  0.10154042 -0.09682136
+   1.0458628  -0.898871  ]
+ [-0.1854254   0.02305392  0.07362054 -0.164914    0.10140011 -0.09432516
+   1.0474553  -0.898871  ]
+ [-0.18559548  0.02207214  0.07333758 -0.16576296  0.10133462 -0.09203722
+   1.0465974  -0.898871  ]
+ [-0.18603548  0.02120108  0.07372551 -0.16669998  0.10112491 -0.08980313
+   1.0470665  -0.898871  ]
+ [-0.18646815  0.02031306  0.07396006 -0.16756117  0.1009286  -0.08744104
+   1.0460422  -0.898871  ]
+ [-0.1867018   0.0189063   0.07363345 -0.16839135  0.10083747 -0.08509778
+   1.0477309  -0.898871  ]
+ [-0.18672603  0.0178074   0.07323013 -0.16920212  0.1007828  -0.082728
+   1.0458233  -0.898871  ]
+ [-0.18723541  0.01709101  0.0734049  -0.1700368   0.10062802 -0.08030277
+   1.0480788  -0.89880204]
+ [-0.18749255  0.01772196  0.07331657 -0.17069381  0.10042737 -0.07797927
+   1.0480788  -0.89878297]
+ [-0.18752539  0.0194358   0.07322224 -0.17168418  0.10032163 -0.07549512
+   1.0473839  -0.89752597]
+ [-0.18718165  0.02207244  0.07295977 -0.17252736  0.10036142 -0.0729508
+   1.0480788  -0.8979989 ]]

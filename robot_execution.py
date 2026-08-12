@@ -72,7 +72,7 @@ class RobotExecution:
         if act is None:
             return self.last_action
         if len(act) == 2:
-            return (URPose(*act[0]), int(round(act[1])), 0, False)
+            return (URPose(*act[0]), int(round(act[1])), False, 0)
         return (URPose(*act[0]), int(round(act[1])), bool(act[2]), act[3])
 
     def run(self):

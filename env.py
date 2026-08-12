@@ -148,6 +148,8 @@ class Env:
         self.save_eps = save_eps
         self.image_idx = 0
         self.metadata = metadata
+        self.camera = None
+        self.HOMING = False
 
     def wait_for_obs(self):
         while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
@@ -242,7 +244,8 @@ class Env:
                 thr.join()
             if self.dataset_path is not None:
                 self.save_data()
-        self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
+        if self.camera is None:
+            self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
 
         # ============================================================
         # Home / open gripper
@@ -396,34 +399,66 @@ class Env:
             # ----------------------------
             # blend + servo
             # ----------------------------
-            if self.last_step_t > 0:
-                # Received at least 1 input
-                des_pose = self.interpolate()
-            command = clamp(
-                actual_pose,
-                des_pose,
-                self.max_position_step,
-                self.max_orientation_step,
-            )
+            if not self.HOMING:
+                if self.last_step_t > 0:
+                    # Received at least 1 input
+                    des_pose = self.interpolate()
+                command = clamp(
+                    actual_pose,
+                    des_pose,
+                    self.max_position_step,
+                    self.max_orientation_step,
+                )
 
-            # ----------------------------
-            # adaptive z-force control
-            # ----------------------------
-            if self.adaptive_mode:
-                command = command._replace(z=self.zforce_pid(actual_pose, filtered_force))
+                # ----------------------------
+                # adaptive z-force control
+                # ----------------------------
+                if self.adaptive_mode:
+                    command = command._replace(z=self.zforce_pid(actual_pose, filtered_force))
+                else:
+                    self._prev_force_err = 0.
+
+                self.ctrl.servoL(
+                    command,
+                    0.0,
+                    0.0,
+                    self.dt,
+                    self.lookahead_time,
+                    self.servo_gain,
+                )
             else:
+                self.ctrl.servoStop() 
                 self._prev_force_err = 0.
-
-            self.ctrl.servoL(
-                command,
-                0.0,
-                0.0,
-                self.dt,
-                self.lookahead_time,
-                self.servo_gain,
-            )
-
+                self.last_step_t = -1
+               
             self.ctrl.waitPeriod(t_start)
+    def _homing(self):
+        print("Initiating homing sequence...")
+    
+        # 1. Signal the real-time loop to stop servoing and call servoStop()
+        self.HOMING = True
+        
+        # 2. Give the robot a brief moment to decelerate to a complete stop
+        time.sleep(1.0) 
+       
+        # ============================================================
+        g = self.gripper.move(position=self.open_width, speed=self.g_speed)
+        g.finished.wait()
+        self.gripper_state = GRIP_OPEN
+        self.gripper.set_pwt(20)
+
+        
+        # 3. Safely execute the blocking move command from this non-RT thread
+        print("Moving to home pose...")
+        self.ctrl.moveL(self.home_pose, speed=0.1, acceleration=0.05)
+        
+        # 4. Synchronize internal target positions with the new physical position
+        self.des_pose = self.home_pose
+        
+        # 5. Clear the flag to resume standard real-time servoing seamlessly
+        print("Homing complete. Resuming control loop.")
+        self.HOMING = False
+        time.sleep(2)
 
     def _camera_loop(self):
         while not self.stop_flag:

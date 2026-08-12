@@ -1,4 +1,4 @@
-from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
+from agent.evaluate.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import get_actions, build_states, wait_for_circle
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
@@ -77,7 +77,6 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
                 t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end])
             obs_state = build_states(obs_deque, self.policy.obs_fields)  # for offline logging
             self.buffer.dolog(chnk, obs_state, time.time())
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Evaluation.')

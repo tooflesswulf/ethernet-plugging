@@ -1,0 +1,19 @@
+[2026-08-12 14:45:41,822][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-12 14:45:42,119][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-12 14:45:57,482][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 749, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 360, in main
+    obs = env.reset()
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/wrappers/rl_env.py", line 90, in reset
+    raw_obs = self._process_obs( self.env.get_obs() )
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/wrappers/rl_env.py", line 74, in _process_obs
+    assert False, f"{self.lowdim_keys} \n {obs_dict['state']}"
+           ^^^^^
+AssertionError: ['pose', 'gripper_width'] 
+ {'actual_pose': URPose(x=-0.12498906012045435, y=0.5450009450179235, z=0.30498437679497636, rx=-1.9254720316881193, ry=-1.9253903399841912, rz=-0.5152669209080349), 'actual_force': URPose(x=-0.051580599957248265, y=0.4294179415438625, z=0.709796024285706, rx=-0.013565108598980113, ry=-0.005429192495887199, rz=0.00044900613880192227), 'filtered_force': URPose(x=np.float64(-0.006688700543813809), y=np.float64(0.08757804956613556), z=np.float64(0.08419611872586391), rx=np.float64(-0.0028201922550912637), ry=np.float64(-7.212354474522815e-05), rz=np.float64(-0.0006341018680090823)), 'gripper_width': 30.06, 'gripper_force': 0.76}

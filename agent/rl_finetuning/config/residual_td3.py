@@ -49,7 +49,7 @@ class ResidualTD3AlgoConfig(RLPDAlgoConfig):
     # ------------------------------------------------------------------
     # Scale for random action noise during initial exploration phase
     # Actions are sampled as: rand_actions = torch.rand(...) * 2 * random_action_noise_scale - random_action_noise_scale
-    random_action_noise_scale: float = 0.2  # Default: uniform in [-1, 1]
+    random_action_noise_scale: float = 0.02  # Default: uniform in [-1, 1]
 
     # Whether to use base policy + noise (True) or pure uniform noise (False) during warmup
     # Note: Environment wrapper always applies base_action + residual_action

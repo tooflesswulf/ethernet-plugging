@@ -1,0 +1,121 @@
+seed: 0
+torch_deterministic: false
+debug: true
+task: Net
+num_envs: 1
+eval_num_envs: 1
+eval_num_episodes: 50
+headless: true
+video_key: observation.images.agentview
+rl_camera:
+- observation.images.agentview
+- observation.images.robot0_eye_in_hand
+algo:
+  total_timesteps: 300000
+  batch_size: 256
+  buffer_size: 100000
+  learning_starts: 10000
+  gamma: 0.99
+  num_updates_per_iteration: 4
+  actor_updates_per_iteration: 1
+  update_every_n_steps: 1
+  offline_fraction: 0.5
+  n_step: 5
+  critic_warmup_steps: 10000
+  actor_lr_warmup_steps: 0
+  random_action_noise_scale: 0.2
+  sampling_strategy: uniform
+  prefetch_batches: 4
+  priority_alpha: 0.6
+  priority_beta: 0.4
+  stddev_max: 0.05
+  stddev_min: 0.05
+  stddev_step: 300000
+  stddev_schedule: linear(0.05,0.05,300000)
+  use_base_policy_for_warmup: true
+  progressive_clipping_steps: 0
+agent:
+  device: cuda
+  actor_lr: 1.0e-06
+  critic_lr: 0.0001
+  critic_target_tau: 0.005
+  stddev_clip: 0.3
+  lr_warmup_steps: 0
+  lr_warmup_start: 1.0e-08
+  use_prop: 1
+  enc_type: vit
+  vit:
+    depth: 1
+    embed_dim: 128
+    embed_norm: 0
+    embed_style: embed2
+    num_heads: 4
+    patch_size: 8
+    stride: -1
+  critic:
+    drop: 0.0
+    feature_dim: 128
+    fuse_patch: 1
+    hidden_dim: 1024
+    norm_weight: 0
+    orth: 1
+    spatial_emb: 1024
+    num_q: 10
+    loss:
+      type: mse
+      n_bins: 51
+      v_min: 0.0
+      v_max: 1.0
+      sigma: -1.0
+    policy_gradient_type: ensemble_mean
+    num_layers: 2
+    use_layer_norm: true
+    min_q_heads: 2
+  actor:
+    feature_dim: 128
+    hidden_dim: 1024
+    dropout: 0.0
+    orth: 1
+    max_action_norm: -1.0
+    spatial_emb: 0
+    actor_last_layer_init_scale: 0.0
+    actor_last_layer_init_distribution: normal
+    actor_intermediate_layer_init_distribution: default
+    action_l2_reg_weight: 0.0
+    action_scale: 0.1
+    num_layers: 2
+    use_layer_norm: true
+  critic_grad_clip_norm: 1.0
+  actor_grad_clip_norm: 1.0
+  bc_loss_coef: 0.0
+  bc_loss_dynamic: 0
+  bc_backprop_encoder: false
+  freeze_encoder: false
+  clip_q_target_to_reward_range: false
+  target_action_noise: true
+offline_data:
+  name: cableflat-smallrouter
+  dir_path: /home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset
+  num_episodes: 300
+  use_base_policy_for_base_actions: true
+  min_action_range: 0.1
+  min_state_std: 0.1
+wandb:
+  project: robomimic-net-residual-td3
+  mode: online
+  entity: null
+  notes: null
+  continue_run_id: null
+  name: null
+  group: null
+log_freq: 100
+eval_interval_every_steps: 10000
+checkpoint_interval: -1
+save_video: true
+eval_first: true
+actor_name: null
+base_policy:
+  wandb_id: todo
+  wt_type: best
+  wt_version: latest
+  ckpt: /home/atkesonlab4/Desktop/YiqiProject/100%_Project/ckpts/c2r2-50-pose/ckpt_final.pth

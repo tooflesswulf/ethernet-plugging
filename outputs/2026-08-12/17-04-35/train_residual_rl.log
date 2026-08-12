@@ -1,0 +1,21 @@
+[2026-08-12 17:04:37,284][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-12 17:04:37,566][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-12 17:04:53,838][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 750, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 387, in main
+    next_obs, reward, terminated, info = env.step(rand_actions)
+                                         ~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/wrappers/rl_env.py", line 189, in step
+    terminated = False if self.iface.update(self.control_dt) != -1 else True # use iface for this
+                          ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/interface.py", line 49, in update
+    assert False, f"{act}"
+           ^^^^^
+AssertionError: {'right_abs': array([ 0.46146764, -0.01651817,  0.10400566,  2.18503189,  2.12198949,
+        0.11822652]), 'right_delta': array([ 0.,  0.,  0.,  0.,  0., -0.]), 'right_gripper': False, 'toggle_zforce': False}

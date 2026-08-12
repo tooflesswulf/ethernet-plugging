@@ -111,13 +111,13 @@ def main(cfg: ResidualTD3DexmgConfig):
     print("#"*20)
     offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
     offline_episodes, ep_states, ep_actions, total_transitions = get_dataset(offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
-   
+    grip = GripperStats(*base_policy.grip_stats)
     def get_envs(
         base_policy,
     ):
        
         # Create the vectorized environment
-        grip = GripperStats(*base_policy.grip_stats)
+        
         env = Env(
             robot_ip="192.168.0.100",
             gripper_ip="192.168.0.20",
@@ -130,10 +130,10 @@ def main(cfg: ResidualTD3DexmgConfig):
             gspeed=grip.grip_speed_mmps,
             gpullback=grip.grip_pullback_mm,
         )
-        iface = interface.DualSenseInterface( env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5. )
+        
 
         # Wrap it with the base policy wrapper
-        return BasePolicyVecEnvWrapper(env=env, iface=iface, base_policy=base_policy, image_size = (img_h, img_w), lowdim_keys=lowdim_keys, device=device)
+        return BasePolicyVecEnvWrapper(env=env,  base_policy=base_policy, image_size = (img_h, img_w), lowdim_keys=lowdim_keys, device=device)
 
     # ---------------------------------------------------------------------
     # Seeding (must be done before environment creation) ------------------
@@ -383,28 +383,27 @@ def main(cfg: ResidualTD3DexmgConfig):
                     torch.rand((cfg.num_envs, action_dim), device=device) * 2 - 1
                 ) * cfg.algo.random_action_noise_scale
                 rand_actions = pure_random - base_action
-
+            print('Debugging gripper:', env.env.des_gripper_state)
             next_obs, reward, terminated, info = env.step(rand_actions)
             done = terminated 
 
-            reward_sum += reward.sum().item()
-            episode_count += done.float().sum().item()
+            reward_sum += reward
+            episode_count += int( done )
 
             # Use the executed combined action returned by the environment
             combined_action = info["scaled_action"]
-            _add_transitions_to_buffer(
-                obs=obs,
-                next_obs=next_obs,
-                actions=combined_action,
-                reward=reward,
-                done=done,
-                info=info,
-                device=device,
-                image_keys=image_keys,
-                lowdim_keys=lowdim_keys,
-                num_envs=cfg.num_envs,
-                online_rb=online_rb,
-            )
+            # _add_transitions_to_buffer(
+            #     obs=obs,
+            #     next_obs=next_obs,
+            #     actions=combined_action,
+            #     reward=reward,
+            #     done=done,
+            #     info=info,
+            #     device=device,
+            #     lowdim_keys=lowdim_keys,
+            #     num_envs=cfg.num_envs,
+            #     online_rb=online_rb,
+            # )
 
             # ----------------------------------------------------------
             # Progress logging (every ~1 000 transitions) --------------
@@ -419,6 +418,12 @@ def main(cfg: ResidualTD3DexmgConfig):
                 next_log_threshold += 1000
 
             obs = next_obs  # roll state
+            if terminated:
+                env.env.des_gripper_state = 0
+                env.env._homing()
+                time.sleep(3)
+                obs, _ = env.reset()
+                
 
     run_name = f"seed{cfg.seed}"
     if cfg.wandb.name is not None:
@@ -523,7 +528,7 @@ def main(cfg: ResidualTD3DexmgConfig):
             offline_batch_size=offline_batch_size,
         )
         print("Critic warmup completed.")
-
+    assert False
     while global_step <= cfg.algo.total_timesteps:
         iter_start = time.time()
         # ------------------------------------------------------------------
