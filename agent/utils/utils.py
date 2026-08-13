@@ -179,11 +179,26 @@ def get_pose_action(poses, action_mode):
     else:
         raise ValueError(f"Invalid action_mode: {action_mode}")
 
+def find_chunks(arr):
+
+  segments = []
+  start = 0
+  current_val = arr[0]
+
+  for i in range(1, len(arr)):
+    if arr[i] != current_val:
+      segments.append((start, i - 1, current_val))
+      start = i
+      current_val = arr[i]
+
+  segments.append((start, len(arr) - 1, current_val))
+  return segments
+
 def get_dataset(dataset_path, lowdim_keys, action_mode, num_episodes, g_thr=18):
     # return individual episode path, and total count of transitions
     episode_names = sorted( os.listdir(dataset_path), key = lambda x: int(x.replace('episode', '')) )[:num_episodes]
     total_transitions = 0
-    episode_paths, states, actions = [], [], []
+    episode_paths, states, actions, rewards = [], [], [], []
     for episode_name in episode_names:
         episode_path = os.path.join(dataset_path, episode_name)
         episode_paths.append(episode_path)
@@ -191,8 +206,14 @@ def get_dataset(dataset_path, lowdim_keys, action_mode, num_episodes, g_thr=18):
         loaded = np.load(os.path.join( episode_path, 'states.npz'))
         state =  np.concatenate( [ loaded[k] if loaded[k].ndim == 2 else loaded[k][:, None] for k in lowdim_keys    ] , -1)
         pose_action = get_pose_action(loaded['pose'], action_mode); g_action = gripper_action(loaded['gripper_width'], threshold=g_thr)
+        g_action_flatten = g_action.flatten()
+        chunks = find_chunks(g_action_flatten)
+        phase1 = chunks[1][1]-30; phase2 = chunks[2][1] + 10
+        assert len(chunks) == 5 and chunks[2][-1] == 1, f"Check 5 segments: approah, pick-and-transport-plugin, release-to-unplug, unplug-place, release "
         action = np.concatenate([pose_action, g_action ], -1)
-        states.append(state); actions.append(action); total_transitions += len(action)
+        reward = np.zeros((len(action)))
+        reward[phase1:phase2] = 1.0; reward[phase2:] = 2.0
+        states.append(state); actions.append(action); rewards.append(reward); total_transitions += len(action)
     print('Loaded episode count:', len(episode_paths), '\tTotal transitions:', total_transitions)
-    return episode_paths, states, actions, total_transitions
+    return episode_paths, states, actions, rewards, total_transitions
     

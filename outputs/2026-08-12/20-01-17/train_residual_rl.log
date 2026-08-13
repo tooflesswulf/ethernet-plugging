@@ -1,0 +1,27 @@
+[2026-08-12 20:01:19,793][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-12 20:01:20,078][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-12 20:01:38,505][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 754, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 393, in main
+    _add_transitions_to_buffer(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        obs=obs,
+        ^^^^^^^^
+    ...<8 lines>...
+        online_rb=online_rb,
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 59, in _add_transitions_to_buffer
+    assert False, F"{actions}\n{done}\n{reward}"
+           ^^^^^
+AssertionError: tensor([[-0.1241,  0.5511,  0.3013, -1.9276, -1.9275, -0.5128,  0.0000,  0.0000]],
+       dtype=torch.float64)
+False
+1

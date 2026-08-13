@@ -34,7 +34,7 @@ def _add_transitions_to_buffer(
     done: torch.Tensor,
     info: dict,
     device: torch.device,
-    image_keys: list[str],
+   
     lowdim_keys: list[str],
     num_envs: int,
     online_rb: TensorDictPrioritizedReplayBuffer,
@@ -43,41 +43,39 @@ def _add_transitions_to_buffer(
 
     Handles terminal observations correctly and convert images to uint8 for storage.
     """
-    obs_keys_set = set(image_keys) | set(lowdim_keys)
-    for i in range(num_envs):
-        # Handle terminal observation (same logic as main loop)
-        if done[i] and "final_obs" in info and info["final_obs"][i] is not None:
-            final_obs_dict = info["final_obs"][i]
-            next_obs_i = {k: torch.as_tensor(v, device=device) for k, v in final_obs_dict.items()}
-        else:
-            next_obs_i = {k: v[i] for k, v in next_obs.items()}
+    obs_keys_set = ['observation.base_action', 'observation.rgb', 'observation.state']
 
-        curr_obs_i = {k: v[i] for k, v in obs.items()}
+    # Keep only relevant keys & convert images to uint8 for storage
+    curr_obs_i = {k: v for k, v in obs.items() if k in obs_keys_set}
+    next_obs_i = {k: v  for k, v in next_obs.items() if k in obs_keys_set}
+    to_uint8(curr_obs_i, ['observation.rgb'])
+    to_uint8(next_obs_i, ['observation.rgb'])
+    for k in obs_keys_set:
+        curr_v, next_v = curr_obs_i[k], next_obs_i[k]
 
-        # Keep only relevant keys & convert images to uint8 for storage
-        curr_obs_i = {k: v for k, v in curr_obs_i.items() if k in obs_keys_set}
-        next_obs_i = {k: v for k, v in next_obs_i.items() if k in obs_keys_set}
-        to_uint8(curr_obs_i, image_keys)
-        to_uint8(next_obs_i, image_keys)
+        if not isinstance(curr_v, torch.Tensor):
+            curr_obs_i[k] =  torch.tensor(curr_v)
+        if not isinstance(next_v, torch.Tensor):
+            next_obs_i[k] =  torch.tensor(next_v)
 
-        td = TensorDict(
-            {
-                "obs": TensorDict(curr_obs_i, batch_size=[]),
-                "next": TensorDict(
-                    {
-                        "obs": TensorDict(next_obs_i, batch_size=[]),
-                        "done": done[i],
-                        "reward": reward[i],
-                    },
-                    batch_size=[],
-                ),
-                "action": actions[i],
-                "_priority": torch.tensor(10.0, dtype=torch.float32),  # High initial priority for new samples
-            },
-            batch_size=[],
-        ).unsqueeze(0)
+    td = TensorDict(
+        {
+            "obs": TensorDict(curr_obs_i, batch_size=[]),
+            "next": TensorDict(
+                {
+                    "obs": TensorDict(next_obs_i, batch_size=[]),
+                    "done": torch.tensor(done, dtype=torch.bool),
+                    "reward": torch.tensor(reward, dtype=torch.float32),
+                },
+                batch_size=[],
+            ),
+            "action": actions.squeeze(0),
+            "_priority": torch.tensor(10.0, dtype=torch.float32),  # High initial priority for new samples
+        },
+        batch_size=[],
+    ).unsqueeze(0)
 
-        online_rb.add(td)
+    online_rb.add(td)
 
 
 # -----------------------------------------------------------------------------
@@ -110,7 +108,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     print('No Normalization is done to the dataset!!!!!')
     print("#"*20)
     offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
-    offline_episodes, ep_states, ep_actions, total_transitions = get_dataset(offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
+    offline_episodes, ep_states, ep_actions, ep_rewards, total_transitions = get_dataset(offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
     grip = GripperStats(*base_policy.grip_stats)
     def get_envs(
         base_policy,
@@ -234,6 +232,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         ep_paths,
         ep_states,
         ep_actions,
+        ep_rewards,
         rb: ReplayBuffer,
         use_base_policy_for_base_actions: bool = False,
         base_policy = None,
@@ -263,11 +262,11 @@ def main(cfg: ResidualTD3DexmgConfig):
         episode_cache: dict[int, dict] = {}; transitions = 0; step_id = 0
 
         for ep_idx, ep_path in enumerate(tqdm(ep_paths, desc="Processing offline dataset") ):
-            ep_image_dir = os.path.join(ep_path, 'images'); ep_state = torch.tensor( ep_states[ep_idx]).float(); ep_action = torch.tensor( ep_actions[ep_idx] ).float()
+            ep_image_dir = os.path.join(ep_path, 'images'); ep_state = torch.tensor( ep_states[ep_idx]).float(); ep_action = torch.tensor( ep_actions[ep_idx] ).float(); ep_reward =  torch.tensor( ep_rewards[ep_idx] ).float()
             images = torch.tensor( np.array( [ Image.open( os.path.join(ep_image_dir, n) ).resize((img_h, img_w)) for n in sorted(os.listdir(ep_image_dir), key = lambda x: int( x.replace('.png', '')) ) ] ) ).float()
             assert len(images) == len(ep_state)
             base_actions = None
-            for step, (image, state, action) in enumerate(zip(images, ep_state, ep_action)):
+            for step, (image, state, action, reward) in enumerate(zip(images, ep_state, ep_action, ep_reward)):
                
                 # ------------------------------------------------------------------
                 # Build observation and action directly for replay buffer ----------
@@ -303,6 +302,7 @@ def main(cfg: ResidualTD3DexmgConfig):
                     # Create transitions for each combination of prev and current variants
                     prev_obs = episode_cache[ep_idx]["obs"]
                     prev_action_scaled = episode_cache[ep_idx]["action"]
+
                     transition = TensorDict(
                         {
                             "obs": TensorDict(prev_obs, batch_size=[]),
@@ -311,7 +311,7 @@ def main(cfg: ResidualTD3DexmgConfig):
                                 {
                                     "obs": TensorDict(curr_obs, batch_size=[]),
                                     "done": torch.tensor(done_flag, dtype=torch.bool),
-                                    "reward": torch.tensor(float(done_flag), dtype=torch.float32),
+                                    "reward": torch.tensor(reward, dtype=torch.float32),
                                 },
                                 batch_size=[],
                             ),
@@ -343,7 +343,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     added = 0
     if cfg.algo.offline_fraction > 0.0:
         added = _populate_offline_buffer(
-            offline_episodes, ep_states, ep_actions,
+            offline_episodes, ep_states, ep_actions, ep_rewards,
             rb=offline_rb,
             use_base_policy_for_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
             base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
@@ -357,7 +357,7 @@ def main(cfg: ResidualTD3DexmgConfig):
 
     if len(online_rb) < cfg.algo.learning_starts :
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
-        obs = env.reset()
+        obs, _ = env.reset()
         # --------------------------------------------------------------
         # Logging helper: print progress every 1 000 collected transitions
         # --------------------------------------------------------------
@@ -383,8 +383,9 @@ def main(cfg: ResidualTD3DexmgConfig):
                     torch.rand((cfg.num_envs, action_dim), device=device) * 2 - 1
                 ) * cfg.algo.random_action_noise_scale
                 rand_actions = pure_random - base_action
-            print('Debugging gripper:', env.env.des_gripper_state)
+            
             next_obs, reward, terminated, info = env.step(rand_actions)
+          
             done = terminated 
 
             reward_sum += reward
@@ -392,18 +393,18 @@ def main(cfg: ResidualTD3DexmgConfig):
 
             # Use the executed combined action returned by the environment
             combined_action = info["scaled_action"]
-            # _add_transitions_to_buffer(
-            #     obs=obs,
-            #     next_obs=next_obs,
-            #     actions=combined_action,
-            #     reward=reward,
-            #     done=done,
-            #     info=info,
-            #     device=device,
-            #     lowdim_keys=lowdim_keys,
-            #     num_envs=cfg.num_envs,
-            #     online_rb=online_rb,
-            # )
+            _add_transitions_to_buffer(
+                obs=obs,
+                next_obs=next_obs,
+                actions=combined_action,
+                reward=reward,
+                done=done,
+                info=info,
+                device=device,
+                lowdim_keys=lowdim_keys,
+                num_envs=cfg.num_envs,
+                online_rb=online_rb,
+            )
 
             # ----------------------------------------------------------
             # Progress logging (every ~1 000 transitions) --------------
@@ -419,12 +420,20 @@ def main(cfg: ResidualTD3DexmgConfig):
 
             obs = next_obs  # roll state
             if terminated:
+                # env.env.des_gripper_state = 0
+                # env.env._homing()
+                print('Gripper before reset:', env.env.des_gripper_state, env.env.gripper_state)
+                env.env.reset(env.env.home_pose) 
+                print('env.env.reset')
+                # hardcode to cancelout previous behavior
                 env.env.des_gripper_state = 0
-                env.env._homing()
-                time.sleep(3)
+                env.env.start()
+                print('env.env.start')
+                time.sleep(2)
                 obs, _ = env.reset()
                 
-
+                print('Gripper after reset:', env.env.des_gripper_state, env.env.gripper_state)
+               
     run_name = f"seed{cfg.seed}"
     if cfg.wandb.name is not None:
         run_name = f"{cfg.wandb.name}__{run_name}"

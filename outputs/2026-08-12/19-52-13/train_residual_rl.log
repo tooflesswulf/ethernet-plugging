@@ -1,0 +1,18 @@
+[2026-08-12 19:52:15,852][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-12 19:52:16,126][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-12 19:52:34,472][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 754, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 358, in main
+    obs, _ = env.reset()
+             ~~~~~~~~~^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/wrappers/rl_env.py", line 136, in reset
+    assert False, f"{base_dpose}\n{gripper}"
+           ^^^^^
+AssertionError: [-0.12411548  0.55020994  0.30231753 -1.92733165 -1.92714785 -0.51290644]
+0.0

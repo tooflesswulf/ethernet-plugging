@@ -357,49 +357,49 @@ class Env:
         self._zero_ft_request = True
 
     def _control_loop(self):
-        while not self.stop_flag:
-            t_start = self.ctrl.initPeriod()
-            if self._zero_ft_request:
-                self.ctrl.zeroFtSensor()
-                self._zero_ft_request = False
-            actual_pose = URPose(*self.recv.getActualTCPPose())
-            actual_force = URPose(*self.recv.getActualTCPForce())
-            filtered_force = URPose(*self.filter_force(actual_force))
-            self.robot_obs.append(RobotObs(time=time.time() - self.t0,
-                                  actual_pose=actual_pose, actual_force=actual_force,
-                                  filtered_force=filtered_force))
+        try:
+            while not self.stop_flag:
+                t_start = self.ctrl.initPeriod()
+                if self._zero_ft_request:
+                    self.ctrl.zeroFtSensor()
+                    self._zero_ft_request = False
+                actual_pose = URPose(*self.recv.getActualTCPPose())
+                actual_force = URPose(*self.recv.getActualTCPForce())
+                filtered_force = URPose(*self.filter_force(actual_force))
+                self.robot_obs.append(RobotObs(time=time.time() - self.t0,
+                                    actual_pose=actual_pose, actual_force=actual_force,
+                                    filtered_force=filtered_force))
 
-            des_pose = self.des_pose
-            des_gripper_state = self.des_gripper_state
-            gripper_state = self.gripper_state
+                des_pose = self.des_pose
+                des_gripper_state = self.des_gripper_state
+                gripper_state = self.gripper_state
 
-            # ----------------------------
-            # gripper logic (non-blocking preferred)
-            # ----------------------------
-            if gripper_state != GRIP_MOVING and gripper_state != des_gripper_state:
-                self.gripper_state = GRIP_MOVING
-                if gripper_state == GRIP_OPEN:
-                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
-                        .finished.then(lambda _: self._set_gripstate(GRIP_CLOSED)) \
-                        .catch(lambda e: (
-                            self._set_gripstate(GRIP_CLOSED),
-                            print(f'Gripper GRIP failed: {e}'),
-                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                # ----------------------------
+                # gripper logic (non-blocking preferred)
+                # ----------------------------
+                if gripper_state != GRIP_MOVING and gripper_state != des_gripper_state:
+                    self.gripper_state = GRIP_MOVING
+                    if gripper_state == GRIP_OPEN:
+                        self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
+                            .finished.then(lambda _: self._set_gripstate(GRIP_CLOSED)) \
+                            .catch(lambda e: (
+                                self._set_gripstate(GRIP_CLOSED),
+                                print(f'Gripper GRIP failed: {e}'),
+                                print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                                ))
+                    else:
+                        cur_width = self.gripper_obs[-1].gripper_width
+                        self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
+                            .finished.then(lambda _: self._set_gripstate(GRIP_OPEN)) \
+                            .catch(lambda e: (
+                                self._set_gripstate(GRIP_OPEN),
+                                print(f'Gripper RELEASE failed: {e}'),
+                                print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
                             ))
-                else:
-                    cur_width = self.gripper_obs[-1].gripper_width
-                    self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
-                        .finished.then(lambda _: self._set_gripstate(GRIP_OPEN)) \
-                        .catch(lambda e: (
-                            self._set_gripstate(GRIP_OPEN),
-                            print(f'Gripper RELEASE failed: {e}'),
-                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
-                        ))
 
-            # ----------------------------
-            # blend + servo
-            # ----------------------------
-            if not self.HOMING:
+                # ----------------------------
+                # blend + servo
+                # ----------------------------
                 if self.last_step_t > 0:
                     # Received at least 1 input
                     des_pose = self.interpolate()
@@ -426,12 +426,16 @@ class Env:
                     self.lookahead_time,
                     self.servo_gain,
                 )
-            else:
-                self.ctrl.servoStop() 
-                self._prev_force_err = 0.
-                self.last_step_t = -1
-               
-            self.ctrl.waitPeriod(t_start)
+                
+                  
+                self.ctrl.waitPeriod(t_start)
+        finally:
+            # VERY IMPORTANT: leave servo mode cleanly
+            try:
+                self.ctrl.servoStop()
+            except Exception as e:
+                print(f"servoStop during shutdown failed: {e}")
+                
     def _homing(self):
         print("Initiating homing sequence...")
     
@@ -447,7 +451,6 @@ class Env:
         self.gripper_state = GRIP_OPEN
         self.gripper.set_pwt(20)
 
-        
         # 3. Safely execute the blocking move command from this non-RT thread
         print("Moving to home pose...")
         self.ctrl.moveL(self.home_pose, speed=0.1, acceleration=0.05)

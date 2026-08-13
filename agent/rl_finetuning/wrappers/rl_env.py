@@ -95,7 +95,7 @@ class BasePolicyVecEnvWrapper:
         self.device = device
         self.image_size = image_size
         self.lowdim_keys = lowdim_keys
-        self.task_stage = 0; self.link_state = False
+        self.task_stage = 0; self.link_state = None
         # iface parameters
         control_freq = 20
         self.control_freq = control_freq
@@ -132,24 +132,22 @@ class BasePolicyVecEnvWrapper:
         # Get base action from the base policy
         with torch.no_grad():
             base_action = self.base_policy.get_base_action()
-
+            base_dpose, gripper, done = base_action
+            base_action = torch.tensor( np.concatenate([base_dpose, np.array([gripper]), np.array([0])]) )
+           
         # Augment observations with base action and apply state standardization
         augmented_obs = self._augment_obs(raw_obs, base_action)
 
         # Store for later use in step
-        self._last_base_naction = base_action; self.task_stage = 0; self.link_state = 'down' #  clear the task stage
+        self._last_base_naction = base_action; self.task_stage = 0; self.link_state = None #  clear the task stage
 
         return augmented_obs, {}
 
     def step_task_stage(self, raw_obs):
-        prev_state = self.link_state; curr_state = raw_obs['network_status']
+        curr_state = raw_obs['network_status']
+        prev_state = curr_state if self.link_state is None else self.link_state
         if prev_state != curr_state:
-            self.task_stage += 1; prev_state = curr_state
-
-    def _action2execute(self, action):
-        assert False, f"{action.shape}"
-
-    times = []
+            self.task_stage += 1; self.link_state = curr_state
 
     def step(
         self, residual_naction: torch.Tensor
@@ -175,9 +173,9 @@ class BasePolicyVecEnvWrapper:
         gripper = int(round(gripper))
         info = {}
         residual_pose = residual_naction[0][:6]
-        # dpose = ( torch.tensor(base_dpose).to(residual_naction.device) + residual_pose ).cpu().numpy()
+        dpose = ( torch.tensor(base_dpose).to(residual_naction.device) + residual_pose ).cpu().numpy()
         dpose = base_dpose
-        combined_naction = torch.tensor( np.concatenate([dpose, np.array([gripper]), np.array([0])], -1) ).unsqueeze(0).to(self.device)
+        combined_naction = torch.tensor( np.concatenate([dpose, np.array([gripper]), np.array([0])], -1) )
         # do we need clipping here?
 
         # Step the underlying environment
@@ -193,7 +191,7 @@ class BasePolicyVecEnvWrapper:
         info["scaled_action"] = combined_naction
 
         # Augment observations with base action and apply state standardization
-        augmented_obs = self._augment_obs(raw_obs, base_action)
+        augmented_obs = self._augment_obs(raw_obs, combined_naction )
 
         self.env.wait_period()
         return augmented_obs, reward, terminated, info

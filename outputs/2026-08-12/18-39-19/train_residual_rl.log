@@ -1,0 +1,74 @@
+[2026-08-12 18:39:20,895][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-12 18:39:21,146][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-12 18:39:39,347][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 749, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 390, in main
+    _add_transitions_to_buffer(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        obs=obs,
+        ^^^^^^^^
+    ...<8 lines>...
+        online_rb=online_rb,
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 48, in _add_transitions_to_buffer
+    assert False, f"{obs}"
+           ^^^^^
+AssertionError: ({'observation.state': array([-0.1250052 ,  0.54500338,  0.30502563, -1.9254165 , -1.9253252 ,
+       -0.51529578, 29.99      ]), 'observation.rgb': array([[[249, 206, 184],
+        [249, 205, 183],
+        [245, 204, 182],
+        ...,
+        [ 80,  88, 100],
+        [ 82,  88, 103],
+        [ 82,  90, 102]],
+
+       [[250, 210, 183],
+        [248, 208, 182],
+        [246, 206, 181],
+        ...,
+        [ 81,  89, 101],
+        [ 80,  88, 101],
+        [ 81,  89, 101]],
+
+       [[250, 211, 184],
+        [246, 207, 180],
+        [241, 205, 180],
+        ...,
+        [ 79,  90, 101],
+        [ 80,  89, 100],
+        [ 79,  88,  99]],
+
+       ...,
+
+       [[ 64,  63,  67],
+        [ 62,  64,  69],
+        [ 58,  63,  68],
+        ...,
+        [ 34,  35,  32],
+        [ 33,  34,  31],
+        [ 34,  34,  31]],
+
+       [[ 64,  62,  61],
+        [ 64,  62,  61],
+        [ 60,  61,  60],
+        ...,
+        [ 33,  33,  30],
+        [ 35,  34,  31],
+        [ 35,  33,  30]],
+
+       [[ 64,  63,  60],
+        [ 65,  62,  59],
+        [ 63,  62,  59],
+        ...,
+        [ 34,  33,  30],
+        [ 35,  33,  30],
+        [ 37,  33,  30]]], shape=(128, 128, 3), dtype=uint8), 'network_status': False, 'observation.base_action': (array([-0.12530564,  0.54970442,  0.30164117, -1.92707869, -1.92699828,
+       -0.51361025]), 0.0, 0.0007049057004731771)}, {})

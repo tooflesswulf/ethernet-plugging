@@ -1,0 +1,48 @@
+[2026-08-12 19:50:02,330][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-12 19:50:02,594][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-12 19:50:21,082][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/tensordict/base.py", line 14309, in _validate_value_batchfree_devicefree
+    value = self._convert_to_tensor(value)
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/tensordict/base.py", line 14048, in _convert_to_tensor
+    array = np.asarray(array)
+ValueError: setting an array element with a sequence. The requested array has an inhomogeneous shape after 1 dimensions. The detected shape was (3,) + inhomogeneous part.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 754, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 393, in main
+    _add_transitions_to_buffer(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        obs=obs,
+        ^^^^^^^^
+    ...<8 lines>...
+        online_rb=online_rb,
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 62, in _add_transitions_to_buffer
+    "obs": TensorDict(curr_obs_i, batch_size=[]),
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/tensordict/_td.py", line 331, in __init__
+    _tensordict[key] = _validate_value(
+                       ~~~~~~~~~~~~~~~^
+        _tensordict[key],
+        ^^^^^^^^^^^^^^^^^
+        check_shape=True,
+        ^^^^^^^^^^^^^^^^^
+        non_blocking=sub_non_blocking,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/tensordict/base.py", line 14311, in _validate_value_batchfree_devicefree
+    raise ValueError(
+    ...<2 lines>...
+    ) from err
+ValueError: TensorDict conversion only supports tensorclasses, tensordicts, numeric scalars and tensors. Got <class 'tuple'>
