@@ -1,0 +1,79 @@
+[2026-08-13 09:08:43,040][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-13 09:08:43,330][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-13 09:09:09,623][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 760, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 527, in main
+    _run_critic_warmup(
+    ~~~~~~~~~~~~~~~~~~^
+        agent=agent,
+        ^^^^^^^^^^^^
+    ...<5 lines>...
+        offline_batch_size=offline_batch_size,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 488, in _run_critic_warmup
+    metrics = agent.update(batch, stddev=0.0, update_actor=False, )
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/off_policy/rl/q_agent.py", line 467, in update
+    assert False, f"{discount} {next_nonterminal}"
+           ^^^^^
+AssertionError: tensor([0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9801, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510, 0.9510,
+        0.9510, 0.9510, 0.9510, 0.9510], device='cuda:0') tensor([ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True, False,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+         True,  True,  True,  True,  True,  True], device='cuda:0')

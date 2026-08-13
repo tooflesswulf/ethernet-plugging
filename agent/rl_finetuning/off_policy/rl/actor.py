@@ -162,9 +162,9 @@ class Actor(nn.Module):
             if self.residual_actor:
                 # The residual actor takes the base action as input alongside the state
                 all_input.append(obs["observation.base_action"])
-
+       
         policy_input = torch.cat(all_input, dim=-1)
-
+       
         mu: torch.Tensor = self.policy(policy_input)
 
         # Scale the mean by action_scale

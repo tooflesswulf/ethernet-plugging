@@ -1,0 +1,40 @@
+[2026-08-13 09:05:35,058][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-13 09:05:35,350][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-13 09:06:01,848][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 761, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 528, in main
+    _run_critic_warmup(
+    ~~~~~~~~~~~~~~~~~~^
+        agent=agent,
+        ^^^^^^^^^^^^
+    ...<5 lines>...
+        offline_batch_size=offline_batch_size,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 489, in _run_critic_warmup
+    metrics = agent.update(batch, stddev=0.0, update_actor=False, )
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/off_policy/rl/q_agent.py", line 482, in update
+    critic_metric = self.update_critic(
+        obs=obs,
+    ...<5 lines>...
+        importance_weights=importance_weights,
+    )
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/off_policy/rl/q_agent.py", line 318, in update_critic
+    next_residual_action = self._act_default(
+        obs=next_obs,
+    ...<3 lines>...
+        use_target=True,
+    )
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/off_policy/rl/q_agent.py", line 288, in _act_default
+    dist = actor.forward(obs, stddev)
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/off_policy/rl/actor.py", line 167, in forward
+    assert False, f"{policy_input.dtype}"
+           ^^^^^
+AssertionError: torch.float64

@@ -9,13 +9,20 @@ from contextlib import contextmanager
 
 import torch
 from torch import nn
-
+from einops import rearrange
 from agent.rl_finetuning.config.rlpd import QAgentConfig
 from agent.rl_finetuning.off_policy import common_utils
 from agent.rl_finetuning.off_policy.common_utils import utils
 from agent.rl_finetuning.off_policy.networks.encoder import VitEncoder
 from agent.rl_finetuning.off_policy.rl.actor import Actor
 from agent.rl_finetuning.off_policy.rl.critic import Critic
+
+def to_torch(inp, device):
+    for k, v in inp.items():
+        if not isinstance(v, torch.Tensor):
+            v = torch.tensor(v)
+        inp[k] = v.float().to(device)
+    return inp
 
 
 class QAgent(nn.Module):
@@ -226,7 +233,8 @@ class QAgent(nn.Module):
                 data = data.float().div_(255.0)
             else:
                 data = data.float()
-
+            if data.shape[-1] == 3:
+                data = rearrange(data, 'B H W C -> B C H W')
             if augment:
                 data = self.aug(data)
 
@@ -254,6 +262,7 @@ class QAgent(nn.Module):
         assert not self.actor.training
         # Make a shallow copy of the observation dict
         obs = copy.copy(obs)
+        obs = to_torch(obs, device = 'cuda')
         unsqueezed = self._maybe_unsqueeze_(obs)
 
         assert "feat" not in obs
@@ -285,6 +294,7 @@ class QAgent(nn.Module):
         use_target: bool,
     ) -> torch.Tensor:
         actor = self.actor_target if use_target else self.actor
+ 
         dist = actor.forward(obs, stddev)
 
         # Only assert not training when this is called from the public act() method
@@ -458,13 +468,13 @@ class QAgent(nn.Module):
         stddev,
         update_actor,
     ):
-        obs: dict[str, torch.Tensor] = batch["obs"]
-        action: torch.Tensor = batch["action"]
-        reward: torch.Tensor = batch[("next", "reward")]
+        obs: dict[str, torch.Tensor] = batch["obs"].float()
+        action: torch.Tensor = batch["action"].float()
+        reward: torch.Tensor = batch[("next", "reward")].float()
         discount: torch.Tensor = batch["gamma"]
         next_nonterminal: torch.Tensor = batch["nonterminal"]
-        next_obs: dict[str, torch.Tensor] = batch[("next", "obs")]
-
+        next_obs: dict[str, torch.Tensor] = batch[("next", "obs")].float()
+    
         # To not bootstrap on terminal states we zero out the discount factor for terminal next states
         effective_discount = discount * next_nonterminal
 

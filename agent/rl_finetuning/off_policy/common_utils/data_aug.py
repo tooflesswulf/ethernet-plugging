@@ -4,14 +4,16 @@
 
 import torch
 from torch import nn
-
+from einops import rearrange
 
 class RandomShiftsAug:
     def __init__(self, pad):
         self.pad = pad
 
     def __call__(self, x):
+        
         n, c, h, w = x.size()
+        
         assert h == w
         padding = tuple([self.pad] * 4)
         x = nn.functional.pad(x, padding, "replicate")

@@ -90,7 +90,7 @@ class ResidualTD3DexmgConfig(RLPDDexmgConfig):
             critic_lr=1e-4,
             critic_target_tau=0.005,
             actor=ActorConfig(
-                action_scale=0.1,
+                action_scale= 0.02, # 0.1,
                 actor_last_layer_init_scale=0.0,  # imp for residual
             ),
         )

@@ -133,7 +133,7 @@ class BasePolicyVecEnvWrapper:
         with torch.no_grad():
             base_action = self.base_policy.get_base_action()
             base_dpose, gripper, done = base_action
-            base_action = torch.tensor( np.concatenate([base_dpose, np.array([gripper]), np.array([0])]) )
+            base_action = torch.tensor( np.concatenate([base_dpose, np.array([gripper])]) )
            
         # Augment observations with base action and apply state standardization
         augmented_obs = self._augment_obs(raw_obs, base_action)
@@ -172,10 +172,10 @@ class BasePolicyVecEnvWrapper:
         base_dpose, gripper, done = base_action
         gripper = int(round(gripper))
         info = {}
-        residual_pose = residual_naction[0][:6]
+        residual_pose = residual_naction[0][:6] if  residual_naction.dim() == 2 else residual_naction[:6]
         dpose = ( torch.tensor(base_dpose).to(residual_naction.device) + residual_pose ).cpu().numpy()
         dpose = base_dpose
-        combined_naction = torch.tensor( np.concatenate([dpose, np.array([gripper]), np.array([0])], -1) )
+        combined_naction = torch.tensor( np.concatenate([dpose, np.array([gripper])], -1) )
         # do we need clipping here?
 
         # Step the underlying environment

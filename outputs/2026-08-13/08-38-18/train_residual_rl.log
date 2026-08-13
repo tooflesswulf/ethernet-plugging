@@ -1,0 +1,29 @@
+[2026-08-13 08:38:20,150][robosuite_logs][INFO] - Loading controller configuration from: /home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/robosuite/controllers/config/robots/default_panda.json
+[2026-08-13 08:38:20,427][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-08-13 08:38:45,757][hydra.core.utils][ERROR] - Job failed
+Traceback (most recent call last):
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/hydra/core/utils.py", line 176, in run_job
+    ret.return_value = task_function(task_cfg)
+                       ~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 757, in hydra_entry
+    main(cfg_conf)
+    ~~~~^^^^^^^^^^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 524, in main
+    _run_critic_warmup(
+    ~~~~~~~~~~~~~~~~~~^
+        agent=agent,
+        ^^^^^^^^^^^^
+    ...<5 lines>...
+        offline_batch_size=offline_batch_size,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/rl_finetuning/train_residual_rl.py", line 480, in _run_critic_warmup
+    batch = torch.cat([online_batch, offline_batch], dim=0)
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/tensordict/base.py", line 768, in __torch_function__
+    return TD_HANDLED_FUNCTIONS[func](*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/atkesonlab4/miniconda3/envs/realrobot2/lib/python3.14/site-packages/tensordict/_torch_func.py", line 461, in _cat
+    out[key] = torch.cat(items, dim)
+               ~~~~~~~~~^^^^^^^^^^^^
+RuntimeError: Sizes of tensors must match except in dimension 0. Expected size 8 but got size 7 for tensor number 1 in the list.

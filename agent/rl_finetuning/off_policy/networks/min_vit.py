@@ -14,7 +14,8 @@ class PatchEmbed1(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(3, embed_dim, kernel_size=8, stride=8)
 
-        self.num_patch = 144  # if input image is 96x96, then num_patch = 144
+        # self.num_patch = 144  # if input image is 96x96, then num_patch = 144
+        self.num_patch = 225 # if input image is 128x128, then num_patch = 225
         self.patch_dim = embed_dim
 
     def forward(self, x: torch.Tensor):
@@ -35,7 +36,8 @@ class PatchEmbed2(nn.Module):
         self.embed = nn.Sequential(*layers)
 
         # self.num_patch = 121  # if input image is 96x96, then num_patch = 121
-        self.num_patch = 81  # if input image is 84x84, then num_patch = 81
+        # self.num_patch = 81  # if input image is 84x84, then num_patch = 81
+        self.num_patch = 225 # if input image is 128x128, then num_patch = 225
         self.patch_dim = embed_dim
 
     def forward(self, x: torch.Tensor):
