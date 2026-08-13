@@ -30,6 +30,27 @@ def resolve_h5(dataset_path) -> pathlib.Path:
     return path if path.suffix == '.h5' else path / 'dataset.h5'
 
 
+def eval_transform(image_size=IMAGE_SIZE):
+    """Preprocessing the model expects. Shared with live inference
+    (`agent.model.grasp_cls.NeuralGraspDetector`) so the two cannot drift apart."""
+    return T.Compose([
+        T.Resize((image_size, image_size)),
+        T.ToTensor(),
+        T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
+
+
+def train_transform(image_size=IMAGE_SIZE):
+    # No horizontal flip: the wrist camera is rigidly mounted and the fingers are not
+    # left/right symmetric, so a mirrored frame is a view the model never sees at eval.
+    return T.Compose([
+        T.RandomResizedCrop(image_size, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+        T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.03),
+        T.ToTensor(),
+        T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
+
+
 def source_image_shape(dataset_path) -> tuple:
     """(H, W, C) of the frames the dataset links to."""
     with h5py.File(resolve_h5(dataset_path), 'r') as f:
@@ -128,22 +149,7 @@ class GraspImageDataset(torch.utils.data.Dataset):
         self.labels = all_labels[self.indices].astype(np.float32)
         self.h5 = None  # opened lazily, per worker process
 
-        if augment:
-            # No horizontal flip: the wrist camera is rigidly mounted and the fingers
-            # are not left/right symmetric, so a mirrored frame is a view the model
-            # will never see at eval time.
-            self.transform = T.Compose([
-                T.RandomResizedCrop(image_size, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
-                T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.03),
-                T.ToTensor(),
-                T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-            ])
-        else:
-            self.transform = T.Compose([
-                T.Resize((image_size, image_size)),
-                T.ToTensor(),
-                T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-            ])
+        self.transform = train_transform(image_size) if augment else eval_transform(image_size)
 
     def __len__(self):
         return len(self.indices)

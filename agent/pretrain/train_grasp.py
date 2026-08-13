@@ -101,7 +101,7 @@ def train(name, dataset_path, ckpt_dir, epochs=30, batch_size=128, lr=1e-4, weig
                                              persistent_workers=num_workers > 0)
 
     model = GraspClassifier(backbone=backbone, pretrained=pretrained, image_size=image_size,
-                            roi=roi).to(device)
+                            roi=roi, frame_shape=source_image_shape(dataset_path)).to(device)
     ema = EMAModel(parameters=model.parameters(), power=0.75)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     lr_scheduler = get_scheduler(name='cosine', optimizer=opt, num_warmup_steps=len(train_loader),

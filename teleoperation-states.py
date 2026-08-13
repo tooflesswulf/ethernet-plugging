@@ -17,7 +17,11 @@ State machine (green = normal, red = error, yellow = decision):
     Returning   --Release-> Idle
 
 Decision sources:
-    Cable?   -> GraspDetector (agent/model/grasp.py) over the wrist-cam ROI.
+    Cable?   -> a grasp detector over the wrist-cam image. Default is the hand-tuned
+                GraspDetector (agent/model/grasp.py); pass --grasp_ckpt to use the
+                trained classifier instead (agent/model/grasp_cls.py, trained by
+                agent/pretrain/train_grasp.py). Both expose the same debounced
+                `update(rgb) -> bool`, so the state machine is unchanged.
     Network? -> self.last_obs['network_status'].
 
 Ignored for now (per spec): the Approaching -> Plugin Error edge
@@ -33,6 +37,7 @@ import numpy as np
 
 from agent.utils.robot_utils import interrupt
 from agent.model.grasp import GraspDetector
+from agent.model.grasp_cls import NeuralGraspDetector
 import robot_execution
 from env import URPose, GRIP_OPEN, GRIP_CLOSED
 
@@ -152,7 +157,14 @@ class Teleoperation(robot_execution.RobotExecution):
 
     @staticmethod
     def add_args(parser):
-        pass
+        parser.add_argument('--grasp_ckpt', type=str, default=None,
+                            help='Checkpoint for the trained grasp classifier (e.g. '
+                                 'logs/grasp-cls/ckpt_best.pth). Default: the hand-tuned '
+                                 'GraspDetector in agent/model/grasp.py.')
+        parser.add_argument('--grasp_device', type=str, default='cuda:0',
+                            help='Device for --grasp_ckpt inference (falls back to CPU)')
+        parser.add_argument('--grasp_thr', type=float, default=0.5,
+                            help='P(held) above which --grasp_ckpt calls the cable grasped')
 
     def args2metadata(self, args):
         meta = {}
@@ -161,6 +173,8 @@ class Teleoperation(robot_execution.RobotExecution):
         meta['grip_force_n'] = GRIP_FORCE_N
         meta['grip_speed_mmps'] = GRIP_SPEED_MMPS
         meta['grip_pullback_mm'] = GRIP_PULLBACK_MM
+        # Which detector answered `Cable?` for this episode.
+        meta['grasp_detector'] = args.grasp_ckpt if args.grasp_ckpt else 'heuristic'
         return meta
 
     def pre_reset(self):
@@ -211,6 +225,10 @@ class Teleoperation(robot_execution.RobotExecution):
 
         # Raw signals feeding the decisions -- handy while teleoperating.
         cable = '?' if self._held is None else ('yes' if self._held else 'no ')
+        # The trained detector also reports its confidence; the heuristic one has none.
+        proba = getattr(self.grasp, 'last_proba', None)
+        if proba is not None:
+            cable += f'({proba:.2f})'
         grip = 'CLOSED' if self._grip == GRIP_CLOSED else 'OPEN'
         pend = self._est._pending[0] if self._est._pending else '-'
         cv2.putText(img,
@@ -245,7 +263,12 @@ class Teleoperation(robot_execution.RobotExecution):
         control_freq = 100
         home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)  # low-position (cable easy to see)
 
-        self.grasp = GraspDetector()
+        # Both detectors expose the same debounced update(rgb) -> bool.
+        if args.grasp_ckpt:
+            self.grasp = NeuralGraspDetector(args.grasp_ckpt, device=args.grasp_device,
+                                             threshold=args.grasp_thr)
+        else:
+            self.grasp = GraspDetector()
         self._est = StateEstimator()
         self._last_grasp_t = 0.0
         self._held = None
