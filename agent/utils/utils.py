@@ -201,7 +201,7 @@ def get_dataset(dataset_path, lowdim_keys, action_mode, num_episodes, g_thr=18):
     episode_paths, states, actions, rewards = [], [], [], []
     for episode_name in episode_names:
         episode_path = os.path.join(dataset_path, episode_name)
-        episode_paths.append(episode_path)
+        
 
         loaded = np.load(os.path.join( episode_path, 'states.npz'))
         state =  np.concatenate( [ loaded[k] if loaded[k].ndim == 2 else loaded[k][:, None] for k in lowdim_keys    ] , -1)
@@ -209,7 +209,11 @@ def get_dataset(dataset_path, lowdim_keys, action_mode, num_episodes, g_thr=18):
         g_action_flatten = g_action.flatten()
         chunks = find_chunks(g_action_flatten)
         phase1 = chunks[1][1]-30; phase2 = chunks[2][1] + 10
-        assert len(chunks) == 5 and chunks[2][-1] == 1, f"Check 5 segments: approah, pick-and-transport-plugin, release-to-unplug, unplug-place, release "
+        # assert len(chunks) == 5 and chunks[2][-1] == 1, f"Check 5 segments: approah, pick-and-transport-plugin, release-to-unplug, unplug-place, release: {len(chunks)}"
+        if not (len(chunks) == 5 and chunks[2][-1] == 1):
+            print('Skip episode:', episode_name)
+            continue
+        episode_paths.append(episode_path)
         action = np.concatenate([pose_action, g_action ], -1)
         reward = np.zeros((len(action)))
         reward[phase1:phase2] = 1.0; reward[phase2:] = 2.0

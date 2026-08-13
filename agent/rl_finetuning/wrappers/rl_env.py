@@ -126,7 +126,7 @@ class BasePolicyVecEnvWrapper:
        
         # Reset base policy (clear previously predicted actions)
         self.base_policy.reset()
-        time.sleep(1)
+        time.sleep(2)
 
         raw_obs = self._process_obs( self.env.get_obs() )
         # Get base action from the base policy
@@ -145,8 +145,11 @@ class BasePolicyVecEnvWrapper:
 
     def step_task_stage(self, raw_obs):
         curr_state = raw_obs['network_status']
-        prev_state = curr_state if self.link_state is None else self.link_state
-        if prev_state != curr_state:
+    
+        if self.link_state is None:
+            self.link_state = curr_state 
+            return
+        if self.link_state != curr_state:
             self.task_stage += 1; self.link_state = curr_state
 
     def step(

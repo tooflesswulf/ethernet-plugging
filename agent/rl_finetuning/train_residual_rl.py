@@ -263,7 +263,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         print("Populating offline buffer from dataset...")
 
         episode_cache: dict[int, dict] = {}; transitions = 0; step_id = 0
-
+        
         for ep_idx, ep_path in enumerate(tqdm(ep_paths, desc="Processing offline dataset") ):
             ep_image_dir = os.path.join(ep_path, 'images'); ep_state = torch.tensor( ep_states[ep_idx]).float(); ep_action = torch.tensor( ep_actions[ep_idx] ).float(); ep_reward =  torch.tensor( ep_rewards[ep_idx] ).float()
             images = torch.tensor( np.array( [ Image.open( os.path.join(ep_image_dir, n) ).resize((img_h, img_w)) for n in sorted(os.listdir(ep_image_dir), key = lambda x: int( x.replace('.png', '')) ) ] ) ).float()
@@ -360,7 +360,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     # Warm-up phase (random policy) --------------------------------------
     # ------------------------------------------------------------------
   
-    cfg.algo.learning_starts = 100
+    cfg.algo.learning_starts = cfg.algo.learning_starts//2
     if len(online_rb) < cfg.algo.learning_starts :
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
         
@@ -392,6 +392,7 @@ def main(cfg: ResidualTD3DexmgConfig):
                 rand_actions = pure_random - base_action
             
             next_obs, reward, terminated, info = env.step(rand_actions)
+            
             done = terminated 
             reward_sum += reward
             episode_count += int( done )
@@ -427,6 +428,7 @@ def main(cfg: ResidualTD3DexmgConfig):
             if terminated or (not len(online_rb) < cfg.algo.learning_starts):
                 # env.env.des_gripper_state = 0
                 # env.env._homing()
+                print('\t\tGet reward:', reward)
                 print('Gripper before reset:', env.env.des_gripper_state, env.env.gripper_state)
                 env.env.reset(env.env.home_pose) 
                 # hardcode to cancelout previous behavior
@@ -451,9 +453,8 @@ def main(cfg: ResidualTD3DexmgConfig):
 
     wandb.init(
         id=cfg.wandb.continue_run_id,
-        resume=None if cfg.wandb.continue_run_id is None else "allow",
+      
         project=cfg.wandb.project,
-        entity=cfg.wandb.entity,
         config=_wandb_config,
         name=run_name,
         mode=cfg.wandb.mode if not cfg.debug else "disabled",
@@ -520,7 +521,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     # ------------------------------------------------------------------
     # Critic warmup phase ----------------------------------------------
     # ------------------------------------------------------------------
-    cfg.algo.critic_warmup_steps = 200
+    cfg.algo.critic_warmup_steps = 4000
     if cfg.algo.critic_warmup_steps > 0:
         print(f"Critic warmup: running {cfg.algo.critic_warmup_steps} critic-only updates...")
         _run_critic_warmup(
@@ -573,6 +574,7 @@ def main(cfg: ResidualTD3DexmgConfig):
             episode_length += 1
 
             if done:
+                print('\t\tGet reward:', reward)
                 print('Gripper before reset:', env.env.des_gripper_state, env.env.gripper_state)
                 env.env.reset(env.env.home_pose) 
                 env.env.des_gripper_state = 0
@@ -601,7 +603,7 @@ def main(cfg: ResidualTD3DexmgConfig):
                 # --------------------------------------------------------------
                 # Sample mixed online/offline batch
                 # --------------------------------------------------------------
-               
+                global_step += 1
                 # Sample batches from replay buffers
                 online_batch = online_rb.sample(online_batch_size)
                 online_batch = online_batch.to(device, non_blocking=True)
@@ -656,79 +658,83 @@ def main(cfg: ResidualTD3DexmgConfig):
 
                 metrics["data/batch_terminal_R"] = batch["next"]["reward"][~batch["nonterminal"]].mean(); metrics["data/terminal_share"] = (~batch["nonterminal"]).float().mean()
 
+
+                # Prepare base logging dict
+                if global_step % cfg.log_freq == 0:
+                    log_dict = {
+         
+                        "training/global_step": global_step,
+                        "buffer/online_size": len(online_rb),
+                        "buffer/offline_size": len(offline_rb) if offline_rb else 0,
+                        "training/actor_lr": agent.actor_opt.param_groups[0]["lr"],
+                    }
+
+                    # Add metrics, filtering out internal data
+                    filtered_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
+                    log_dict.update(filtered_metrics)
+
+                    # Compute residual action statistics only when logging
+                    if "_actions" in metrics:
+                        actions = metrics["_actions"]
+                        # Compute L1/L2 magnitudes (only during logging to save computation)
+                        residual_l1_magnitude = torch.mean(torch.abs(actions)).item()
+                        residual_l2_magnitude = torch.mean(torch.square(actions)).item()
+
+                        log_dict["train/residual_l1_magnitude"] = residual_l1_magnitude
+                        log_dict["train/residual_l2_magnitude"] = residual_l2_magnitude
+                        log_dict["histograms/residual_actions"] = wandb.Histogram(actions.numpy().reshape(-1))
+                    else:
+                        residual_l1_magnitude = None
+                        residual_l2_magnitude = None
+
+                    # Add Q values histogram when available
+                    if "_target_q" in metrics:
+                        target_q = metrics["_target_q"]
+                        log_dict["histograms/critic_qt"] = wandb.Histogram(target_q.numpy().reshape(-1))
+
+                    if cfg.algo.progressive_clipping_steps > 0:
+                        log_dict["training/progressive_clipping_factor"] = clip_factor
+
+                    wandb.log(log_dict, step=global_step)
+
+                    # Enhanced print statement with residual action magnitudes, gradient norms, and actor LR
+                    current_actor_lr = agent.actor_opt.param_groups[0]["lr"]
+
+                    if "train/actor_loss_base" in metrics:
+                        actor_loss_str = f"actor_loss_base={metrics['train/actor_loss_base']:.4f}"
+                        print_msg = (
+                            f"[{global_step}] {actor_loss_str} "
+                            f"critic_loss={metrics['train/critic_loss']:.4f} "
+                            f"actor_lr={current_actor_lr:.2e}"
+                        )
+                    else:
+                        # During critic warmup, actor might not be updated
+                        print_msg = (
+                            f"[{global_step}] critic_loss={metrics['train/critic_loss']:.4f} "
+                            f"actor_lr={current_actor_lr:.2e} (actor not updated)"
+                        )
+                    if residual_l1_magnitude is not None and residual_l2_magnitude is not None:
+                        print_msg += f" residual_l1={residual_l1_magnitude:.4f} residual_l2={residual_l2_magnitude:.4f}"
+
+                    # Add gradient norms to print statement
+                    if "train/actor_grad_norm" in metrics:
+                        print_msg += f" actor_grad_norm={metrics['train/actor_grad_norm']:.4f}"
+
+                    # Add L2 penalty if active
+                    if "train/actor_l2_penalty" in metrics:
+                        print_msg += f" l2_penalty={metrics['train/actor_l2_penalty']:.4f}"
+
+                    # print(print_msg)
+
         training_cum_time += time.time() - iter_start
 
         # ------------------------------------------------------------------
         # (6) Logging -------------------------------------------------------
         # ------------------------------------------------------------------
-        if global_step % cfg.log_freq == 0:
-            sps = int(global_step / training_cum_time) if training_cum_time > 0 else 0
+        # if global_step % cfg.log_freq == 0:
+        #     sps = int(global_step / training_cum_time) if training_cum_time > 0 else 0
 
-            # Prepare base logging dict
-            log_dict = {
-                "training/SPS": sps,
-                "training/global_step": global_step,
-                "buffer/online_size": len(online_rb),
-                "buffer/offline_size": len(offline_rb) if offline_rb else 0,
-                "training/actor_lr": agent.actor_opt.param_groups[0]["lr"],
-            }
-
-            # Add metrics, filtering out internal data
-            filtered_metrics = {k: v for k, v in metrics.items() if not k.startswith("_")}
-            log_dict.update(filtered_metrics)
-
-            # Compute residual action statistics only when logging
-            if "_actions" in metrics:
-                actions = metrics["_actions"]
-                # Compute L1/L2 magnitudes (only during logging to save computation)
-                residual_l1_magnitude = torch.mean(torch.abs(actions)).item()
-                residual_l2_magnitude = torch.mean(torch.square(actions)).item()
-
-                log_dict["train/residual_l1_magnitude"] = residual_l1_magnitude
-                log_dict["train/residual_l2_magnitude"] = residual_l2_magnitude
-                log_dict["histograms/residual_actions"] = wandb.Histogram(actions.numpy().reshape(-1))
-            else:
-                residual_l1_magnitude = None
-                residual_l2_magnitude = None
-
-            # Add Q values histogram when available
-            if "_target_q" in metrics:
-                target_q = metrics["_target_q"]
-                log_dict["histograms/critic_qt"] = wandb.Histogram(target_q.numpy().reshape(-1))
-
-            if cfg.algo.progressive_clipping_steps > 0:
-                log_dict["training/progressive_clipping_factor"] = clip_factor
-
-            wandb.log(log_dict, step=global_step)
-
-            # Enhanced print statement with residual action magnitudes, gradient norms, and actor LR
-            current_actor_lr = agent.actor_opt.param_groups[0]["lr"]
-
-            if "train/actor_loss_base" in metrics:
-                actor_loss_str = f"actor_loss_base={metrics['train/actor_loss_base']:.4f}"
-                print_msg = (
-                    f"[{global_step}] {actor_loss_str} "
-                    f"critic_loss={metrics['train/critic_loss']:.4f} "
-                    f"actor_lr={current_actor_lr:.2e}"
-                )
-            else:
-                # During critic warmup, actor might not be updated
-                print_msg = (
-                    f"[{global_step}] critic_loss={metrics['train/critic_loss']:.4f} "
-                    f"actor_lr={current_actor_lr:.2e} (actor not updated)"
-                )
-            if residual_l1_magnitude is not None and residual_l2_magnitude is not None:
-                print_msg += f" residual_l1={residual_l1_magnitude:.4f} residual_l2={residual_l2_magnitude:.4f}"
-
-            # Add gradient norms to print statement
-            if "train/actor_grad_norm" in metrics:
-                print_msg += f" actor_grad_norm={metrics['train/actor_grad_norm']:.4f}"
-
-            # Add L2 penalty if active
-            if "train/actor_l2_penalty" in metrics:
-                print_msg += f" l2_penalty={metrics['train/actor_l2_penalty']:.4f}"
-
-            print(print_msg)
+          
 
 
 

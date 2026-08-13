@@ -290,7 +290,7 @@ class RLPDDexmgConfig:
     # ------------------------------------------------------------------
     # Logging / checkpointing
     # ------------------------------------------------------------------
-    log_freq: int = 100
+    log_freq: int = 10
     eval_interval_every_steps: int = 10_000
     checkpoint_interval: int = -1
     save_video: bool = True

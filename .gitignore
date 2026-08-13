@@ -3,6 +3,7 @@ __pycache__/
 wandb/
 logs*/
 debug*/
+outputs/
 
 *.gif
 *.mp4
