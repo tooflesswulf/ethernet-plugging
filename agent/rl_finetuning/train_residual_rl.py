@@ -1,11 +1,20 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.  
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 # SPDX-License-Identifier: CC-BY-NC-4.0
 
 from __future__ import annotations
 from PIL import Image
 from einops import rearrange
-import os, pprint, random, shutil, time, torch, numpy as np, wandb, hydra, interface
+import os
+import pprint
+import random
+import shutil
+import time
+import torch
+import numpy as np
+import wandb
+import hydra
+import interface
 
 from omegaconf import OmegaConf
 from tensordict import TensorDict
@@ -25,6 +34,7 @@ from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
 
 rl_scratch_dir = "./../../rl_online_buffer"
 
+
 def _add_transitions_to_buffer(
     *,
     obs: dict,
@@ -34,7 +44,7 @@ def _add_transitions_to_buffer(
     done: torch.Tensor,
     info: dict,
     device: torch.device,
-   
+
     lowdim_keys: list[str],
     num_envs: int,
     online_rb: TensorDictPrioritizedReplayBuffer,
@@ -47,16 +57,16 @@ def _add_transitions_to_buffer(
 
     # Keep only relevant keys & convert images to uint8 for storage
     curr_obs_i = {k: v for k, v in obs.items() if k in obs_keys_set}
-    next_obs_i = {k: v  for k, v in next_obs.items() if k in obs_keys_set}
+    next_obs_i = {k: v for k, v in next_obs.items() if k in obs_keys_set}
     to_uint8(curr_obs_i, ['observation.rgb'])
     to_uint8(next_obs_i, ['observation.rgb'])
     for k in obs_keys_set:
         curr_v, next_v = curr_obs_i[k], next_obs_i[k]
 
         if not isinstance(curr_v, torch.Tensor):
-            curr_obs_i[k] =  torch.tensor(curr_v)
+            curr_obs_i[k] = torch.tensor(curr_v)
         if not isinstance(next_v, torch.Tensor):
-            next_obs_i[k] =  torch.tensor(next_v)
+            next_obs_i[k] = torch.tensor(next_v)
 
     td = TensorDict(
         {
@@ -84,7 +94,7 @@ def _add_transitions_to_buffer(
 def main(cfg: ResidualTD3DexmgConfig):
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
-    
+
     # Enable performance optimizations
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -99,26 +109,28 @@ def main(cfg: ResidualTD3DexmgConfig):
     base_policy = DiffusionPolicy.from_checkpoint(cfg.base_policy.ckpt, device)
     base_policy.to(device)
     base_policy.eval()
-    lowdim_dim, action_dim, img_c, img_h, img_w =base_policy.state_min.shape[-1],  base_policy.action_min.shape[-1], 3, base_policy.img_size, base_policy.img_size
+    lowdim_dim, action_dim, img_c, img_h, img_w = base_policy.state_min.shape[
+        -1], base_policy.action_min.shape[-1], 3, base_policy.img_size, base_policy.img_size
     if action_dim == 8:
-        action_dim -= 1 # drop done dimension
-    lowdim_keys = base_policy.obs_fields 
-   
+        action_dim -= 1  # drop done dimension
+    lowdim_keys = base_policy.obs_fields
 
     # Load dataset and get normalization functions early
     print("Loading dataset and setting up normalization...")
-    print("#"*20)
+    print("#" * 20)
     print('No Normalization is done to the dataset!!!!!')
-    print("#"*20)
+    print("#" * 20)
     offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
-    offline_episodes, ep_states, ep_actions, ep_rewards, total_transitions = get_dataset(offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
+    offline_episodes, ep_states, ep_actions, ep_rewards, total_transitions = get_dataset(
+        offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
     grip = GripperStats(*base_policy.grip_stats)
+
     def get_envs(
         base_policy,
     ):
-       
+
         # Create the vectorized environment
-        
+
         env = Env(
             robot_ip="192.168.0.100",
             gripper_ip="192.168.0.20",
@@ -131,10 +143,9 @@ def main(cfg: ResidualTD3DexmgConfig):
             gspeed=grip.grip_speed_mmps,
             gpullback=grip.grip_pullback_mm,
         )
-        
 
         # Wrap it with the base policy wrapper
-        return BasePolicyVecEnvWrapper(env=env,  base_policy=base_policy, image_size = (img_h, img_w), lowdim_keys=lowdim_keys, device=device)
+        return BasePolicyVecEnvWrapper(env=env, base_policy=base_policy, image_size=(img_h, img_w), lowdim_keys=lowdim_keys, device=device)
 
     # ---------------------------------------------------------------------
     # Seeding (must be done before environment creation) ------------------
@@ -143,7 +154,9 @@ def main(cfg: ResidualTD3DexmgConfig):
         cfg.seed = random.randint(0, 2**32 - 1)
 
     # Comprehensive seeding for reproducibility
-    random.seed(cfg.seed); np.random.seed(cfg.seed); torch.manual_seed(cfg.seed)
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
 
     # CUDA seeding for multi-GPU reproducibility
     if torch.cuda.is_available():
@@ -158,8 +171,9 @@ def main(cfg: ResidualTD3DexmgConfig):
     # Environment setup ----------------------------------------------------
     # ---------------------------------------------------------------------
     assert cfg.num_envs == 1, "Only support 1 environment for now because of how n_step is implemented"
-    env = get_envs(base_policy=base_policy); cfg.eval_num_envs = 1
- 
+    env = get_envs(base_policy=base_policy)
+    cfg.eval_num_envs = 1
+
     # ---------------------------------------------------------------------
     # Networks ------------------------------------------------------------
     # ---------------------------------------------------------------------
@@ -171,7 +185,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         cfg=cfg.agent,
         residual_actor=True,  # Enable residual actor mode
     ).float()
-   
+
     # Set up actor learning rate warmup
     actor_updates = 0
     if cfg.algo.actor_lr_warmup_steps > 0:
@@ -199,9 +213,9 @@ def main(cfg: ResidualTD3DexmgConfig):
     # Use TensorDictPrioritizedReplayBuffer with optimized prefetching
     if os.path.isdir(rl_scratch_dir):
         shutil.rmtree(rl_scratch_dir)
-    storage =  LazyMemmapStorage(cfg.algo.buffer_size, scratch_dir=rl_scratch_dir)
+    storage = LazyMemmapStorage(cfg.algo.buffer_size, scratch_dir=rl_scratch_dir)
     online_rb = TensorDictPrioritizedReplayBuffer(
-        storage=storage, # on disk storage
+        storage=storage,  # on disk storage
         alpha=alpha,
         beta=beta,
         eps=1e-6,  # Small epsilon added to priorities to prevent zero values
@@ -211,12 +225,11 @@ def main(cfg: ResidualTD3DexmgConfig):
         prefetch=cfg.algo.prefetch_batches,  # Add prefetching
         batch_size=online_batch_size,
     )
-    
 
     # Calculate buffer size for simplified approach (1 transition per frame pair)
     max_offline_transitions = total_transitions
     offline_rb = TensorDictPrioritizedReplayBuffer(
-        storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"), # keep in RAM
+        storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"),  # keep in RAM
         alpha=alpha,
         beta=beta,
         eps=1e-6,  # Small epsilon added to priorities to prevent zero values
@@ -227,7 +240,6 @@ def main(cfg: ResidualTD3DexmgConfig):
         batch_size=max(offline_batch_size, 1),  # Ensure batch_size is at least 1
     )
 
- 
     # ------------------------------------------------------------------
     # Convert offline dataset episodes into transitions and fill buffer
     # ------------------------------------------------------------------
@@ -238,7 +250,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         ep_rewards,
         rb: ReplayBuffer,
         use_base_policy_for_base_actions: bool = False,
-        base_policy = None,
+        base_policy=None,
         img_h=128, img_w=128
     ) -> int:
         """
@@ -262,40 +274,48 @@ def main(cfg: ResidualTD3DexmgConfig):
         # Populate buffer from pre-loaded dataset
         print("Populating offline buffer from dataset...")
 
-        episode_cache: dict[int, dict] = {}; transitions = 0; step_id = 0
-        
-        for ep_idx, ep_path in enumerate(tqdm(ep_paths, desc="Processing offline dataset") ):
-            ep_image_dir = os.path.join(ep_path, 'images'); ep_state = torch.tensor( ep_states[ep_idx]).float(); ep_action = torch.tensor( ep_actions[ep_idx] ).float(); ep_reward =  torch.tensor( ep_rewards[ep_idx] ).float()
-            images = torch.tensor( np.array( [ Image.open( os.path.join(ep_image_dir, n) ).resize((img_h, img_w)) for n in sorted(os.listdir(ep_image_dir), key = lambda x: int( x.replace('.png', '')) ) ] ) ).float()
+        episode_cache: dict[int, dict] = {}
+        transitions = 0
+        step_id = 0
+
+        for ep_idx, ep_path in enumerate(tqdm(ep_paths, desc="Processing offline dataset")):
+            ep_image_dir = os.path.join(ep_path, 'images')
+            ep_state = torch.tensor(ep_states[ep_idx]).float()
+            ep_action = torch.tensor(ep_actions[ep_idx]).float()
+            ep_reward = torch.tensor(ep_rewards[ep_idx]).float()
+            images = torch.tensor(np.array([Image.open(os.path.join(ep_image_dir, n)).resize((img_h, img_w)) for n in sorted(
+                os.listdir(ep_image_dir), key=lambda x: int(x.replace('.png', '')))])).float()
             assert len(images) == len(ep_state)
             base_actions = None
             for step, (image, state, action, reward) in enumerate(zip(images, ep_state, ep_action, ep_reward)):
-               
+
                 # ------------------------------------------------------------------
                 # Build observation and action directly for replay buffer ----------
                 # ------------------------------------------------------------------
                 # Extract data and keep on CPU (replay buffer uses CPU storage)
-                done_flag = step == len(images)-1
+                done_flag = step == len(images) - 1
 
                 # Generate base action based on the selected mode
                 if use_base_policy_for_base_actions:
                     # Use base policy to generate base action from current observation
                     # Build raw observation first for base policy inference
-                    raw_obs = {'rgb': rearrange( image.unsqueeze(0).unsqueeze(0).to(device) / 255.0, 'B T H W C -> B T C H W'), 'state': state.unsqueeze(0).unsqueeze(0).to(device),}
+                    raw_obs = {'rgb': rearrange(image.unsqueeze(0).unsqueeze(0).to(
+                        device) / 255.0, 'B T H W C -> B T C H W'), 'state': state.unsqueeze(0).unsqueeze(0).to(device), }
 
                     # Get base action from base policy
                     if base_actions is None:
                         with torch.no_grad():
                             base_actions = base_policy.predict_action(raw_obs).squeeze(0).to(device)[:, :7]
                     base_action = base_actions[0]
-           
-                    base_actions =  base_actions[1:] if len(base_actions) > 1 else None
+
+                    base_actions = base_actions[1:] if len(base_actions) > 1 else None
                 else:
-                   assert False, f"Not Implemented"
-                
+                    assert False, f"Not Implemented"
+
                 # Build observation dict directly in target format
-                curr_obs = { "observation.state": state.cpu(), "observation.base_action": base_action.cpu(), "observation.rgb": image.cpu() }
-               
+                curr_obs = {"observation.state": state.cpu(), "observation.base_action": base_action.cpu(),
+                            "observation.rgb": image.cpu()}
+
                 # Convert images to uint8 for memory-efficient storage
                 to_uint8(curr_obs, ["observation.rgb"])
 
@@ -307,7 +327,7 @@ def main(cfg: ResidualTD3DexmgConfig):
                     # Create transitions for each combination of prev and current variants
                     prev_obs = episode_cache[ep_idx]["obs"]
                     prev_action_scaled = episode_cache[ep_idx]["action"]
-                   
+
                     transition = TensorDict(
                         {
                             "obs": TensorDict(prev_obs, batch_size=[]),
@@ -320,7 +340,8 @@ def main(cfg: ResidualTD3DexmgConfig):
                                 },
                                 batch_size=[],
                             ),
-                            "_priority": torch.tensor(10.0, dtype=torch.float32),  # High initial priority for new samples
+                            # High initial priority for new samples
+                            "_priority": torch.tensor(10.0, dtype=torch.float32),
                         },
                         batch_size=[],
                     ).unsqueeze(0)
@@ -355,15 +376,15 @@ def main(cfg: ResidualTD3DexmgConfig):
         )
 
         print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
-    
+
     # ------------------------------------------------------------------
     # Warm-up phase (random policy) --------------------------------------
     # ------------------------------------------------------------------
-  
-    cfg.algo.learning_starts = cfg.algo.learning_starts//2
-    if len(online_rb) < cfg.algo.learning_starts :
+
+    cfg.algo.learning_starts = cfg.algo.learning_starts // 2
+    if len(online_rb) < cfg.algo.learning_starts:
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
-        
+
         # --------------------------------------------------------------
         # Logging helper: print progress every 1 000 collected transitions
         # --------------------------------------------------------------
@@ -373,7 +394,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         episode_count = 0
         obs, _ = env.reset()
         while len(online_rb) < cfg.algo.learning_starts:
-            
+
             if cfg.algo.use_base_policy_for_warmup:
                 # Use base policy action + noise (residual exploration)
                 # Since the environment wrapper always adds base_action to residual_action,
@@ -390,12 +411,12 @@ def main(cfg: ResidualTD3DexmgConfig):
                     torch.rand((cfg.num_envs, action_dim), device=device) * 2 - 1
                 ) * cfg.algo.random_action_noise_scale
                 rand_actions = pure_random - base_action
-            
+
             next_obs, reward, terminated, info = env.step(rand_actions)
-            
-            done = terminated 
+
+            done = terminated
             reward_sum += reward
-            episode_count += int( done )
+            episode_count += int(done)
 
             # Use the executed combined action returned by the environment
             combined_action = info["scaled_action"]
@@ -430,14 +451,14 @@ def main(cfg: ResidualTD3DexmgConfig):
                 # env.env._homing()
                 print('\t\tGet reward:', reward)
                 print('Gripper before reset:', env.env.des_gripper_state, env.env.gripper_state)
-                env.env.reset(env.env.home_pose) 
+                env.env.reset(env.env.home_pose)
                 # hardcode to cancelout previous behavior
                 env.env.des_gripper_state = 0
                 env.env.start()
                 time.sleep(2)
                 obs, _ = env.reset()
                 print('Gripper after reset:', env.env.des_gripper_state, env.env.gripper_state)
-               
+
     run_name = f"seed{cfg.seed}"
     if cfg.wandb.name is not None:
         run_name = f"{cfg.wandb.name}__{run_name}"
@@ -453,7 +474,7 @@ def main(cfg: ResidualTD3DexmgConfig):
 
     wandb.init(
         id=cfg.wandb.continue_run_id,
-      
+
         project=cfg.wandb.project,
         config=_wandb_config,
         name=run_name,
@@ -462,7 +483,9 @@ def main(cfg: ResidualTD3DexmgConfig):
         group=cfg.wandb.group,
     )
 
-    global_step = 0; training_cum_time = 0.0; episode_count = 0
+    global_step = 0
+    training_cum_time = 0.0
+    episode_count = 0
 
     def _run_critic_warmup(
         agent, online_rb, offline_rb, cfg, device, online_batch_size, offline_batch_size
@@ -484,7 +507,7 @@ def main(cfg: ResidualTD3DexmgConfig):
                 batch = online_batch
 
             # Only update critic during warmup (update_actor=False)
-           
+
             metrics = agent.update(batch, stddev=0.0, update_actor=False, )
 
             # Update priorities for prioritized experience replay
@@ -534,25 +557,26 @@ def main(cfg: ResidualTD3DexmgConfig):
             offline_batch_size=offline_batch_size,
         )
         print("Critic warmup completed.")
-  
+
     while global_step <= cfg.algo.total_timesteps:
         iter_start = time.time()
         # ------------------------------------------------------------------
         # (1) Collect action + Environment step for an episode ---------------------------
         # ------------------------------------------------------------------
         print("Collect 1 episode ...")
-  
+
         obs, _ = env.reset()
-        done = False; episode_length = 0
+        done = False
+        episode_length = 0
         while not done:
             with torch.no_grad(), utils.eval_mode(agent):
                 stddev = utils.schedule(cfg.algo.stddev_schedule, global_step)
                 action = agent.act(obs, eval_mode=False, stddev=stddev, cpu=False)
-            
+
             if cfg.algo.progressive_clipping_steps > 0:
                 clip_factor = min(1.0, global_step / cfg.algo.progressive_clipping_steps)
                 action = action * clip_factor
-            
+
             next_obs, reward, terminated, info = env.step(action)
             done = terminated
 
@@ -570,23 +594,25 @@ def main(cfg: ResidualTD3DexmgConfig):
                 lowdim_keys=lowdim_keys,
                 num_envs=cfg.num_envs,
                 online_rb=online_rb,
-            ); obs = next_obs; global_step += cfg.num_envs
+            )
+            obs = next_obs
+            global_step += cfg.num_envs
             episode_length += 1
 
             if done:
                 print('\t\tGet reward:', reward)
                 print('Gripper before reset:', env.env.des_gripper_state, env.env.gripper_state)
-                env.env.reset(env.env.home_pose) 
+                env.env.reset(env.env.home_pose)
                 env.env.des_gripper_state = 0
                 env.env.start()
                 time.sleep(2)
                 obs, _ = env.reset()
                 print('Gripper after reset:', env.env.des_gripper_state, env.env.gripper_state)
                 episode_count += int(done)
-            
+
                 wandb.log(
                     {
-                        "training/episode_reward": reward, # track the last reward
+                        "training/episode_reward": reward,  # track the last reward
                         "training/episode_count": episode_count,
                     },
                     step=global_step,
@@ -596,7 +622,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         # (4) Updates -------------------------------------------------------
         # ------------------------------------------------------------------
         if global_step % cfg.algo.update_every_n_steps == 0 or global_step == cfg.num_envs:
-            
+
             actor_update_cadence = cfg.algo.num_updates_per_iteration // cfg.algo.actor_updates_per_iteration
             # Normal training loop - critic is already warmed up
             for i in tqdm(range(episode_length), desc='training actor/critic'):
@@ -656,13 +682,13 @@ def main(cfg: ResidualTD3DexmgConfig):
                         # Online-only training - update only online buffer
                         online_rb.update_tensordict_priority(batch)
 
-                metrics["data/batch_terminal_R"] = batch["next"]["reward"][~batch["nonterminal"]].mean(); metrics["data/terminal_share"] = (~batch["nonterminal"]).float().mean()
-
+                metrics["data/batch_terminal_R"] = batch["next"]["reward"][~batch["nonterminal"]].mean()
+                metrics["data/terminal_share"] = (~batch["nonterminal"]).float().mean()
 
                 # Prepare base logging dict
                 if global_step % cfg.log_freq == 0:
                     log_dict = {
-         
+
                         "training/global_step": global_step,
                         "buffer/online_size": len(online_rb),
                         "buffer/offline_size": len(offline_rb) if offline_rb else 0,
@@ -733,9 +759,6 @@ def main(cfg: ResidualTD3DexmgConfig):
         # ------------------------------------------------------------------
         # if global_step % cfg.log_freq == 0:
         #     sps = int(global_step / training_cum_time) if training_cum_time > 0 else 0
-
-          
-
 
 
 # -----------------------------------------------------------------------------
