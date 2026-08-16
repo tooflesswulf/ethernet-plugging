@@ -1,4 +1,8 @@
-import torch, numpy as np, collections, time, interface
+import torch
+import numpy as np
+import collections
+import time
+import interface
 from PIL import Image
 from pathlib import Path
 from einops import rearrange
@@ -8,8 +12,9 @@ from agent.evaluate.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.model.policy import DiffusionPolicy
 from env import Env, URPose, GRIP_OPEN
 
+
 class BasePolicy:
-    def __init__(self, base_policy: DiffusionPolicy, env: Env, base_dt=1/20, weight_decay=0.5, device='cuda'):
+    def __init__(self, base_policy: DiffusionPolicy, env: Env, base_dt=1 / 20, weight_decay=0.5, device='cuda'):
         self.policy = base_policy
         self.env = env
         self.device = device
@@ -83,19 +88,21 @@ class BasePolicyVecEnvWrapper:
         image_size,
         lowdim_keys,
         device='cuda'
-  
+
     ):
         """
         Args:
             env: Vectorized environment from create_vectorized_env
             base_policy: Base policy (e.g., ACTPolicy) to augment with residual actions
         """
-        self.env = env; self.iface =  interface.DualSenseInterface( self.env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5. )
+        self.env = env
+        self.iface = interface.DualSenseInterface(self.env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5.)
         self.base_policy = BasePolicy(base_policy, env, device=device)
         self.device = device
         self.image_size = image_size
         self.lowdim_keys = lowdim_keys
-        self.task_stage = 0; self.link_state = None
+        self.task_stage = 0
+        self.link_state = None
         # iface parameters
         control_freq = 20
         self.control_freq = control_freq
@@ -105,52 +112,54 @@ class BasePolicyVecEnvWrapper:
         self.env.start()
 
     def _process_obs(self, obs_dict):
-        rgb = np.array( Image.fromarray( obs_dict['image'] ).resize(self.image_size) )
-        keys = [ 'actual_pose' if k == 'pose' else k for k in self.lowdim_keys]; state = obs_dict['state']
+        rgb = np.array(Image.fromarray(obs_dict['image']).resize(self.image_size))
+        keys = ['actual_pose' if k == 'pose' else k for k in self.lowdim_keys]
+        state = obs_dict['state']
         if 'actual_pose' in keys:
-            pose = np.array( state['actual_pose'] )
+            pose = np.array(state['actual_pose'])
         if 'gripper_width' in keys:
-            gripper_width = np.array([ state['gripper_width'] ])
+            gripper_width = np.array([state['gripper_width']])
         state = np.concatenate([pose, gripper_width])
-        
+
         return {
-            "observation.state": state, # (7, )
-            "observation.rgb"  : rgb,   # (128, 128, 3)
+            "observation.state": state,  # (7, )
+            "observation.rgb": rgb,   # (128, 128, 3)
             'network_status': obs_dict['network_status']
         }
 
-
     def reset(self, **kwargs):
         """Reset environment and base policy."""
- 
-       
+
         # Reset base policy (clear previously predicted actions)
         self.base_policy.reset()
         time.sleep(2)
 
-        raw_obs = self._process_obs( self.env.get_obs() )
+        raw_obs = self._process_obs(self.env.get_obs())
         # Get base action from the base policy
         with torch.no_grad():
             base_action = self.base_policy.get_base_action()
             base_dpose, gripper, done = base_action
-            base_action = torch.tensor( np.concatenate([base_dpose, np.array([gripper])]) )
-           
+            base_action = torch.tensor(np.concatenate([base_dpose, np.array([gripper])]))
+
         # Augment observations with base action and apply state standardization
         augmented_obs = self._augment_obs(raw_obs, base_action)
 
         # Store for later use in step
-        self._last_base_naction = base_action; self.task_stage = 0; self.link_state = None #  clear the task stage
+        self._last_base_naction = base_action
+        self.task_stage = 0
+        self.link_state = None  # clear the task stage
 
         return augmented_obs, {}
 
     def step_task_stage(self, raw_obs):
         curr_state = raw_obs['network_status']
-    
+
         if self.link_state is None:
-            self.link_state = curr_state 
+            self.link_state = curr_state
             return
         if self.link_state != curr_state:
-            self.task_stage += 1; self.link_state = curr_state
+            self.task_stage += 1
+            self.link_state = curr_state
 
     def step(
         self, residual_naction: torch.Tensor
@@ -169,16 +178,16 @@ class BasePolicyVecEnvWrapper:
             info: Info dict
         """
         self.env.init_period()
-       
+
         # Combine base and residual actions
         base_action = self.base_policy.get_base_action()
         base_dpose, gripper, done = base_action
         gripper = int(round(gripper))
         info = {}
-        residual_pose = residual_naction[0][:6] if  residual_naction.dim() == 2 else residual_naction[:6]
-        dpose = ( torch.tensor(base_dpose).to(residual_naction.device) + residual_pose ).cpu().numpy()
+        residual_pose = residual_naction[0][:6] if residual_naction.dim() == 2 else residual_naction[:6]
+        dpose = (torch.tensor(base_dpose).to(residual_naction.device) + residual_pose).cpu().numpy()
         dpose = base_dpose
-        combined_naction = torch.tensor( np.concatenate([dpose, np.array([gripper])], -1) )
+        combined_naction = torch.tensor(np.concatenate([dpose, np.array([gripper])], -1))
         # do we need clipping here?
 
         # Step the underlying environment
@@ -188,13 +197,13 @@ class BasePolicyVecEnvWrapper:
         self.step_task_stage(raw_obs)
         reward = self.task_stage
         self.iface.update(self.control_dt)
-        terminated = self.iface.dualsense.state.Cross # use iface for this
-        
+        terminated = self.iface.dualsense.state.Cross  # use iface for this
+
         # Store the scaled action for replay buffer (already computed above)
         info["scaled_action"] = combined_naction
 
         # Augment observations with base action and apply state standardization
-        augmented_obs = self._augment_obs(raw_obs, combined_naction )
+        augmented_obs = self._augment_obs(raw_obs, combined_naction)
 
         self.env.wait_period()
         return augmented_obs, reward, terminated, info
@@ -225,4 +234,3 @@ class BasePolicyVecEnvWrapper:
     def close(self):
         """Close the environment."""
         return self.env.close()
-
