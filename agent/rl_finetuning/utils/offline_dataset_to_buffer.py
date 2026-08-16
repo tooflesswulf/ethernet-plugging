@@ -26,20 +26,25 @@ import pathlib
 import torch
 import h5py
 
-from agent.utils.utils import get_pose_action, gripper_action, find_chunks
+from agent.utils.utils import gripper_action, find_chunks
+from env import GRIP_OPEN, GRIP_CLOSED
 from agent.rl_finetuning.utils.dtype import to_uint8
 from agent.model.policy import DiffusionPolicy
 
 @dataclass
 class OfflineEpisode:
-    """One parsed episode; `states`/`actions`/`rewards` are aligned per frame."""
+    """One parsed episode; `states`/`commands`/`rewards` are aligned per frame."""
 
     ep_idx: int  # index of the episode in the dataset
     start: int  # offset of the episode's first frame in the stitched arrays
     length: int
     states: np.ndarray  # (T, state_dim)
-    actions: np.ndarray  # (T, 7) -- 6-D pose action + binary gripper action
+    # The reference command the demonstration recorded, in the same space the base
+    # policy's integrated commands live in: absolute pose [tx, ty, tz, rx, ry, rz]
+    # plus gripper state (GRIP_OPEN=0 / GRIP_CLOSED=1).
+    commands: np.ndarray  # (T, 7)
     rewards: np.ndarray  # (T,)
+    gripper_widths: np.ndarray  # (T,) raw widths, used to integrate the base policy chunk
 
 
 def resolve_dataset_path(dataset_path: str | pathlib.Path) -> pathlib.Path:
@@ -64,11 +69,16 @@ def _episode_bounds(f: h5py.File, num_episodes: int | None) -> list[tuple[int, i
 def parse_offline_dataset(
     dataset_path: str | pathlib.Path,
     lowdim_keys: list[str],
-    action_mode: str,
     num_episodes: int | None = None,
     g_thr: float = 18,
 ) -> tuple[list[OfflineEpisode], int]:
-    """Read the per-episode states, actions and rewards out of ``dataset.h5``.
+    """Read the per-episode states, reference commands and rewards out of ``dataset.h5``.
+
+    The recorded command is absolute (pose + gripper state) rather than one of the
+    delta encodings the policy is *trained* on: a delta is only meaningful next to the
+    pose it is anchored to, and the base policy's predictions are integrated back into
+    absolute commands before they enter the buffer (see :func:`populate_offline_buffer`),
+    so both sides of the residual live in the same space.
 
     Rewards are derived from the gripper open/close phases: the episode must split
     into the 5 expected segments (approach, pick-and-transport-plugin,
@@ -93,8 +103,9 @@ def parse_offline_dataset(
                 fields.append(value if value.ndim == 2 else value[:, None])
             state = np.concatenate(fields, -1)
 
-            pose_action = get_pose_action(np.asarray(f['pose'][sl]), action_mode)
-            g_action = gripper_action(np.asarray(f['gripper_width'][sl]), threshold=g_thr)
+            poses = np.asarray(f['pose'][sl])
+            gripper_widths = np.asarray(f['gripper_width'][sl])
+            g_action = gripper_action(gripper_widths, threshold=g_thr)
 
             chunks = find_chunks(g_action.flatten())
             if not (len(chunks) == 5 and chunks[2][-1] == 1):
@@ -107,14 +118,18 @@ def parse_offline_dataset(
             reward[phase1:phase2] = 1.0
             reward[phase2:] = 2.0
 
+            # Same encoding integrate_actions produces: +1/-1 open/closed -> 0/1 state
+            g_state = np.where(g_action > 0, GRIP_OPEN, GRIP_CLOSED)
+
             episodes.append(
                 OfflineEpisode(
                     ep_idx=ep_idx,
                     start=start,
                     length=length,
                     states=state,
-                    actions=np.concatenate([pose_action, g_action], -1),
+                    commands=np.concatenate([poses, g_state], -1),
                     rewards=reward,
+                    gripper_widths=gripper_widths,
                 )
             )
             total_transitions += length
@@ -167,14 +182,21 @@ def populate_offline_buffer(
 ) -> int:
     """Turn consecutive frames of each episode into residual RL transitions.
 
+    The base policy predicts *deltas* (per its action_mode), which only mean something
+    next to the pose they are anchored to, so each predicted chunk is integrated against
+    the frame's recorded pose (``policy.integrate_actions``) into absolute commands --
+    the same thing ``get_base_action`` hands the online path. The transition then stores
+    the recorded command as the action, so the residual the QAgent has to learn is
+    exactly ``recorded_command - base_policy_command``.
+
     Two modes:
     1. GT-as-base (policy_base_actions=False):
-        Uses GT actions as both the base action (in observations) and the target action
-        (in transitions). Teaches residual policy to output zero: residual = GT - GT = 0
+        Uses the recorded command as both the base action (in observations) and the
+        target action (in transitions), i.e. the residual is 0 everywhere.
 
     2. Base-policy-as-base (policy_base_actions=True):
-        Uses base policy to generate base actions and GT actions as targets.
-        More consistent with online training: residual = GT - base_policy_action
+        Base action = the base policy's integrated command, target = recorded command.
+        Matches online training, where the env executes base command + residual.
 
     Returns the number of transitions added.
     """
@@ -189,42 +211,50 @@ def populate_offline_buffer(
         for episode in tqdm(episodes, desc="Processing offline dataset"):
             images = _read_episode_images(f, h5_path.parent, episode, img_h, img_w)
             states = torch.tensor(episode.states).float()
-            actions = torch.tensor(episode.actions).float()
+            commands = torch.tensor(episode.commands).float()
             rewards = torch.tensor(episode.rewards).float()
-            assert len(images) == len(states) == len(actions) == len(rewards)
+            assert len(images) == len(states) == len(commands) == len(rewards)
 
             # Cached previous frame, paired with the current one to form a transition
             prev_obs: dict | None = None
-            prev_action: torch.Tensor | None = None
-            # Base policy predicts a chunk of actions at a time; consumed one per step
-            base_actions = None
+            prev_command: torch.Tensor | None = None
+            # Base policy predicts a chunk at a time; integrated once, consumed one per step
+            base_commands = None
 
-            for step, (image, state, action, reward) in enumerate(zip(images, states, actions, rewards)):
+            for step, (image, state, command, reward) in enumerate(zip(images, states, commands, rewards)):
                 # ------------------------------------------------------------------
                 # Build observation and action directly for replay buffer ----------
                 # ------------------------------------------------------------------
                 # Extract data and keep on CPU (replay buffer uses CPU storage)
                 done_flag = step == len(images) - 1
 
-                # Generate base action based on the selected mode
+                # Generate the base command based on the selected mode
                 if policy_base_actions:
-                    # Use base policy to generate base action from current observation
+                    # Use base policy to generate base command from current observation
                     # Build raw observation first for base policy inference
                     raw_obs = {'rgb': rearrange(image.unsqueeze(0).unsqueeze(0).to(
                         device) / 255.0, 'B T H W C -> B T C H W'), 'state': state.unsqueeze(0).unsqueeze(0).to(device), }
 
-                    # Get base action from base policy
-                    if base_actions is None:
+                    # Predict a chunk and integrate it against this frame's recorded pose,
+                    # which anchors the deltas the policy emits (command[:6] is that pose)
+                    if base_commands is None:
                         with torch.no_grad():
-                            base_actions = base_policy.predict_action(raw_obs).squeeze(0).to(device)[:, :7]
-                    base_action = base_actions[0]
+                            chunk = base_policy.predict_action(raw_obs).squeeze(0)
+                        des_poses, des_gripper, _ = base_policy.integrate_actions(
+                            chunk,
+                            curr_pose=command[:6].numpy(),
+                            curr_gripper_width=float(episode.gripper_widths[step]),
+                        )
+                        base_commands = torch.from_numpy(
+                            np.concatenate([des_poses, des_gripper[:, None]], -1)).float()
+                    base_command = base_commands[0]
 
-                    base_actions = base_actions[1:] if len(base_actions) > 1 else None
+                    base_commands = base_commands[1:] if len(base_commands) > 1 else None
                 else:
                     assert False, f"Not Implemented"
 
                 # Build observation dict directly in target format
-                curr_obs = {"observation.state": state.cpu(), "observation.base_action": base_action.cpu(),
+                curr_obs = {"observation.state": state.cpu(), "observation.base_action": base_command.cpu(),
                             "observation.rgb": image.cpu()}
 
                 # Convert images to uint8 for memory-efficient storage
@@ -238,7 +268,8 @@ def populate_offline_buffer(
                     transition = TensorDict(
                         {
                             "obs": TensorDict(prev_obs, batch_size=[]),
-                            "action": prev_action,
+                            # the executed action is the recorded reference command
+                            "action": prev_command,
                             "next": TensorDict(
                                 {
                                     "obs": TensorDict(curr_obs, batch_size=[]),
@@ -257,7 +288,7 @@ def populate_offline_buffer(
                     transitions += 1
 
                 # Cache current frame for pairing with the next one ---------------
-                prev_obs, prev_action = curr_obs, action
+                prev_obs, prev_command = curr_obs, command
 
     # Log final statistics
     print(f"Added {transitions} transitions")

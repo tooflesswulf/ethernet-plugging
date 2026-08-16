@@ -193,8 +193,10 @@ def main(cfg: ResidualTD3DexmgConfig):
     print('No Normalization is done to the dataset!!!!!')
     print("#" * 20)
     offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
+    # Commands are absolute, so the parse no longer needs the policy's action_mode; the
+    # base policy's deltas are integrated into commands when the buffer is populated.
     offline_episodes, total_transitions = parse_offline_dataset(
-        offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
+        offline_dataset_path, lowdim_keys, cfg.offline_data.num_episodes)
     grip = GripperStats(*base_policy.grip_stats)
 
     def get_envs(
