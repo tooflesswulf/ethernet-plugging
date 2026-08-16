@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: CC-BY-NC-4.0
 
 from __future__ import annotations
-from PIL import Image
-from einops import rearrange
 import os
 import pprint
 import random
@@ -24,11 +22,12 @@ from tqdm import tqdm
 from env import Env, URPose, GRIP_OPEN
 from agent.model.policy import DiffusionPolicy
 from agent.dataset.sequence import GripperStats
-from agent.utils.utils import get_dataset
 from agent.rl_finetuning.config.residual_td3 import ResidualTD3DexmgConfig
 from agent.rl_finetuning.off_policy.common_utils import utils
 from agent.rl_finetuning.off_policy.rl.q_agent import QAgent
 from agent.rl_finetuning.utils.dtype import to_uint8
+from agent.rl_finetuning.utils.normalization import ActionScaler, StateStandardizer
+from agent.rl_finetuning.utils.offline_dataset_to_buffer import parse_offline_dataset, populate_offline_buffer
 from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
 from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
 
@@ -88,6 +87,98 @@ def _add_transitions_to_buffer(
     online_rb.add(td)
 
 
+def _read_buffer_field(rb: ReplayBuffer, key, num_entries: int) -> torch.Tensor:
+    """Read one field of the first *num_entries* transitions stored in *rb*.
+
+    Indexes the underlying storage tensordict so that only the requested field is
+    materialised -- slicing the buffer itself would also copy the stored images.
+    """
+    storage = getattr(rb, "storage", None)
+    if storage is None:
+        storage = rb._storage
+
+    td = getattr(storage, "_storage", None)
+    if td is None:  # fall back to the public (copying) interface
+        return storage[:num_entries].get(key).float()
+    return td.get(key)[:num_entries].float()
+
+
+def _compute_dataset_norm_stats(
+    *,
+    online_rb: ReplayBuffer,
+    offline_rb: ReplayBuffer | None,
+    action_dim: int,
+    min_action_range: float,
+    min_state_std: float,
+    device: torch.device,
+) -> tuple[dict, ActionScaler, StateStandardizer]:
+    """Compute normalization statistics over everything currently in the buffers.
+
+    Actions get min/max limits (for scaling to [-1, 1]) and states get mean/std
+    (for standardization).  Statistics are pooled over the offline dataset and the
+    online warm-up transitions so they cover the distribution the agent trains on.
+
+    Returns the raw stats dict together with the configured scaler / standardizer.
+    """
+    action_chunks: list[torch.Tensor] = []
+    state_chunks: list[torch.Tensor] = []
+
+    for name, rb in (("online", online_rb), ("offline", offline_rb)):
+        num_entries = 0 if rb is None else len(rb)
+        if num_entries == 0:
+            continue
+
+        actions = _read_buffer_field(rb, ("action",), num_entries).reshape(num_entries, -1)
+        states = _read_buffer_field(rb, ("obs", "observation.state"), num_entries).reshape(num_entries, -1)
+
+        # Offline actions may still carry the trailing "done" dimension
+        actions = actions[:, :action_dim]
+
+        print(f"  {name} buffer: {num_entries} transitions")
+        action_chunks.append(actions)
+        state_chunks.append(states)
+
+    if not action_chunks:
+        raise RuntimeError("Cannot compute normalization statistics: both replay buffers are empty")
+
+    actions = torch.cat(action_chunks, dim=0)
+    states = torch.cat(state_chunks, dim=0)
+
+    stats = {
+        "action": {"min": actions.min(dim=0).values, "max": actions.max(dim=0).values},
+        "state": {
+            "mean": states.mean(dim=0),
+            "std": states.std(dim=0, unbiased=False),
+            "min": states.min(dim=0).values,
+            "max": states.max(dim=0).values,
+        },
+    }
+
+    print(f"Normalization statistics over {len(actions)} transitions:")
+    print(f"  action min: {stats['action']['min'].tolist()}")
+    print(f"  action max: {stats['action']['max'].tolist()}")
+    print(f"  state mean: {stats['state']['mean'].tolist()}")
+    print(f"  state std : {stats['state']['std'].tolist()}")
+
+    action_scaler = ActionScaler(
+        action_min=stats["action"]["min"],
+        action_max=stats["action"]["max"],
+        # Stats already span the offline data *and* the online warm-up rollouts,
+        # so there is no need to expand the range further.
+        action_scale=0.0,
+        min_range_per_dim=min_action_range,
+        device=device,
+    )
+    state_standardizer = StateStandardizer(
+        state_mean=stats["state"]["mean"],
+        state_std=stats["state"]["std"],
+        min_std=min_state_std,
+        device=device,
+    )
+
+    return stats, action_scaler, state_standardizer
+
+
 # -----------------------------------------------------------------------------
 # Main training loop -----------------------------------------------------------
 # -----------------------------------------------------------------------------
@@ -121,7 +212,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     print('No Normalization is done to the dataset!!!!!')
     print("#" * 20)
     offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
-    offline_episodes, ep_states, ep_actions, ep_rewards, total_transitions = get_dataset(
+    offline_episodes, total_transitions = parse_offline_dataset(
         offline_dataset_path, lowdim_keys, base_policy.action_mode, cfg.offline_data.num_episodes)
     grip = GripperStats(*base_policy.grip_stats)
 
@@ -243,136 +334,16 @@ def main(cfg: ResidualTD3DexmgConfig):
     # ------------------------------------------------------------------
     # Convert offline dataset episodes into transitions and fill buffer
     # ------------------------------------------------------------------
-    def _populate_offline_buffer(
-        ep_paths,
-        ep_states,
-        ep_actions,
-        ep_rewards,
-        rb: ReplayBuffer,
-        use_base_policy_for_base_actions: bool = False,
-        base_policy=None,
-        img_h=128, img_w=128
-    ) -> int:
-        """
-        Iterates through *dataset* sequentially, converts consecutive frames
-        into residual RL transitions and pushes them into *rb*.
-
-        Two modes:
-        1. GT-as-base (use_base_policy_for_base_actions=False):
-           Uses GT actions as both the base action (in observations) and the target action
-           (in transitions). Teaches residual policy to output zero: residual = GT - GT = 0
-
-        2. Base-policy-as-base (use_base_policy_for_base_actions=True):
-           Uses base policy to generate base actions and GT actions as targets.
-           More consistent with online training: residual = GT - base_policy_action
-
-        Returns the number of transitions added.
-        """
-        if use_base_policy_for_base_actions and base_policy is None:
-            raise ValueError("base_policy must be provided when use_base_policy_for_base_actions=True")
-
-        # Populate buffer from pre-loaded dataset
-        print("Populating offline buffer from dataset...")
-
-        episode_cache: dict[int, dict] = {}
-        transitions = 0
-        step_id = 0
-
-        for ep_idx, ep_path in enumerate(tqdm(ep_paths, desc="Processing offline dataset")):
-            ep_image_dir = os.path.join(ep_path, 'images')
-            ep_state = torch.tensor(ep_states[ep_idx]).float()
-            ep_action = torch.tensor(ep_actions[ep_idx]).float()
-            ep_reward = torch.tensor(ep_rewards[ep_idx]).float()
-            images = torch.tensor(np.array([Image.open(os.path.join(ep_image_dir, n)).resize((img_h, img_w)) for n in sorted(
-                os.listdir(ep_image_dir), key=lambda x: int(x.replace('.png', '')))])).float()
-            assert len(images) == len(ep_state)
-            base_actions = None
-            for step, (image, state, action, reward) in enumerate(zip(images, ep_state, ep_action, ep_reward)):
-
-                # ------------------------------------------------------------------
-                # Build observation and action directly for replay buffer ----------
-                # ------------------------------------------------------------------
-                # Extract data and keep on CPU (replay buffer uses CPU storage)
-                done_flag = step == len(images) - 1
-
-                # Generate base action based on the selected mode
-                if use_base_policy_for_base_actions:
-                    # Use base policy to generate base action from current observation
-                    # Build raw observation first for base policy inference
-                    raw_obs = {'rgb': rearrange(image.unsqueeze(0).unsqueeze(0).to(
-                        device) / 255.0, 'B T H W C -> B T C H W'), 'state': state.unsqueeze(0).unsqueeze(0).to(device), }
-
-                    # Get base action from base policy
-                    if base_actions is None:
-                        with torch.no_grad():
-                            base_actions = base_policy.predict_action(raw_obs).squeeze(0).to(device)[:, :7]
-                    base_action = base_actions[0]
-
-                    base_actions = base_actions[1:] if len(base_actions) > 1 else None
-                else:
-                    assert False, f"Not Implemented"
-
-                # Build observation dict directly in target format
-                curr_obs = {"observation.state": state.cpu(), "observation.base_action": base_action.cpu(),
-                            "observation.rgb": image.cpu()}
-
-                # Convert images to uint8 for memory-efficient storage
-                to_uint8(curr_obs, ["observation.rgb"])
-
-                # ------------------------------------------------------------------
-                # If we already cached the *previous* frame for this episode we can
-                # create transitions now.
-                # ------------------------------------------------------------------
-                if ep_idx in episode_cache:
-                    # Create transitions for each combination of prev and current variants
-                    prev_obs = episode_cache[ep_idx]["obs"]
-                    prev_action_scaled = episode_cache[ep_idx]["action"]
-
-                    transition = TensorDict(
-                        {
-                            "obs": TensorDict(prev_obs, batch_size=[]),
-                            "action": prev_action_scaled,
-                            "next": TensorDict(
-                                {
-                                    "obs": TensorDict(curr_obs, batch_size=[]),
-                                    "done": torch.tensor(done_flag, dtype=torch.bool),
-                                    "reward": torch.tensor(reward, dtype=torch.float32),
-                                },
-                                batch_size=[],
-                            ),
-                            # High initial priority for new samples
-                            "_priority": torch.tensor(10.0, dtype=torch.float32),
-                        },
-                        batch_size=[],
-                    ).unsqueeze(0)
-
-                    rb.add(transition)
-                    transitions += 1
-
-                    step_id += 1
-                else:
-                    step_id = 0
-
-                # Cache current frame for pairing with the next one ---------------
-                episode_cache[ep_idx] = {
-                    "obs": curr_obs,
-                    "action": action,
-                    "done": done_flag,
-                    "step_id": step_id,
-                }
-
-        # Log final statistics
-        print(f"Added {transitions} transitions")
-
-        return transitions
-
     added = 0
     if cfg.algo.offline_fraction > 0.0:
-        added = _populate_offline_buffer(
-            offline_episodes, ep_states, ep_actions, ep_rewards,
+        added = populate_offline_buffer(
+            offline_dataset_path,
+            offline_episodes,
             rb=offline_rb,
-            use_base_policy_for_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
+            policy_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
             base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
+            img_h=img_h, img_w=img_w,
+            device=device,
         )
 
         print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
@@ -458,6 +429,21 @@ def main(cfg: ResidualTD3DexmgConfig):
                 time.sleep(2)
                 obs, _ = env.reset()
                 print('Gripper after reset:', env.env.des_gripper_state, env.env.gripper_state)
+
+    # ------------------------------------------------------------------
+    # Dataset normalization statistics ---------------------------------
+    # ------------------------------------------------------------------
+    # Both buffers are filled at this point, so the stats cover the offline
+    # demonstrations as well as the online warm-up transitions.
+    print("Computing dataset normalization statistics...")
+    norm_stats, action_scaler, state_standardizer = _compute_dataset_norm_stats(
+        online_rb=online_rb,
+        offline_rb=offline_rb if cfg.algo.offline_fraction > 0.0 else None,
+        action_dim=action_dim,
+        min_action_range=cfg.offline_data.min_action_range,
+        min_state_std=cfg.offline_data.min_state_std,
+        device=device,
+    )
 
     run_name = f"seed{cfg.seed}"
     if cfg.wandb.name is not None:
