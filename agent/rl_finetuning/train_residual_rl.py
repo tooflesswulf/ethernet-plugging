@@ -30,9 +30,48 @@ from agent.rl_finetuning.utils.offline_dataset_to_buffer import parse_offline_da
 from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
 from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
 from agent.rl_finetuning.utils.checkpoint import save_replay_buffers, load_replay_buffers
+from agent.rl_finetuning.utils.normalization import _compute_dataset_norm_stats
 
 rl_scratch_dir = "./../../rl_online_buffer"
 rl_buffer_dir = "./../../rl_dump_buffer"
+
+
+def replay_buffers_from_cfg(cfg: ResidualTD3DexmgConfig, max_offline_transitions: int):
+    # -----------------------------------------------------------------
+    # Use TensorDictPrioritizedReplayBuffer for unified PER support
+    # For uniform sampling, we'll use alpha=0 and beta=0, and never update priorities
+    # -----------------------------------------------------------------
+    alpha = cfg.algo.priority_alpha if cfg.algo.sampling_strategy == "prioritized_replay" else 0.0
+    beta = cfg.algo.priority_beta if cfg.algo.sampling_strategy == "prioritized_replay" else 0.0
+
+    online_batch_size = int(cfg.algo.batch_size * (1 - cfg.algo.offline_fraction))
+    offline_batch_size = int(cfg.algo.batch_size * cfg.algo.offline_fraction)
+
+    storage = LazyMemmapStorage(cfg.algo.buffer_size, scratch_dir=rl_scratch_dir)
+    online_rb = TensorDictPrioritizedReplayBuffer(
+        storage=storage,  # on disk storage
+        alpha=alpha,
+        beta=beta,
+        eps=1e-6,  # Small epsilon added to priorities to prevent zero values
+        priority_key="_priority",
+        transform=MultiStepTransform(n_steps=cfg.algo.n_step, gamma=cfg.algo.gamma),
+        pin_memory=True,
+        prefetch=cfg.algo.prefetch_batches,  # Add prefetching
+        batch_size=online_batch_size,
+    )
+
+    offline_rb = TensorDictPrioritizedReplayBuffer(
+        storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"),  # keep in RAM
+        alpha=alpha,
+        beta=beta,
+        eps=1e-6,  # Small epsilon added to priorities to prevent zero values
+        priority_key="_priority",
+        transform=MultiStepTransform(n_steps=cfg.algo.n_step, gamma=cfg.algo.gamma),
+        pin_memory=True,
+        prefetch=cfg.algo.prefetch_batches,  # Add prefetching
+        batch_size=max(offline_batch_size, 1),  # Ensure batch_size is at least 1
+    )
+    return online_rb, offline_rb
 
 
 def _add_transitions_to_buffer(
@@ -86,80 +125,6 @@ def _add_transitions_to_buffer(
     ).unsqueeze(0)
 
     online_rb.add(td)
-
-
-def _read_buffer_field(rb: ReplayBuffer, key, num_entries: int) -> torch.Tensor:
-    """Read one field of the first *num_entries* transitions stored in *rb*.
-
-    Indexes the underlying storage tensordict so that only the requested field is
-    materialised -- slicing the buffer itself would also copy the stored images.
-    """
-    storage = getattr(rb, "storage", None)
-    if storage is None:
-        storage = rb._storage
-
-    td = getattr(storage, "_storage", None)
-    if td is None:  # fall back to the public (copying) interface
-        return storage[:num_entries].get(key).float()
-    return td.get(key)[:num_entries].float()
-
-
-def _compute_dataset_norm_stats(
-    *,
-    online_rb: ReplayBuffer,
-    offline_rb: ReplayBuffer | None,
-    action_dim: int,
-) -> dict:
-    """Compute normalization statistics over everything currently in the buffers.
-
-    Actions get min/max limits (for scaling to [-1, 1]) and states get mean/std
-    (for standardization).  Statistics are pooled over the offline dataset and the
-    online warm-up transitions so they cover the distribution the agent trains on.
-
-    Returns stats in the shape QAgent.set_norm_stats expects; the agent applies the
-    safeguards and keeps them as checkpointed buffers.
-    """
-    action_chunks: list[torch.Tensor] = []
-    state_chunks: list[torch.Tensor] = []
-
-    for name, rb in (("online", online_rb), ("offline", offline_rb)):
-        num_entries = 0 if rb is None else len(rb)
-        if num_entries == 0:
-            continue
-
-        actions = _read_buffer_field(rb, ("action",), num_entries).reshape(num_entries, -1)
-        states = _read_buffer_field(rb, ("obs", "observation.state"), num_entries).reshape(num_entries, -1)
-
-        # Offline actions may still carry the trailing "done" dimension
-        actions = actions[:, :action_dim]
-
-        print(f"  {name} buffer: {num_entries} transitions")
-        action_chunks.append(actions)
-        state_chunks.append(states)
-
-    if not action_chunks:
-        raise RuntimeError("Cannot compute normalization statistics: both replay buffers are empty")
-
-    actions = torch.cat(action_chunks, dim=0)
-    states = torch.cat(state_chunks, dim=0)
-
-    stats = {
-        "actions": {"min": actions.min(dim=0).values, "max": actions.max(dim=0).values},
-        "states": {
-            "mean": states.mean(dim=0),
-            "std": states.std(dim=0, unbiased=False),
-            "min": states.min(dim=0).values,
-            "max": states.max(dim=0).values,
-        },
-    }
-
-    print(f"Normalization statistics over {len(actions)} transitions:")
-    print(f"  action min: {stats['actions']['min'].tolist()}")
-    print(f"  action max: {stats['actions']['max'].tolist()}")
-    print(f"  state mean: {stats['states']['mean'].tolist()}")
-    print(f"  state std : {stats['states']['std'].tolist()}")
-
-    return stats
 
 
 # -----------------------------------------------------------------------------
@@ -273,48 +238,11 @@ def main(cfg: ResidualTD3DexmgConfig):
     # ---------------------------------------------------------------------
     # Replay buffers -------------------------------------------------------
     # ---------------------------------------------------------------------
-    # -----------------------------------------------------------------
-    # Use TensorDictPrioritizedReplayBuffer for unified PER support
-    # For uniform sampling, we'll use alpha=0 and beta=0, and never update priorities
-    # -----------------------------------------------------------------
-    alpha = cfg.algo.priority_alpha if cfg.algo.sampling_strategy == "prioritized_replay" else 0.0
-    beta = cfg.algo.priority_beta if cfg.algo.sampling_strategy == "prioritized_replay" else 0.0
-
-    online_batch_size = int(cfg.algo.batch_size * (1 - cfg.algo.offline_fraction))
-    offline_batch_size = int(cfg.algo.batch_size * cfg.algo.offline_fraction)
-
-    if cfg.algo.offline_fraction == 0.0:
-        print("Online-only training mode: offline_fraction=0.0")
-
-    # Use TensorDictPrioritizedReplayBuffer with optimized prefetching
     if os.path.isdir(rl_scratch_dir):
         shutil.rmtree(rl_scratch_dir)
-    storage = LazyMemmapStorage(cfg.algo.buffer_size, scratch_dir=rl_scratch_dir)
-    online_rb = TensorDictPrioritizedReplayBuffer(
-        storage=storage,  # on disk storage
-        alpha=alpha,
-        beta=beta,
-        eps=1e-6,  # Small epsilon added to priorities to prevent zero values
-        priority_key="_priority",
-        transform=MultiStepTransform(n_steps=cfg.algo.n_step, gamma=cfg.algo.gamma),
-        pin_memory=True,
-        prefetch=cfg.algo.prefetch_batches,  # Add prefetching
-        batch_size=online_batch_size,
-    )
-
-    # Calculate buffer size for simplified approach (1 transition per frame pair)
-    max_offline_transitions = total_transitions
-    offline_rb = TensorDictPrioritizedReplayBuffer(
-        storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"),  # keep in RAM
-        alpha=alpha,
-        beta=beta,
-        eps=1e-6,  # Small epsilon added to priorities to prevent zero values
-        priority_key="_priority",
-        transform=MultiStepTransform(n_steps=cfg.algo.n_step, gamma=cfg.algo.gamma),
-        pin_memory=True,
-        prefetch=cfg.algo.prefetch_batches,  # Add prefetching
-        batch_size=max(offline_batch_size, 1),  # Ensure batch_size is at least 1
-    )
+    online_batch_size = int(cfg.algo.batch_size * (1 - cfg.algo.offline_fraction))
+    offline_batch_size = int(cfg.algo.batch_size * cfg.algo.offline_fraction)
+    online_rb, offline_rb = replay_buffers_from_cfg(cfg, max_offline_transitions=total_transitions)
 
     # ------------------------------------------------------------------
     # Convert offline dataset episodes into transitions and fill buffer
