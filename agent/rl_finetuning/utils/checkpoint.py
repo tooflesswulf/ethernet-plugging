@@ -129,3 +129,59 @@ def save_checkpoint(
 
     torch.save(checkpoint_data, checkpoint_path)
     print(f"💾 Saved checkpoint to: {checkpoint_path}")
+
+
+# Normalization buffers were added to QAgent after the first checkpoints were written;
+# a checkpoint without them loads fine and leaves the agent's identity-transform defaults.
+_NORM_STAT_KEYS = {"action_min", "action_max", "state_mean", "state_std", "_norm_stats_set"}
+
+
+def load_checkpoint(
+    agent: QAgent,
+    checkpoint_path: str | Path,
+    load_optimizers: bool = True,
+) -> dict:
+    """Load a QAgent checkpoint in place.
+
+    Restores weights *and* the dataset normalization stats (they are registered
+    buffers, so they travel inside ``agent_state_dict``).
+
+    Args:
+        agent: The QAgent to load into; must be built with the same architecture.
+        checkpoint_path: Path to a file written by :func:`save_checkpoint`.
+        load_optimizers: Also restore optimizer / scheduler state.
+
+    Returns:
+        The checkpoint dict, minus the state dicts already applied (so callers can
+        read ``global_step``, ``config``, ``success_rate``, ...).
+    """
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_data = torch.load(checkpoint_path, map_location=agent.cfg.device, weights_only=False)
+
+    missing, unexpected = agent.load_state_dict(checkpoint_data["agent_state_dict"], strict=False)
+    unknown_missing = [k for k in missing if k not in _NORM_STAT_KEYS]
+    if unknown_missing or unexpected:
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_path} does not match this agent: "
+            f"missing={unknown_missing}, unexpected={list(unexpected)}")
+    if missing:
+        print(f"⚠️  Checkpoint predates normalization stats ({sorted(missing)}); "
+              "agent keeps its identity-transform defaults.")
+    elif not agent.norm_stats_set:
+        print("⚠️  Checkpoint carries identity-transform normalization stats "
+              "(set_norm_stats was never called before saving).")
+
+    if load_optimizers and "optimizer_state_dict" in checkpoint_data:
+        optimizer_state = checkpoint_data["optimizer_state_dict"]
+        agent.actor_opt.load_state_dict(optimizer_state["actor_opt"])
+        agent.critic_opt.load_state_dict(optimizer_state["critic_opt"])
+        agent.encoder_opt.load_state_dict(optimizer_state["encoder_opt"])
+
+        for name, scheduler_state in checkpoint_data.get("scheduler_state_dict", {}).items():
+            scheduler = getattr(agent, name, None)
+            if scheduler is not None:
+                scheduler.load_state_dict(scheduler_state)
+
+    print(f"📂 Loaded checkpoint from: {checkpoint_path}")
+    return {k: v for k, v in checkpoint_data.items()
+            if k not in ("agent_state_dict", "optimizer_state_dict", "scheduler_state_dict")}

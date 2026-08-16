@@ -95,6 +95,15 @@ class QAgent(nn.Module):
         self.critic_target = copy.deepcopy(self.critic)
         self.actor_target = copy.deepcopy(self.actor)
 
+        # Dataset normalization stats as buffers: saved in state_dict, moved with .to(device).
+        # Defaults are the identity transform (states untouched, actions already in [-1, 1]),
+        # so an agent whose stats were never set behaves exactly as before.
+        self.register_buffer("action_min", -torch.ones(action_dim))
+        self.register_buffer("action_max", torch.ones(action_dim))
+        self.register_buffer("state_mean", torch.zeros(prop_shape[0]))
+        self.register_buffer("state_std", torch.ones(prop_shape[0]))
+        self.register_buffer("_norm_stats_set", torch.tensor(False))
+
         print(common_utils.wrap_ruler("encoder weights"))
         print(self.encoders)
         common_utils.count_parameters(self.encoders)
@@ -184,6 +193,83 @@ class QAgent(nn.Module):
     def set_stats(self, stats):
         self.stats = stats
 
+    # ------------------------------------------------------------------
+    # Observation / action normalization --------------------------------
+    # ------------------------------------------------------------------
+    def set_norm_stats(self, stats: dict, min_action_range: float = 1e-1, min_state_std: float = 1e-1):
+        """Install the dataset normalization statistics.
+
+        Args:
+            stats: ``{'actions': {'min', 'max'}, 'states': {'mean', 'std'}}`` in raw
+                (unnormalized) units -- see ``_compute_dataset_norm_stats`` in
+                ``train_residual_rl.py``.
+            min_action_range: per-dim floor on the action range, so a dimension that
+                barely moves in the dataset does not blow up when scaled to [-1, 1].
+            min_state_std: per-dim floor on the state std, same reasoning.
+
+        The safeguards are applied here rather than at use time, so the buffers that
+        land in a checkpoint are exactly the transform act()/update() apply.
+        """
+        action_min = torch.as_tensor(stats["actions"]["min"], dtype=torch.float32)
+        action_max = torch.as_tensor(stats["actions"]["max"], dtype=torch.float32)
+        state_mean = torch.as_tensor(stats["states"]["mean"], dtype=torch.float32)
+        state_std = torch.as_tensor(stats["states"]["std"], dtype=torch.float32)
+
+        # Widen degenerate action dims symmetrically around their midpoint
+        action_mid = (action_min + action_max) / 2
+        action_half_range = torch.clamp((action_max - action_min) / 2, min=min_action_range / 2)
+
+        self.action_min.copy_(action_mid - action_half_range)
+        self.action_max.copy_(action_mid + action_half_range)
+        self.state_mean.copy_(state_mean)
+        self.state_std.copy_(torch.clamp(state_std, min=min_state_std))
+        self._norm_stats_set.fill_(True)
+
+        print("QAgent normalization stats set:")
+        print(f"  action min: {self.action_min.tolist()}")
+        print(f"  action max: {self.action_max.tolist()}")
+        print(f"  state mean: {self.state_mean.tolist()}")
+        print(f"  state std : {self.state_std.tolist()}")
+
+    @property
+    def norm_stats_set(self) -> bool:
+        """False while the agent still holds the identity-transform defaults."""
+        return bool(self._norm_stats_set)
+
+    def normalize_state(self, state: torch.Tensor) -> torch.Tensor:
+        """Raw state -> zero-mean / unit-std."""
+        return (state - self.state_mean) / self.state_std
+
+    def scale_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Raw action -> [-1, 1] (clamped, matching how the env executes actions)."""
+        action = torch.clamp(action, self.action_min, self.action_max)
+        return 2.0 * (action - self.action_min) / (self.action_max - self.action_min) - 1.0
+
+    def unscale_action(self, action: torch.Tensor) -> torch.Tensor:
+        """[-1, 1] action -> raw units."""
+        action = torch.clamp(action, -1.0, 1.0)
+        return self.action_min + (action + 1.0) * (self.action_max - self.action_min) / 2.0
+
+    def unscale_action_delta(self, delta: torch.Tensor) -> torch.Tensor:
+        """[-1, 1]-space *offset* -> raw-space offset.
+
+        A residual is a difference of two actions, so only the linear part of the
+        scaling applies -- shifting by action_min would double-count the offset.
+        """
+        return delta * (self.action_max - self.action_min) / 2.0
+
+    def _normalize_obs(self, obs):
+        """Raw observation -> the normalized view the networks are trained on.
+
+        Writes into a shallow copy, so the caller's dict (or the sampled batch) keeps
+        its raw values. Images are left alone; ``_encode`` handles those.
+        """
+        obs = obs.copy()
+        obs["observation.state"] = self.normalize_state(obs["observation.state"].float())
+        if "observation.base_action" in obs.keys():
+            obs["observation.base_action"] = self.scale_action(obs["observation.base_action"].float())
+        return obs
+
     def train(self, training=True):
         self.training = training
         self.encoders.train(training)
@@ -257,12 +343,19 @@ class QAgent(nn.Module):
         return should_unsqueeze
 
     def act(self, obs: dict[str, torch.Tensor], *, eval_mode=False, stddev=0.0, cpu=True) -> torch.Tensor:
-        """This function takes tensor and returns actions in tensor"""
+        """Take a *raw* (unnormalized) observation and return a *raw* action.
+
+        Normalization happens inside: the state is standardized and the base action is
+        scaled to [-1, 1] before the networks see them, and the action coming out of the
+        actor is converted back to raw units -- as a residual offset when the actor is a
+        residual actor, otherwise as a full action.
+        """
         assert not self.training
         assert not self.actor.training
         # Make a shallow copy of the observation dict
         obs = copy.copy(obs)
-        obs = to_torch(obs, device = 'cuda')
+        obs = to_torch(obs, device=self.cfg.device)
+        obs = self._normalize_obs(obs)
         unsqueezed = self._maybe_unsqueeze_(obs)
 
         assert "feat" not in obs
@@ -278,6 +371,9 @@ class QAgent(nn.Module):
 
         if unsqueezed:
             action = action.squeeze(0)
+
+        # Networks work in [-1, 1]; the caller (env) works in raw units
+        action = self.unscale_action_delta(action) if self.residual_actor else self.unscale_action(action)
 
         action = action.detach()
         if cpu:
@@ -468,12 +564,14 @@ class QAgent(nn.Module):
         stddev,
         update_actor,
     ):
-        obs: dict[str, torch.Tensor] = batch["obs"].float()
-        action: torch.Tensor = batch["action"].float()
+        # The buffers hold raw measurements; normalize them here so every caller can
+        # stay in raw units (see set_norm_stats / _normalize_obs).
+        obs: dict[str, torch.Tensor] = self._normalize_obs(batch["obs"].float())
+        action: torch.Tensor = self.scale_action(batch["action"].float())
         reward: torch.Tensor = batch[("next", "reward")].float()
         discount: torch.Tensor = batch["gamma"]
         next_nonterminal: torch.Tensor = batch["nonterminal"]
-        next_obs: dict[str, torch.Tensor] = batch[("next", "obs")].float()
+        next_obs: dict[str, torch.Tensor] = self._normalize_obs(batch[("next", "obs")].float())
     
         # To not bootstrap on terminal states we zero out the discount factor for terminal next states
         effective_discount = discount * next_nonterminal

@@ -26,7 +26,6 @@ from agent.rl_finetuning.config.residual_td3 import ResidualTD3DexmgConfig
 from agent.rl_finetuning.off_policy.common_utils import utils
 from agent.rl_finetuning.off_policy.rl.q_agent import QAgent
 from agent.rl_finetuning.utils.dtype import to_uint8
-from agent.rl_finetuning.utils.normalization import ActionScaler, StateStandardizer
 from agent.rl_finetuning.utils.offline_dataset_to_buffer import parse_offline_dataset, populate_offline_buffer
 from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
 from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
@@ -108,17 +107,15 @@ def _compute_dataset_norm_stats(
     online_rb: ReplayBuffer,
     offline_rb: ReplayBuffer | None,
     action_dim: int,
-    min_action_range: float,
-    min_state_std: float,
-    device: torch.device,
-) -> tuple[dict, ActionScaler, StateStandardizer]:
+) -> dict:
     """Compute normalization statistics over everything currently in the buffers.
 
     Actions get min/max limits (for scaling to [-1, 1]) and states get mean/std
     (for standardization).  Statistics are pooled over the offline dataset and the
     online warm-up transitions so they cover the distribution the agent trains on.
 
-    Returns the raw stats dict together with the configured scaler / standardizer.
+    Returns stats in the shape QAgent.set_norm_stats expects; the agent applies the
+    safeguards and keeps them as checkpointed buffers.
     """
     action_chunks: list[torch.Tensor] = []
     state_chunks: list[torch.Tensor] = []
@@ -145,8 +142,8 @@ def _compute_dataset_norm_stats(
     states = torch.cat(state_chunks, dim=0)
 
     stats = {
-        "action": {"min": actions.min(dim=0).values, "max": actions.max(dim=0).values},
-        "state": {
+        "actions": {"min": actions.min(dim=0).values, "max": actions.max(dim=0).values},
+        "states": {
             "mean": states.mean(dim=0),
             "std": states.std(dim=0, unbiased=False),
             "min": states.min(dim=0).values,
@@ -155,28 +152,12 @@ def _compute_dataset_norm_stats(
     }
 
     print(f"Normalization statistics over {len(actions)} transitions:")
-    print(f"  action min: {stats['action']['min'].tolist()}")
-    print(f"  action max: {stats['action']['max'].tolist()}")
-    print(f"  state mean: {stats['state']['mean'].tolist()}")
-    print(f"  state std : {stats['state']['std'].tolist()}")
+    print(f"  action min: {stats['actions']['min'].tolist()}")
+    print(f"  action max: {stats['actions']['max'].tolist()}")
+    print(f"  state mean: {stats['states']['mean'].tolist()}")
+    print(f"  state std : {stats['states']['std'].tolist()}")
 
-    action_scaler = ActionScaler(
-        action_min=stats["action"]["min"],
-        action_max=stats["action"]["max"],
-        # Stats already span the offline data *and* the online warm-up rollouts,
-        # so there is no need to expand the range further.
-        action_scale=0.0,
-        min_range_per_dim=min_action_range,
-        device=device,
-    )
-    state_standardizer = StateStandardizer(
-        state_mean=stats["state"]["mean"],
-        state_std=stats["state"]["std"],
-        min_std=min_state_std,
-        device=device,
-    )
-
-    return stats, action_scaler, state_standardizer
+    return stats
 
 
 # -----------------------------------------------------------------------------
@@ -436,13 +417,17 @@ def main(cfg: ResidualTD3DexmgConfig):
     # Both buffers are filled at this point, so the stats cover the offline
     # demonstrations as well as the online warm-up transitions.
     print("Computing dataset normalization statistics...")
-    norm_stats, action_scaler, state_standardizer = _compute_dataset_norm_stats(
+    norm_stats = _compute_dataset_norm_stats(
         online_rb=online_rb,
         offline_rb=offline_rb if cfg.algo.offline_fraction > 0.0 else None,
         action_dim=action_dim,
+    )
+    # From here on the agent owns normalization: act()/update() take raw measurements
+    # and these stats ride along in the checkpoint as buffers.
+    agent.set_norm_stats(
+        norm_stats,
         min_action_range=cfg.offline_data.min_action_range,
         min_state_std=cfg.offline_data.min_state_std,
-        device=device,
     )
 
     run_name = f"seed{cfg.seed}"
