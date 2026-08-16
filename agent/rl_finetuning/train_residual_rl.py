@@ -22,8 +22,10 @@ from agent.rl_finetuning.off_policy.rl.q_agent import QAgent
 from agent.rl_finetuning.utils.dtype import to_uint8
 from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
 from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
+from agent.rl_finetuning.utils.checkkpoint import save_replay_buffers, load_replay_buffers
 
 rl_scratch_dir = "./../../rl_online_buffer"
+rl_buffer_dir = "./../../rl_dump_buffer"
 
 def _add_transitions_to_buffer(
     *,
@@ -104,7 +106,6 @@ def main(cfg: ResidualTD3DexmgConfig):
         action_dim -= 1 # drop done dimension
     lowdim_keys = base_policy.obs_fields 
    
-
     # Load dataset and get normalization functions early
     print("Loading dataset and setting up normalization...")
     print("#"*20)
@@ -132,7 +133,6 @@ def main(cfg: ResidualTD3DexmgConfig):
             gpullback=grip.grip_pullback_mm,
         )
         
-
         # Wrap it with the base policy wrapper
         return BasePolicyVecEnvWrapper(env=env,  base_policy=base_policy, image_size = (img_h, img_w), lowdim_keys=lowdim_keys, device=device)
 
@@ -211,7 +211,6 @@ def main(cfg: ResidualTD3DexmgConfig):
         prefetch=cfg.algo.prefetch_batches,  # Add prefetching
         batch_size=online_batch_size,
     )
-    
 
     # Calculate buffer size for simplified approach (1 transition per frame pair)
     max_offline_transitions = total_transitions
@@ -347,19 +346,21 @@ def main(cfg: ResidualTD3DexmgConfig):
 
     added = 0
     if cfg.algo.offline_fraction > 0.0:
-        added = _populate_offline_buffer(
-            offline_episodes, ep_states, ep_actions, ep_rewards,
-            rb=offline_rb,
-            use_base_policy_for_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
-            base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
-        )
-
-        print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
+        offline_rb, flag = load_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir )
+        if not flag:
+            added = _populate_offline_buffer(
+                offline_episodes, ep_states, ep_actions, ep_rewards,
+                rb=offline_rb,
+                use_base_policy_for_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
+                base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
+            )
+            print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
+            dump_replay_buffer(offline_rb, 'offline_rb', rl_buffer_dir)
     
     # ------------------------------------------------------------------
     # Warm-up phase (random policy) --------------------------------------
     # ------------------------------------------------------------------
-  
+    online_rb, flag = load_replay_buffers(online_rb, 'warmup_rb', rl_buffer_dir )
     cfg.algo.learning_starts = cfg.algo.learning_starts//2
     if len(online_rb) < cfg.algo.learning_starts :
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
@@ -437,7 +438,10 @@ def main(cfg: ResidualTD3DexmgConfig):
                 time.sleep(2)
                 obs, _ = env.reset()
                 print('Gripper after reset:', env.env.des_gripper_state, env.env.gripper_state)
-               
+    # save warmup data 
+    if not flag:
+        dump_replay_buffer(online_rb, 'warmup_rb', rl_buffer_dir)
+
     run_name = f"seed{cfg.seed}"
     if cfg.wandb.name is not None:
         run_name = f"{cfg.wandb.name}__{run_name}"

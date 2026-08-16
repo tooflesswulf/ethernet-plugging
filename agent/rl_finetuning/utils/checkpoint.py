@@ -129,3 +129,27 @@ def save_checkpoint(
 
     torch.save(checkpoint_data, checkpoint_path)
     print(f"💾 Saved checkpoint to: {checkpoint_path}")
+
+def save_replay_buffers(
+    rb,
+    name,
+    checkpoint_dir,
+):
+    assert name in ['offline_rb', 'warmup_rb']
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    rb.dumps(checkpoint_dir / name) 
+   
+
+def load_replay_buffers(
+    rb,
+    name,
+    checkpoint_dir,
+):
+    assert name in ['offline_rb', 'warmup_rb']
+    try:
+        checkpoint_dir = Path(checkpoint_dir)
+        rb.loads(checkpoint_dir / name)
+        return rb, True
+    except:
+        return rb, False
