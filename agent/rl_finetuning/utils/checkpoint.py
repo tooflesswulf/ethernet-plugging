@@ -1,4 +1,4 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.  
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 # SPDX-License-Identifier: CC-BY-NC-4.0
 
@@ -41,7 +41,7 @@ def _download_from_wandb(checkpoint_spec: str) -> tuple[Path, dict]:
 
     # Extract the file path within the run (everything after "files/")
     files_idx = parts.index("files")
-    file_path = "/".join(parts[files_idx + 1 :])
+    file_path = "/".join(parts[files_idx + 1:])
 
     # Create API instance
     api = wandb.Api()
@@ -185,3 +185,28 @@ def load_checkpoint(
     print(f"📂 Loaded checkpoint from: {checkpoint_path}")
     return {k: v for k, v in checkpoint_data.items()
             if k not in ("agent_state_dict", "optimizer_state_dict", "scheduler_state_dict")}
+
+
+def save_replay_buffers(
+    rb,
+    name,
+    checkpoint_dir,
+):
+    assert name in ['offline_rb', 'warmup_rb']
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    rb.dumps(checkpoint_dir / name)
+
+
+def load_replay_buffers(
+    rb,
+    name,
+    checkpoint_dir,
+):
+    assert name in ['offline_rb', 'warmup_rb']
+    try:
+        checkpoint_dir = Path(checkpoint_dir)
+        rb.loads(checkpoint_dir / name)
+        return rb, True
+    except:
+        return rb, False
