@@ -195,10 +195,11 @@ def main(cfg: ResidualTD3DexmgConfig):
     print('No Normalization is done to the dataset!!!!!')
     print("#" * 20)
     offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
-    # Commands are absolute, so the parse no longer needs the policy's action_mode; the
-    # base policy's deltas are integrated into commands when the buffer is populated.
-    offline_episodes, total_transitions = parse_offline_dataset(
-        offline_dataset_path, lowdim_keys, cfg.offline_data.num_episodes)
+    # The raw episodes are resampled onto a control_frequency grid; everything else about
+    # the observation format is read off the base policy. This pass skips the images, so
+    # it is cheap -- it only exists to size the offline buffer.
+    _, total_transitions = parse_offline_dataset(
+        offline_dataset_path, base_policy, cfg.control_frequency, cfg.offline_data.num_episodes)
     grip = GripperStats(*base_policy.grip_stats)
 
     def get_envs(
@@ -212,7 +213,7 @@ def main(cfg: ResidualTD3DexmgConfig):
             gripper_ip="192.168.0.20",
             camera_crop_mode=1,
             dataset_path=None,
-            control_frequency=20,
+            control_frequency=cfg.control_frequency,
             save_interval=1.0 / 20,
             gwidth=grip.grip_width_mm,
             gforce=grip.grip_force_n,
@@ -324,12 +325,10 @@ def main(cfg: ResidualTD3DexmgConfig):
         if not flag:
             added = populate_offline_buffer(
                 offline_dataset_path,
-                offline_episodes,
+                base_policy,
+                cfg.control_frequency,
                 rb=offline_rb,
-                policy_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
-                base_policy=base_policy if cfg.offline_data.use_base_policy_for_base_actions else None,
-                img_h=img_h, img_w=img_w,
-                device=device,
+                num_episodes=cfg.offline_data.num_episodes,
             )
             print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
             save_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)

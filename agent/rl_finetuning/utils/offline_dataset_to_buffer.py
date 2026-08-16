@@ -1,15 +1,16 @@
-"""Offline dataset (``dataset.h5``) → residual-RL replay-buffer transitions.
+"""Raw dataset (``episodeNNNNNN/rawdata.h5``) → residual-RL replay-buffer transitions.
 
-The dataset layout is the one written by ``scripts/rawdata_to_dataset.py``:
-flat, episode-stitched arrays (``pose``, ``force``, ``gripper_width``, ...) plus a
-``metadata/length`` array giving the per-episode frame counts.  Images are either
-stored inline (``images.attrs['stored_as'] == 'image'``) or as paths relative to
-the dataset directory (``'filepath'``).
+Raw episodes are what the robot actually logged: each stream carries its own clock and
+its own rate -- robot state at ~500 Hz, gripper at ~230 Hz, camera at ~30 Hz, operator
+commands at ~100 Hz -- so nothing lines up frame to frame. Everything here is resampled
+onto one grid at ``hz`` (zero-order hold on each stream's own timestamps, the same
+scheme ``scripts/rawdata_to_dataset.py`` uses), which should be the rate the QAgent runs
+at so the transitions match what it will see online.
 
 Two stages, mirroring how training uses them:
-  1. :func:`parse_offline_dataset` — read states/actions/rewards for every episode
-     (cheap, no images).  Its transition count is needed to size the buffer.
-  2. :func:`populate_offline_buffer` — stream the images back in and push the
+  1. :func:`parse_offline_dataset` -- resample states/commands/rewards for every episode.
+     Cheap: it never touches the images. Its transition count sizes the buffer.
+  2. :func:`populate_offline_buffer` -- decode the images the grid selects and push the
      transitions into the replay buffer.
 """
 
@@ -26,19 +27,38 @@ import pathlib
 import torch
 import h5py
 
+from agent.evaluate.realtime_chunking import _Chunk
 from agent.utils.utils import gripper_action, find_chunks
-from env import GRIP_OPEN, GRIP_CLOSED
-from agent.rl_finetuning.utils.dtype import to_uint8
 from agent.model.policy import DiffusionPolicy
+from env import GRIP_OPEN, GRIP_CLOSED
+
+# policy.obs_fields -> where that field lives in rawdata.h5. Mirrors what
+# scripts/rawdata_to_dataset.py writes into dataset.h5 and OBS_FIELD_GETTERS reads live.
+RAW_OBS_FIELDS = {
+    'pose': ('robot_obs/time', 'robot_obs/actual_pose'),
+    'force': ('robot_obs/time', 'robot_obs/actual_force'),  # smoothed below, like the dataset's
+    'gripper_width': ('gripper_obs/time', 'gripper_obs/gripper_width'),
+    'gripper_force': ('gripper_obs/time', 'gripper_obs/gripper_force'),
+}
+FORCE_EWMA_ALPHA = 0.03  # scripts/rawdata_to_dataset.py default
+
+# Spacing of the actions *within* a predicted chunk. This is a property of the data the
+# base policy was trained on, not of the agent's control rate -- the two are independent,
+# and the chunk gets resampled onto the agent's grid below. It is not recorded in the
+# policy checkpoint, so it has to be stated here; BasePolicy uses the same 1/20 default
+# (agent/rl_finetuning/wrappers/rl_env.py).
+BASE_POLICY_HZ = 20.0
+
 
 @dataclass
 class OfflineEpisode:
-    """One parsed episode; `states`/`commands`/`rewards` are aligned per frame."""
+    """One resampled episode; every array is aligned to `times`, one row per frame."""
 
     ep_idx: int  # index of the episode in the dataset
-    start: int  # offset of the episode's first frame in the stitched arrays
+    path: pathlib.Path  # the episodeNNNNNN directory
     length: int
-    states: np.ndarray  # (T, state_dim)
+    times: np.ndarray  # (T,) sample grid, seconds from the episode start
+    states: np.ndarray  # (T, state_dim) in policy.obs_fields order
     # The reference command the demonstration recorded, in the same space the base
     # policy's integrated commands live in: absolute pose [tx, ty, tz, rx, ry, rz]
     # plus gripper state (GRIP_OPEN=0 / GRIP_CLOSED=1).
@@ -47,140 +67,160 @@ class OfflineEpisode:
     gripper_widths: np.ndarray  # (T,) raw widths, used to integrate the base policy chunk
 
 
-def resolve_dataset_path(dataset_path: str | pathlib.Path) -> pathlib.Path:
-    """Accept either a dataset directory or the ``dataset.h5`` file itself."""
-    path = pathlib.Path(dataset_path)
-    if path.is_dir():
-        path = path / 'dataset.h5'
-    if not path.is_file():
-        raise FileNotFoundError(f"No dataset.h5 found at {dataset_path}")
-    return path
+def episode_dirs(dataset_path: str | pathlib.Path, num_episodes: int | None = None) -> list[pathlib.Path]:
+    """The first *num_episodes* ``episodeNNNNNN`` directories holding a ``rawdata.h5``."""
+    root = pathlib.Path(dataset_path)
+    if not root.is_dir():
+        raise FileNotFoundError(f"{root} is not a dataset directory")
+
+    dirs = sorted(d for d in root.iterdir() if d.is_dir() and (d / 'rawdata.h5').is_file())
+    if not dirs:
+        raise FileNotFoundError(f"No episodeNNNNNN/rawdata.h5 found under {root}")
+    return dirs[:num_episodes] if num_episodes is not None else dirs
 
 
-def _episode_bounds(f: h5py.File, num_episodes: int | None) -> list[tuple[int, int]]:
-    """Return (start, length) for each of the first *num_episodes* episodes."""
-    lengths = np.asarray(f['metadata/length'][:]).astype(int).ravel()
-    if num_episodes is not None:
-        lengths = lengths[:num_episodes]
-    starts = np.concatenate([[0], np.cumsum(lengths)[:-1]]) if len(lengths) else np.array([], dtype=int)
-    return [(int(s), int(n)) for s, n in zip(starts, lengths)]
+def _ewma(x: np.ndarray, alpha: float) -> np.ndarray:
+    """Exponentially weighted moving average (scripts/rawdata_to_dataset.py:13)."""
+    ema = np.zeros_like(x)
+    ema[0] = x[0]
+    for i in range(1, len(x)):
+        ema[i] = alpha * x[i] + (1 - alpha) * ema[i - 1]
+    return ema
+
+
+def _sample_grid(f: h5py.File, hz: float) -> np.ndarray:
+    """The common time grid the streams get resampled onto."""
+    last = max(float(f[f'{grp}/time'][-1]) for grp in ('robot_obs', 'gripper_obs', 'camera_obs'))
+    dt = 1.0 / hz
+    return np.arange(dt, last, dt)
+
+
+def _zero_order_hold(times: np.ndarray, sample_times: np.ndarray) -> np.ndarray:
+    """Index of the most recent sample at or before each grid point."""
+    return np.clip(np.searchsorted(times, sample_times, side='right') - 1, 0, len(times) - 1)
 
 
 def parse_offline_dataset(
     dataset_path: str | pathlib.Path,
-    lowdim_keys: list[str],
+    base_policy: DiffusionPolicy,
+    hz: float,
     num_episodes: int | None = None,
     g_thr: float = 18,
 ) -> tuple[list[OfflineEpisode], int]:
-    """Read the per-episode states, reference commands and rewards out of ``dataset.h5``.
+    """Resample each raw episode onto a `hz` grid: states, reference commands, rewards.
 
-    The recorded command is absolute (pose + gripper state) rather than one of the
-    delta encodings the policy is *trained* on: a delta is only meaningful next to the
-    pose it is anchored to, and the base policy's predictions are integrated back into
-    absolute commands before they enter the buffer (see :func:`populate_offline_buffer`),
-    so both sides of the residual live in the same space.
+    The observation fields come from ``base_policy.obs_fields``, so the state vector is
+    laid out exactly as the policy was trained on.
 
-    Rewards are derived from the gripper open/close phases: the episode must split
-    into the 5 expected segments (approach, pick-and-transport-plugin,
-    release-to-unplug, unplug-place, release); episodes that do not are skipped.
-    Reward is 1 from shortly before the plug-in until just after the release, and
-    2 afterwards.
+    The recorded command is absolute (pose + gripper state) rather than one of the delta
+    encodings the policy is *trained* on: a delta is only meaningful next to the pose it
+    is anchored to, and the base policy's predictions are integrated back into absolute
+    commands before they enter the buffer (see :func:`populate_offline_buffer`), so both
+    sides of the residual live in the same space.
+
+    Rewards are derived from the gripper open/close phases: the episode must split into
+    the 5 expected segments (approach, pick-and-transport-plugin, release-to-unplug,
+    unplug-place, release); episodes that do not are skipped. Reward is 1 from shortly
+    before the plug-in until just after the release, and 2 afterwards.
 
     Returns the parsed episodes and the total number of frames they cover.
     """
-    h5_path = resolve_dataset_path(dataset_path)
-
     episodes: list[OfflineEpisode] = []
     total_transitions = 0
-    with h5py.File(h5_path, 'r') as f:
-        for ep_idx, (start, length) in enumerate(_episode_bounds(f, num_episodes)):
-            sl = slice(start, start + length)
+
+    for ep_idx, ep_dir in enumerate(episode_dirs(dataset_path, num_episodes)):
+        with h5py.File(ep_dir / 'rawdata.h5', 'r') as f:
+            sample_times = _sample_grid(f, hz)
+
             fields = []
-            for key in lowdim_keys:
-                if key not in f:
-                    raise KeyError(f"obs field {key!r} is not in {h5_path} (has: {list(f.keys())})")
-                value = np.asarray(f[key][sl])
-                fields.append(value if value.ndim == 2 else value[:, None])
+            for key in base_policy.obs_fields:
+                if key not in RAW_OBS_FIELDS:
+                    raise KeyError(f"obs field {key!r} has no raw-dataset mapping "
+                                   f"(known: {sorted(RAW_OBS_FIELDS)})")
+                time_key, value_key = RAW_OBS_FIELDS[key]
+                values = np.asarray(f[value_key])
+                if key == 'force':
+                    values = _ewma(values, alpha=FORCE_EWMA_ALPHA)
+                values = values[_zero_order_hold(np.asarray(f[time_key]), sample_times)]
+                fields.append(values if values.ndim == 2 else values[:, None])
             state = np.concatenate(fields, -1)
 
-            poses = np.asarray(f['pose'][sl])
-            gripper_widths = np.asarray(f['gripper_width'][sl])
-            g_action = gripper_action(gripper_widths, threshold=g_thr)
+            robot_idx = _zero_order_hold(np.asarray(f['robot_obs/time']), sample_times)
+            gripper_idx = _zero_order_hold(np.asarray(f['gripper_obs/time']), sample_times)
+            poses = np.asarray(f['robot_obs/actual_pose'])[robot_idx]
+            gripper_widths = np.asarray(f['gripper_obs/gripper_width'])[gripper_idx]
 
-            chunks = find_chunks(g_action.flatten())
-            if not (len(chunks) == 5 and chunks[2][-1] == 1):
-                print(f"Skip episode {ep_idx}: expected 5 gripper segments, got {len(chunks)}")
-                continue
+        length = len(sample_times)
+        g_action = gripper_action(gripper_widths, threshold=g_thr)
 
-            phase1 = chunks[1][1] - 30
-            phase2 = chunks[2][1] + 10
-            reward = np.zeros(length)
-            reward[phase1:phase2] = 1.0
-            reward[phase2:] = 2.0
+        chunks = find_chunks(g_action.flatten())
+        if not (len(chunks) == 5 and chunks[2][-1] == 1):
+            print(f"Skip episode {ep_dir.name}: expected 5 gripper segments, got {len(chunks)}")
+            continue
 
-            # Same encoding integrate_actions produces: +1/-1 open/closed -> 0/1 state
-            g_state = np.where(g_action > 0, GRIP_OPEN, GRIP_CLOSED)
+        phase1 = chunks[1][1] - 30
+        phase2 = chunks[2][1] + 10
+        reward = np.zeros(length)
+        reward[phase1:phase2] = 1.0
+        reward[phase2:] = 2.0
 
-            episodes.append(
-                OfflineEpisode(
-                    ep_idx=ep_idx,
-                    start=start,
-                    length=length,
-                    states=state,
-                    commands=np.concatenate([poses, g_state], -1),
-                    rewards=reward,
-                    gripper_widths=gripper_widths,
-                )
+        # Same encoding integrate_actions produces: +1/-1 open/closed -> 0/1 state
+        g_state = np.where(g_action > 0, GRIP_OPEN, GRIP_CLOSED)
+
+        episodes.append(
+            OfflineEpisode(
+                ep_idx=ep_idx,
+                path=ep_dir,
+                length=length,
+                times=sample_times,
+                states=state,
+                commands=np.concatenate([poses, g_state], -1),
+                rewards=reward,
+                gripper_widths=gripper_widths,
             )
-            total_transitions += length
+        )
+        total_transitions += length
 
     print('Loaded episode count:', len(episodes), '\tTotal transitions:', total_transitions)
     return episodes, total_transitions
 
 
-def _read_episode_images(
-    f: h5py.File,
-    dataset_dir: pathlib.Path,
-    episode: OfflineEpisode,
-    img_h: int,
-    img_w: int,
-) -> torch.Tensor:
-    """Load and resize one episode's images → float tensor (T, H, W, C).
+def _read_episode_images(episode: OfflineEpisode, img_size: int) -> torch.Tensor:
+    """Decode the camera frames the sample grid lands on → uint8 tensor (T, H, W, C).
 
-    Channel order is RGB in both storage modes, so no flip is needed here: the camera
-    hands out BGR (``camera.py``, saved to rawdata as ``camera_obs/image_bgr``) but
-    ``scripts/rawdata_to_dataset.py`` flips it to RGB before writing ``images`` /
-    the PNGs.  The live env is the side that has to flip (``resize_image(...,
-    flip_channel=True)`` in ``agent/utils/robot_utils.py``) to match this.
+    The camera runs slower than the grid, so frames repeat; each one is decoded once.
+    Raw frames are BGR (``camera_obs/image_bgr``) and are flipped to RGB here, the same
+    conversion ``scripts/rawdata_to_dataset.py:56`` applies when building dataset.h5.
+
+    Kept as uint8, which is both how the buffer stores images and what the online path
+    puts in: converting to float here and letting ``to_uint8`` rescale would blow the
+    images out, since that helper assumes floats already live in [0, 1].
     """
-    sl = slice(episode.start, episode.start + episode.length)
-    images = f['images']
+    with h5py.File(episode.path / 'rawdata.h5', 'r') as f:
+        frame_idx = _zero_order_hold(np.asarray(f['camera_obs/time']), episode.times)
+        unique_idx, inverse = np.unique(frame_idx, return_inverse=True)
 
-    if images.attrs.get('stored_as') == 'filepath' or h5py.check_string_dtype(images.dtype):
-        frames = []
-        for raw_path in images[sl]:
-            path = pathlib.Path(raw_path.decode() if isinstance(raw_path, bytes) else raw_path)
-            if not path.is_absolute():
-                path = dataset_dir / path
-            with Image.open(path) as img:
-                frames.append(np.asarray(img.convert('RGB').resize((img_w, img_h))))
-    else:
-        frames = [np.asarray(Image.fromarray(img).resize((img_w, img_h))) for img in images[sl]]
+        images = f['camera_obs/image_bgr']
+        decoded = np.stack([
+            np.asarray(Image.fromarray(np.asarray(images[i])[..., ::-1]).resize((img_size, img_size)))
+            for i in unique_idx
+        ])
 
-    return torch.from_numpy(np.stack(frames)).float()
+    return torch.from_numpy(decoded[inverse])
 
 
 def populate_offline_buffer(
     dataset_path: str | pathlib.Path,
-    episodes: list[OfflineEpisode],
+    base_policy: DiffusionPolicy,
+    hz: float,
     rb: ReplayBuffer,
-    policy_base_actions: bool = True,
-    base_policy: DiffusionPolicy | None = None,
-    img_h: int = 128,
-    img_w: int = 128,
-    device: str | torch.device = 'cuda',
+    num_episodes: int | None = None,
+    base_hz: float = BASE_POLICY_HZ,
 ) -> int:
-    """Turn consecutive frames of each episode into residual RL transitions.
+    """Turn consecutive frames of each raw episode into residual RL transitions.
+
+    Everything about the observation format -- image size, state fields, action encoding,
+    device -- is read off *base_policy*, so the buffer matches what that policy expects.
 
     The base policy predicts *deltas* (per its action_mode), which only mean something
     next to the pose they are anchored to, so each predicted chunk is integrated against
@@ -189,106 +229,105 @@ def populate_offline_buffer(
     the recorded command as the action, so the residual the QAgent has to learn is
     exactly ``recorded_command - base_policy_command``.
 
-    Two modes:
-    1. GT-as-base (policy_base_actions=False):
-        Uses the recorded command as both the base action (in observations) and the
-        target action (in transitions), i.e. the residual is 0 everywhere.
-
-    2. Base-policy-as-base (policy_base_actions=True):
-        Base action = the base policy's integrated command, target = recorded command.
-        Matches online training, where the env executes base command + residual.
+    A chunk's actions are spaced at ``base_hz``, which is fixed by the base policy and
+    independent of the rate the agent runs at. When ``hz > base_hz`` the chunk is
+    resampled onto the agent's grid rather than replayed one action per frame (which
+    would play the base policy back ``hz / base_hz`` times too fast). Resampling reuses
+    the online path's own interpolation (``realtime_chunking._Chunk``), so both sides
+    treat a chunk identically -- linear in translation, Slerp in rotation, clamped at the
+    ends. Unlike online, only one chunk is live at a time here: offline there is no
+    inference latency to model, so there are no overlapping chunks to ensemble.
 
     Returns the number of transitions added.
     """
-    if policy_base_actions and base_policy is None:
-        raise ValueError("base_policy must be provided when policy_base_actions=True")
+    device = next(base_policy.parameters()).device
+    img_size = base_policy.img_size
 
-    h5_path = resolve_dataset_path(dataset_path)
-    print("Populating offline buffer from dataset...")
+    episodes, _ = parse_offline_dataset(dataset_path, base_policy, hz, num_episodes=num_episodes)
+
+    print("Populating offline buffer from raw dataset...")
     transitions = 0
 
-    with h5py.File(h5_path, 'r') as f:
-        for episode in tqdm(episodes, desc="Processing offline dataset"):
-            images = _read_episode_images(f, h5_path.parent, episode, img_h, img_w)
-            states = torch.tensor(episode.states).float()
-            commands = torch.tensor(episode.commands).float()
-            rewards = torch.tensor(episode.rewards).float()
-            assert len(images) == len(states) == len(commands) == len(rewards)
+    for episode in tqdm(episodes, desc="Processing offline dataset"):
+        images = _read_episode_images(episode, img_size)
+        states = torch.tensor(episode.states).float()
+        commands = torch.tensor(episode.commands).float()
+        rewards = torch.tensor(episode.rewards).float()
+        assert len(images) == len(states) == len(commands) == len(rewards)
 
-            # Cached previous frame, paired with the current one to form a transition
-            prev_obs: dict | None = None
-            prev_command: torch.Tensor | None = None
-            # Base policy predicts a chunk at a time; integrated once, consumed one per step
-            base_commands = None
+        # Cached previous frame, paired with the current one to form a transition
+        prev_obs: dict | None = None
+        prev_command: torch.Tensor | None = None
+        # Current chunk of base commands, resampled to whatever time we ask it for
+        chunk_commands: _Chunk | None = None
 
-            for step, (image, state, command, reward) in enumerate(zip(images, states, commands, rewards)):
-                # ------------------------------------------------------------------
-                # Build observation and action directly for replay buffer ----------
-                # ------------------------------------------------------------------
-                # Extract data and keep on CPU (replay buffer uses CPU storage)
-                done_flag = step == len(images) - 1
+        for step, (image, state, command, reward) in enumerate(zip(images, states, commands, rewards)):
+            # ------------------------------------------------------------------
+            # Build observation and command directly for replay buffer ----------
+            # ------------------------------------------------------------------
+            # Extract data and keep on CPU (replay buffer uses CPU storage)
+            done_flag = step == len(images) - 1
 
-                # Generate the base command based on the selected mode
-                if policy_base_actions:
-                    # Use base policy to generate base command from current observation
-                    # Build raw observation first for base policy inference
-                    raw_obs = {'rgb': rearrange(image.unsqueeze(0).unsqueeze(0).to(
-                        device) / 255.0, 'B T H W C -> B T C H W'), 'state': state.unsqueeze(0).unsqueeze(0).to(device), }
+            # Predict a fresh chunk once the current one no longer reaches this frame.
+            # The tolerance keeps the cadence off the floating-point noise in the grid,
+            # so a chunk always covers its full span rather than one frame less.
+            t = float(episode.times[step])
+            if chunk_commands is None or t > chunk_commands.t_end + 1e-9:
+                # Build raw observation first for base policy inference
+                raw_obs = {'rgb': rearrange(image.unsqueeze(0).unsqueeze(0).float().to(
+                    device) / 255.0, 'B T H W C -> B T C H W'), 'state': state.unsqueeze(0).unsqueeze(0).to(device), }
 
-                    # Predict a chunk and integrate it against this frame's recorded pose,
-                    # which anchors the deltas the policy emits (command[:6] is that pose)
-                    if base_commands is None:
-                        with torch.no_grad():
-                            chunk = base_policy.predict_action(raw_obs).squeeze(0)
-                        des_poses, des_gripper, _ = base_policy.integrate_actions(
-                            chunk,
-                            curr_pose=command[:6].numpy(),
-                            curr_gripper_width=float(episode.gripper_widths[step]),
-                        )
-                        base_commands = torch.from_numpy(
-                            np.concatenate([des_poses, des_gripper[:, None]], -1)).float()
-                    base_command = base_commands[0]
+                # Predict a chunk and integrate it against this frame's recorded pose,
+                # which anchors the deltas the policy emits (command[:6] is that pose)
+                with torch.no_grad():
+                    chunk = base_policy.predict_action(raw_obs).squeeze(0)
+                des_poses, des_gripper, des_done = base_policy.integrate_actions(
+                    chunk,
+                    curr_pose=command[:6].numpy(),
+                    curr_gripper_width=float(episode.gripper_widths[step]),
+                )
+                chunk_commands = _Chunk(t, des_poses, des_gripper, des_done, action_dt=1.0 / base_hz)
 
-                    base_commands = base_commands[1:] if len(base_commands) > 1 else None
-                else:
-                    assert False, f"Not Implemented"
+            des_pose, des_gripper_state, _ = chunk_commands.interp(t)
+            # the gripper is a discrete state; interpolating it gives a fraction, and the
+            # env rounds the same way before executing (rl_env.BasePolicyVecEnvWrapper.step)
+            base_command = torch.tensor(
+                np.concatenate([des_pose, [round(des_gripper_state)]]), dtype=torch.float32)
 
-                # Build observation dict directly in target format
-                curr_obs = {"observation.state": state.cpu(), "observation.base_action": base_command.cpu(),
-                            "observation.rgb": image.cpu()}
+            # Build observation dict directly in target format; the image is already
+            # uint8, which is the memory-efficient form the buffer stores
+            curr_obs = {"observation.state": state.cpu(), "observation.base_action": base_command.cpu(),
+                        "observation.rgb": image.cpu()}
 
-                # Convert images to uint8 for memory-efficient storage
-                to_uint8(curr_obs, ["observation.rgb"])
+            # ------------------------------------------------------------------
+            # If we already cached the *previous* frame for this episode we can
+            # create transitions now.
+            # ------------------------------------------------------------------
+            if prev_obs is not None:
+                transition = TensorDict(
+                    {
+                        "obs": TensorDict(prev_obs, batch_size=[]),
+                        # the executed action is the recorded reference command
+                        "action": prev_command,
+                        "next": TensorDict(
+                            {
+                                "obs": TensorDict(curr_obs, batch_size=[]),
+                                "done": torch.tensor(done_flag, dtype=torch.bool),
+                                "reward": torch.as_tensor(reward, dtype=torch.float32),
+                            },
+                            batch_size=[],
+                        ),
+                        # High initial priority for new samples
+                        "_priority": torch.tensor(10.0, dtype=torch.float32),
+                    },
+                    batch_size=[],
+                ).unsqueeze(0)
 
-                # ------------------------------------------------------------------
-                # If we already cached the *previous* frame for this episode we can
-                # create transitions now.
-                # ------------------------------------------------------------------
-                if prev_obs is not None:
-                    transition = TensorDict(
-                        {
-                            "obs": TensorDict(prev_obs, batch_size=[]),
-                            # the executed action is the recorded reference command
-                            "action": prev_command,
-                            "next": TensorDict(
-                                {
-                                    "obs": TensorDict(curr_obs, batch_size=[]),
-                                    "done": torch.tensor(done_flag, dtype=torch.bool),
-                                    "reward": torch.as_tensor(reward, dtype=torch.float32),
-                                },
-                                batch_size=[],
-                            ),
-                            # High initial priority for new samples
-                            "_priority": torch.tensor(10.0, dtype=torch.float32),
-                        },
-                        batch_size=[],
-                    ).unsqueeze(0)
+                rb.add(transition)
+                transitions += 1
 
-                    rb.add(transition)
-                    transitions += 1
-
-                # Cache current frame for pairing with the next one ---------------
-                prev_obs, prev_command = curr_obs, command
+            # Cache current frame for pairing with the next one ---------------
+            prev_obs, prev_command = curr_obs, command
 
     # Log final statistics
     print(f"Added {transitions} transitions")

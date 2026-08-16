@@ -255,6 +255,9 @@ class RLPDDexmgConfig:
     # Task / environment
     # ------------------------------------------------------------------
     task: str = "Can"
+    # Control rate the agent runs at; the raw offline episodes are resampled onto this
+    # same grid so offline transitions match what the agent sees online.
+    control_frequency: int = 20
     num_envs: int = 1
     eval_num_envs: int = 1
     eval_num_episodes: int = 50
