@@ -333,14 +333,15 @@ def main(cfg: ResidualTD3DexmgConfig):
             )
             print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
             save_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)
-
+        else:
+            added = len(offline_rb)
         print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
 
     # ------------------------------------------------------------------
     # Warm-up phase (random policy) --------------------------------------
     # ------------------------------------------------------------------
     online_rb, flag = load_replay_buffers(online_rb, 'warmup_rb', rl_buffer_dir)
-    cfg.algo.learning_starts = cfg.algo.learning_starts // 2
+    print(f"Added {len(online_rb)} online transitions to online buffer")
     if len(online_rb) < cfg.algo.learning_starts:
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
 
@@ -525,7 +526,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     # ------------------------------------------------------------------
     # Critic warmup phase ----------------------------------------------
     # ------------------------------------------------------------------
-    cfg.algo.critic_warmup_steps = 4000
+
     if cfg.algo.critic_warmup_steps > 0:
         print(f"Critic warmup: running {cfg.algo.critic_warmup_steps} critic-only updates...")
         _run_critic_warmup(

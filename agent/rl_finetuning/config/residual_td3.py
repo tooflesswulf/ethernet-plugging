@@ -10,7 +10,7 @@ from agent.rl_finetuning.config.rlpd import ActorConfig, QAgentConfig, RLPDAlgoC
 
 @dataclass
 class OfflineDataConfig:
-    name: str = "cableflat-smallrouter"
+    name: str = "cableflat-smallrouter_dataset"
     dir_path: str = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset'
     num_episodes: int | None = 3
     # Offline data action labeling options
@@ -126,7 +126,7 @@ class ResidualTD3NetConfig(ResidualTD3DexmgConfig):
 
     offline_data: OfflineDataConfig = field(
         default_factory=lambda: OfflineDataConfig(
-            name = "cableflat-smallrouter",
+            name = "cableflat-smallrouter_dataset",
             dir_path = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset',
             num_episodes=300,
         )
