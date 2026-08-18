@@ -29,7 +29,8 @@ from agent.rl_finetuning.utils.dtype import to_uint8
 from agent.rl_finetuning.utils.offline_dataset_to_buffer import parse_offline_dataset, populate_offline_buffer
 from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
 from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
-from agent.rl_finetuning.utils.checkpoint import save_replay_buffers, load_replay_buffers
+from agent.rl_finetuning.utils.checkpoint import (
+    buffer_fingerprint, save_replay_buffers, load_replay_buffers)
 from agent.rl_finetuning.utils.normalization import _compute_dataset_norm_stats
 
 rl_scratch_dir = "./../../rl_online_buffer"
@@ -227,12 +228,30 @@ def main(cfg: ResidualTD3DexmgConfig):
     online_rb, offline_rb = replay_buffers_from_cfg(cfg, max_offline_transitions=total_transitions)
 
     # ------------------------------------------------------------------
+    # Buffer provenance --------------------------------------------------
+    # ------------------------------------------------------------------
+    # Both dumps only make sense with the base policy that produced them: the offline
+    # buffer stores that policy's actions, the warm-up buffer stores transitions it
+    # drove. Fingerprinting them keeps a dump from a different policy (or, for the
+    # offline buffer, a different dataset) from being loaded into this run.
+    offline_fingerprint = buffer_fingerprint(
+        cfg.base_policy.ckpt,
+        dataset=offline_dataset_path,
+        num_episodes=cfg.offline_data.num_episodes,
+        control_frequency=cfg.control_frequency,
+    )
+    warmup_fingerprint = buffer_fingerprint(
+        cfg.base_policy.ckpt,
+        control_frequency=cfg.control_frequency,
+    )
+
+    # ------------------------------------------------------------------
     # Convert offline dataset episodes into transitions and fill buffer
     # ------------------------------------------------------------------
     added = 0
     if cfg.algo.offline_fraction > 0.0:
-        offline_rb, flag = load_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)
-        if not flag:
+        offline_rb, loaded = load_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir, offline_fingerprint)
+        if not loaded:
             added = populate_offline_buffer(
                 offline_dataset_path,
                 base_policy,
@@ -241,7 +260,7 @@ def main(cfg: ResidualTD3DexmgConfig):
                 num_episodes=cfg.offline_data.num_episodes,
             )
             print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
-            save_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)
+            save_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir, offline_fingerprint)
         else:
             added = len(offline_rb)
         print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
@@ -249,7 +268,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     # ------------------------------------------------------------------
     # Warm-up phase (random policy) --------------------------------------
     # ------------------------------------------------------------------
-    online_rb, flag = load_replay_buffers(online_rb, 'warmup_rb', rl_buffer_dir)
+    online_rb, loaded = load_replay_buffers(online_rb, 'warmup_rb', rl_buffer_dir, warmup_fingerprint)
     print(f"Added {len(online_rb)} online transitions to online buffer")
     if len(online_rb) < cfg.algo.learning_starts:
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
@@ -347,8 +366,8 @@ def main(cfg: ResidualTD3DexmgConfig):
         min_state_std=cfg.offline_data.min_state_std,
     )
     # save warmup data
-    if not flag:
-        save_replay_buffers(online_rb, 'warmup_rb', rl_buffer_dir)
+    if not loaded:
+        save_replay_buffers(online_rb, 'warmup_rb', rl_buffer_dir, warmup_fingerprint)
 
     run_name = f"seed{cfg.seed}"
     if cfg.wandb.name is not None:

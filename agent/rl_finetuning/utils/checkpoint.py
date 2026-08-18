@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -187,26 +190,139 @@ def load_checkpoint(
             if k not in ("agent_state_dict", "optimizer_state_dict", "scheduler_state_dict")}
 
 
+# -----------------------------------------------------------------------------
+# Replay-buffer checkpoints ----------------------------------------------------
+# -----------------------------------------------------------------------------
+# A dumped buffer is only meaningful next to the base policy it was generated with:
+# the offline buffer stores base-policy actions, and the warm-up buffer stores
+# transitions the base policy actually drove. Reusing one across policies silently
+# trains on the wrong data, so the buffers are filed under a fingerprint of what
+# produced them -- a different base policy simply resolves to a different directory
+# and the caller regenerates instead of loading something incompatible. The sidecar
+# metadata records the same fingerprint in readable form and is re-checked on load,
+# which catches directories that were moved or hand-edited.
+
+_BUFFER_NAMES = ('offline_rb', 'warmup_rb')
+
+
+def _file_sha256(path: str | Path) -> str:
+    """Content hash of a file, read in chunks so large checkpoints stay off the heap."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(8 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def buffer_fingerprint(base_policy_ckpt: str | Path, **params: Any) -> dict:
+    """Describe what a replay buffer was generated from.
+
+    Args:
+        base_policy_ckpt: Path to the base-policy checkpoint used to fill the buffer.
+            Hashed by content, not by path -- checkpoints get overwritten in place, and
+            a stale path match is exactly the failure this is meant to prevent.
+        **params: Any other generation inputs that make buffers incompatible
+            (dataset name, control frequency, ...). They become part of the identity,
+            so changing one routes to a fresh buffer rather than reusing a stale one.
+
+    Returns:
+        A dict describing the buffer's provenance; pass it to
+        :func:`save_replay_buffers` / :func:`load_replay_buffers`.
+    """
+    base_policy_ckpt = Path(base_policy_ckpt)
+    return {
+        "base_policy_ckpt": str(base_policy_ckpt.resolve()),
+        "base_policy_sha256": _file_sha256(base_policy_ckpt),
+        "params": {k: params[k] for k in sorted(params)},
+    }
+
+
+def _fingerprint_id(fingerprint: dict) -> str:
+    """Short, stable directory name for a fingerprint.
+
+    Deliberately ignores ``base_policy_ckpt``: the same weights moved to a new path are
+    the same policy, and keying on the path would rebuild the buffer for no reason.
+    """
+    payload = json.dumps(
+        {"sha256": fingerprint["base_policy_sha256"], "params": fingerprint["params"]},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _buffer_paths(checkpoint_dir: str | Path, name: str, fingerprint: dict) -> tuple[Path, Path]:
+    assert name in _BUFFER_NAMES, f"Unknown buffer {name!r}, expected one of {_BUFFER_NAMES}"
+    root = Path(checkpoint_dir) / _fingerprint_id(fingerprint)
+    return root / name, root / f"{name}.meta.json"
+
+
 def save_replay_buffers(
     rb,
-    name,
-    checkpoint_dir,
+    name: str,
+    checkpoint_dir: str | Path,
+    fingerprint: dict,
 ):
-    assert name in ['offline_rb', 'warmup_rb']
-    checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    rb.dumps(checkpoint_dir / name)
+    """Dump ``rb`` under the directory owned by ``fingerprint``, with its provenance."""
+    buffer_path, meta_path = _buffer_paths(checkpoint_dir, name, fingerprint)
+    buffer_path.parent.mkdir(parents=True, exist_ok=True)
+    rb.dumps(buffer_path)
+    meta_path.write_text(json.dumps(
+        {
+            "buffer": name,
+            "num_transitions": len(rb),
+            "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            **fingerprint,
+        },
+        indent=2,
+        sort_keys=True,
+        default=str,
+    ))
+    print(f"💾 Saved {name} ({len(rb)} transitions) to: {buffer_path}")
 
 
 def load_replay_buffers(
     rb,
-    name,
-    checkpoint_dir,
+    name: str,
+    checkpoint_dir: str | Path,
+    fingerprint: dict,
 ):
-    assert name in ['offline_rb', 'warmup_rb']
-    try:
-        checkpoint_dir = Path(checkpoint_dir)
-        rb.loads(checkpoint_dir / name)
-        return rb, True
-    except:
+    """Load a dumped buffer, but only the one generated from ``fingerprint``.
+
+    Returns:
+        ``(rb, True)`` if a matching dump was loaded, ``(rb, False)`` if none exists for
+        this fingerprint (the caller should regenerate and save).
+
+    Raises:
+        RuntimeError: If a dump exists but its recorded provenance disagrees with
+            ``fingerprint``, or if the dump is present but unreadable. Both mean the
+            on-disk state is not what it claims to be, and silently regenerating would
+            overwrite it.
+    """
+    buffer_path, meta_path = _buffer_paths(checkpoint_dir, name, fingerprint)
+    if not buffer_path.exists():
         return rb, False
+
+    if not meta_path.exists():
+        raise RuntimeError(
+            f"Replay buffer {buffer_path} has no {meta_path.name} recording which base "
+            "policy generated it, so it cannot be verified. Delete it to regenerate.")
+
+    meta = json.loads(meta_path.read_text())
+    mismatched = {
+        key: (meta.get(key), fingerprint[key])
+        for key in ("base_policy_sha256", "params")
+        if meta.get(key) != fingerprint[key]
+    }
+    if meta.get("buffer") != name:
+        mismatched["buffer"] = (meta.get("buffer"), name)
+    if mismatched:
+        details = "\n".join(f"  {k}: on disk {found!r} != requested {want!r}"
+                             for k, (found, want) in mismatched.items())
+        raise RuntimeError(
+            f"Replay buffer {buffer_path} was generated from a different setup:\n{details}\n"
+            f"(on-disk buffer came from {meta.get('base_policy_ckpt')}). "
+            "Delete that directory to regenerate.")
+
+    rb.loads(buffer_path)
+    print(f"📂 Loaded {name} ({len(rb)} transitions) from: {buffer_path}")
+    return rb, True
