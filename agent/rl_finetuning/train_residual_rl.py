@@ -154,18 +154,6 @@ def main(cfg: ResidualTD3DexmgConfig):
         action_dim -= 1  # drop done dimension
     lowdim_keys = base_policy.obs_fields
 
-    # Load dataset and get normalization functions early
-    print("Loading dataset and setting up normalization...")
-    print("#" * 20)
-    print('No Normalization is done to the dataset!!!!!')
-    print("#" * 20)
-    offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
-    # The raw episodes are resampled onto a control_frequency grid; everything else about
-    # the observation format is read off the base policy. This pass skips the images, so
-    # it is cheap -- it only exists to size the offline buffer.
-    _, total_transitions = parse_offline_dataset(
-        offline_dataset_path, base_policy, cfg.control_frequency, cfg.offline_data.num_episodes)
-
     # ---------------------------------------------------------------------
     # Seeding (must be done before environment creation) ------------------
     # ---------------------------------------------------------------------
@@ -176,14 +164,11 @@ def main(cfg: ResidualTD3DexmgConfig):
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
-
     # CUDA seeding for multi-GPU reproducibility
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(cfg.seed)
-
     # Set deterministic behavior
     torch.backends.cudnn.deterministic = cfg.torch_deterministic
-
     print(f"Set random seed to {cfg.seed}")
 
     # ---------------------------------------------------------------------
@@ -230,6 +215,11 @@ def main(cfg: ResidualTD3DexmgConfig):
     # ---------------------------------------------------------------------
     # Replay buffers -------------------------------------------------------
     # ---------------------------------------------------------------------
+    offline_dataset_path = os.path.join(cfg.offline_data.dir_path, cfg.offline_data.name)
+    # Cheap parse once to size the offline buffer.
+    _, total_transitions = parse_offline_dataset(
+        offline_dataset_path, base_policy, cfg.control_frequency, cfg.offline_data.num_episodes)
+
     if os.path.isdir(rl_scratch_dir):
         shutil.rmtree(rl_scratch_dir)
     online_batch_size = int(cfg.algo.batch_size * (1 - cfg.algo.offline_fraction))
