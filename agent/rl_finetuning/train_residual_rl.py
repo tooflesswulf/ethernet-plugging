@@ -148,8 +148,8 @@ def main(cfg: ResidualTD3DexmgConfig):
     base_policy = DiffusionPolicy.from_checkpoint(cfg.base_policy.ckpt, device)
     base_policy.to(device)
     base_policy.eval()
-    lowdim_dim, action_dim, img_c, img_h, img_w = base_policy.state_min.shape[
-        -1], base_policy.action_min.shape[-1], 3, base_policy.img_size, base_policy.img_size
+    lowdim_dim, action_dim, = base_policy.state_min.shape[-1], base_policy.action_min.shape[-1],
+    img_c, img_h, img_w = 3, base_policy.img_size, base_policy.img_size
     if action_dim == 8:
         action_dim -= 1  # drop done dimension
     lowdim_keys = base_policy.obs_fields
@@ -165,28 +165,6 @@ def main(cfg: ResidualTD3DexmgConfig):
     # it is cheap -- it only exists to size the offline buffer.
     _, total_transitions = parse_offline_dataset(
         offline_dataset_path, base_policy, cfg.control_frequency, cfg.offline_data.num_episodes)
-    grip = GripperStats(*base_policy.grip_stats)
-
-    def get_envs(
-        base_policy,
-    ):
-
-        # Create the vectorized environment
-
-        env = Env(
-            robot_ip="192.168.0.100",
-            gripper_ip="192.168.0.20",
-            camera_crop_mode=1,
-            dataset_path=None,
-            control_frequency=cfg.control_frequency,
-            save_interval=1.0 / 20,
-            gwidth=grip.grip_width_mm,
-            gforce=grip.grip_force_n,
-            gspeed=grip.grip_speed_mmps,
-            gpullback=grip.grip_pullback_mm,
-        )
-        # Wrap it with the base policy wrapper
-        return BasePolicyVecEnvWrapper(env=env, base_policy=base_policy, image_size=(img_h, img_w), lowdim_keys=lowdim_keys, device=device)
 
     # ---------------------------------------------------------------------
     # Seeding (must be done before environment creation) ------------------
@@ -212,7 +190,21 @@ def main(cfg: ResidualTD3DexmgConfig):
     # Environment setup ----------------------------------------------------
     # ---------------------------------------------------------------------
     assert cfg.num_envs == 1, "Only support 1 environment for now because of how n_step is implemented"
-    env = get_envs(base_policy=base_policy)
+    grip = GripperStats(*base_policy.grip_stats)
+    robot_env = Env(
+        robot_ip="192.168.0.100",
+        gripper_ip="192.168.0.20",
+        camera_crop_mode=1,
+        dataset_path=None,
+        control_frequency=cfg.control_frequency,
+        save_interval=1.0 / 20,
+        gwidth=grip.grip_width_mm,
+        gforce=grip.grip_force_n,
+        gspeed=grip.grip_speed_mmps,
+        gpullback=grip.grip_pullback_mm,
+    )
+    env = BasePolicyVecEnvWrapper(env=robot_env, base_policy=base_policy, image_size=(
+        img_h, img_w), lowdim_keys=lowdim_keys, device=device)
     cfg.eval_num_envs = 1
 
     # ---------------------------------------------------------------------
