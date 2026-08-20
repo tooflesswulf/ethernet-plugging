@@ -144,7 +144,7 @@ class RLPDAlgoConfig:
     # Training ---------------------------------------------------------------
     total_timesteps: int = 300_000
     batch_size: int = 256
-    buffer_size: int = 100_000 # 200_000
+    buffer_size: int = 50000 # 100_000 # 200_000
     learning_starts: int = 10_000
 
     # Discounting / target updates ------------------------------------------

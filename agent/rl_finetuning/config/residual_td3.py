@@ -42,14 +42,14 @@ class ResidualTD3AlgoConfig(RLPDAlgoConfig):
     # Critic warmup phase ----------------------------------------------
     # ------------------------------------------------------------------
     # Number of critic-only updates before training the actor
-    critic_warmup_steps: int = 10_000
+    critic_warmup_steps: int = 8000 # 10_000
 
     # ------------------------------------------------------------------
     # Random action exploration -----------------------------------------
     # ------------------------------------------------------------------
     # Scale for random action noise during initial exploration phase
     # Actions are sampled as: rand_actions = torch.rand(...) * 2 * random_action_noise_scale - random_action_noise_scale
-    random_action_noise_scale: float = 0.0 # 0.02  # Default: uniform in [-1, 1]
+    random_action_noise_scale: float = 0.02 # 0.02  # Default: uniform in [-1, 1]
 
     # Whether to use base policy + noise (True) or pure uniform noise (False) during warmup
     # Note: Environment wrapper always applies base_action + residual_action

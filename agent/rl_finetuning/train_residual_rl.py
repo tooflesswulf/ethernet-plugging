@@ -13,6 +13,7 @@ import numpy as np
 import wandb
 import hydra
 import interface
+import cv2
 
 from omegaconf import OmegaConf
 from tensordict import TensorDict
@@ -32,6 +33,7 @@ from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
 from agent.rl_finetuning.utils.checkpoint import save_replay_buffers, load_replay_buffers
 
 rl_scratch_dir = "./../../rl_online_buffer"
+rl_scratch_dir2 = "./../../rl_offline_buffer"
 rl_buffer_dir = "./../../rl_dump_buffer"
 
 
@@ -288,6 +290,8 @@ def main(cfg: ResidualTD3DexmgConfig):
     # Use TensorDictPrioritizedReplayBuffer with optimized prefetching
     if os.path.isdir(rl_scratch_dir):
         shutil.rmtree(rl_scratch_dir)
+    if os.path.isdir(rl_scratch_dir2):
+        shutil.rmtree(rl_scratch_dir2)
     storage = LazyMemmapStorage(cfg.algo.buffer_size, scratch_dir=rl_scratch_dir)
     online_rb = TensorDictPrioritizedReplayBuffer(
         storage=storage,  # on disk storage
@@ -303,8 +307,10 @@ def main(cfg: ResidualTD3DexmgConfig):
 
     # Calculate buffer size for simplified approach (1 transition per frame pair)
     max_offline_transitions = total_transitions
+    storage2 = LazyMemmapStorage(total_transitions, scratch_dir=rl_scratch_dir2)
     offline_rb = TensorDictPrioritizedReplayBuffer(
-        storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"),  # keep in RAM
+        # storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"),  # keep in RAM
+        storage=storage2,
         alpha=alpha,
         beta=beta,
         eps=1e-6,  # Small epsilon added to priorities to prevent zero values
@@ -418,6 +424,19 @@ def main(cfg: ResidualTD3DexmgConfig):
                 time.sleep(2)
                 obs, _ = env.reset()
                 print('Gripper after reset:', env.env.des_gripper_state, env.env.gripper_state)
+
+                # Check if interface died
+                if not env.iface.dualsense.thread.is_alive():
+                    while not env.iface.dualsense.thread.is_alive():
+                        print('Detected dualsense disconnected! Reconnecting...')
+                        try:
+                            new_iface = interface.DualSenseInterface(env.env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5.)
+                            env.iface = new_iface
+                        except TypeError:
+                            # failed
+                            pass
+                        time.sleep(3)
+                    print('Successfully reconnected dualsense.')
 
     # ------------------------------------------------------------------
     # Dataset normalization statistics ---------------------------------
@@ -562,6 +581,11 @@ def main(cfg: ResidualTD3DexmgConfig):
             next_obs, reward, terminated, info = env.step(action)
             done = terminated
 
+            # cv2 viewport
+            im_show = cv2.resize(next_obs['observation.rgb'], (500, 500))
+            cv2.imshow('RGB', im_show)
+            cv2.waitKey(1)
+
             # Add to online replay buffer --------------------------------------
             # Use the executed combined action returned by the environment
             combined_action = info["scaled_action"]
@@ -599,6 +623,19 @@ def main(cfg: ResidualTD3DexmgConfig):
                     },
                     step=global_step,
                 )
+
+                # Check if interface died
+                if not env.iface.dualsense.thread.is_alive():
+                    while not env.iface.dualsense.thread.is_alive():
+                        print('Detected dualsense disconnected! Reconnecting...')
+                        try:
+                            new_iface = interface.DualSenseInterface(env.env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5.)
+                            env.iface = new_iface
+                        except TypeError:
+                            # failed
+                            pass
+                        time.sleep(3)
+                    print('Successfully reconnected dualsense.')
 
         # ------------------------------------------------------------------
         # (4) Updates -------------------------------------------------------

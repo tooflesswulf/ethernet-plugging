@@ -358,7 +358,11 @@ class DualSense(Device):
         t_last_click = -1
 
         while True:
-            d = self.device.read(self.input_report_length)
+            try:
+                d = self.device.read(self.input_report_length)
+            except OSError:
+                print('Caught an error')
+                break
             if d is not None and self._enabled:
                 report_bytes = bytearray(d)
                 self.report_bytes = report_bytes

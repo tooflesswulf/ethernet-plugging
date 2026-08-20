@@ -17,12 +17,17 @@ class BasePolicy:
         self.buffer = RealtimeActionChunkingBuffer(action_dt=base_dt, weight_decay=weight_decay)
         self.prediction_thread = None
         self.stop_event = None
+        self.last_action = None
 
     def get_base_action(self, t=None):
         if t is None:
             t = time.time()
         # des_pose, des_width, done (global frame)
-        return self.buffer.get_action(t)
+        act = self.buffer.get_action(t)
+        if act is None:
+            return self.last_action
+        self.last_action = act
+        return act
 
     def prediction_loop(self):
         action_horizon = self.policy.action_horizon
@@ -51,6 +56,7 @@ class BasePolicy:
         if self.prediction_thread is not None:
             self.stop()
             self.prediction_thread.join()
+        self.last_action = None
         self.start()
 
     def start(self):
@@ -122,11 +128,14 @@ class BasePolicyVecEnvWrapper:
 
     def reset(self, **kwargs):
         """Reset environment and base policy."""
- 
-       
+
         # Reset base policy (clear previously predicted actions)
         self.base_policy.reset()
-        time.sleep(2)
+        while True:
+            act = self.base_policy.get_base_action()
+            if act is not None:
+                break
+            time.sleep(1)
 
         raw_obs = self._process_obs( self.env.get_obs() )
         # Get base action from the base policy
@@ -188,7 +197,7 @@ class BasePolicyVecEnvWrapper:
         self.step_task_stage(raw_obs)
         reward = self.task_stage
         self.iface.update(self.control_dt)
-        terminated = self.iface.dualsense.state.Cross # use iface for this
+        terminated = self.iface.dualsense.state.Cross or not self.iface.dualsense.thread.is_alive()
         
         # Store the scaled action for replay buffer (already computed above)
         info["scaled_action"] = combined_naction
