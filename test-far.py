@@ -78,7 +78,7 @@ class TeleoperationReset(EvalRealtimeChunking):
     _contact_flag = False
     _contact_t = -1
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, enable_tta=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._force_edge = StreamingForceEdge(hz=self.env.servo_frequency)
         # Test-time adaptation: rolling record of the policy's own recent
@@ -88,6 +88,7 @@ class TeleoperationReset(EvalRealtimeChunking):
         self._tta_recorder = tta_online.TTATrajectoryRecorder(maxlen=200)
         self._tta_thread = None
         self._tta_pause = threading.Event()  # set while a TTA update is training
+        self.enable_tta = enable_tta
 
     def prediction_loop(self):
         """Overrides EvalRealtimeChunking.prediction_loop to additionally
@@ -217,7 +218,8 @@ class TeleoperationReset(EvalRealtimeChunking):
         # Start interrupt sequence. The seq methods queue up instructions behind the scenes,
         #   so custom logic needs to be 1. run through promise.then() and 2. be non-blocking.
         print('Starting cable reset sequence.')
-        self.trigger_tta_update()
+        if self.enable_tta:
+            self.trigger_tta_update()
         # Clear force-edge/contact-timeout state: normally this happens when the
         # reset opens the gripper, but a retreat keeps holding the cable, so it
         # needs to be done explicitly here.
@@ -275,6 +277,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
     parser.add_argument('--log', type=str, default=None, help='log directory')
+    parser.add_argument('--tta', action='store_true', help='enable test-time adaptation (TTA) on failure')
     args = parser.parse_args()
 
     if args.log is not None:
@@ -282,6 +285,6 @@ if __name__ == '__main__':
     teleop = TeleoperationReset(
         ckpt=args.ckpt, device=args.device,
         log_dir=args.log,
-        control_freq=args.control_freq, weight_decay=args.weight_decay
+        control_freq=args.control_freq, weight_decay=args.weight_decay, enable_tta=args.tta
     )
     teleop.run()
