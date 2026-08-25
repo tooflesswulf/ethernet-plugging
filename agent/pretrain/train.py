@@ -62,6 +62,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                              state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
                              action_mode=dataset.action_mode,
                              grip_stats=dataset.grip_stats,
+                             framerate=dataset.framerate,
                              obs_fields=obs_fields).to(device)
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)

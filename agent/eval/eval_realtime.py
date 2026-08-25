@@ -12,7 +12,7 @@ import os
 
 
 class EvalRealtimeChunking(robot_execution.RobotExecution):
-    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=20, weight_decay=0.5, done_threshold=0.5):
+    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=None, weight_decay=0.5, done_threshold=0.5):
         # Architecture config, weights, and normalization stats all come from the checkpoint.
         self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
         self.policy.eval()
@@ -20,6 +20,15 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         # End the episode once the policy's predicted completion score crosses this.
         self.done_threshold = done_threshold
         grip = GripperStats(*self.policy.grip_stats)
+
+        # Actions are spaced at the framerate the policy was trained on, and the chunking
+        # buffer times them by control_dt, so mismatched rates replay the chunk too
+        # fast/slow. Only override deliberately.
+        if control_freq is None:
+            control_freq = self.policy.framerate
+        elif control_freq != self.policy.framerate:
+            print(f'Warning: running at {control_freq}Hz, but the policy was trained at '
+                  f'{self.policy.framerate}Hz. Actions will execute at the wrong speed.')
 
         # super().__init__() resets & starts the robot.
         super().__init__(
@@ -85,8 +94,9 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_dir', type=str, default=None,
                         help='where to save robot log data + evaluation video (None disables logging)')
-    parser.add_argument('--control_freq', '--hz', type=float, default=20,
-                        help='control/command frequency (Hz) for the real-time loop')
+    parser.add_argument('--control_freq', '--hz', type=float, default=None,
+                        help='control/command frequency (Hz) for the real-time loop '
+                             "(default: the policy's training framerate)")
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
     return parser.parse_args()

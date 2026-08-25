@@ -6,7 +6,7 @@ from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers import DDIMScheduler
 
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
-from agent.dataset.sequence import ActionMode, GripperStats
+from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
 from env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
@@ -40,6 +40,7 @@ class DiffusionPolicy(nn.Module):
         grip_stats: GripperStats | None = None,
         obs_fields: list[str] | None = None,
         predict_done: bool | None = None,
+        framerate: float = DEFAULT_FRAMERATE,
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
@@ -65,9 +66,13 @@ class DiffusionPolicy(nn.Module):
             obs_fields=obs_fields,
             grip_stats=list(self.grip_stats),
             predict_done=self.predict_done,
+            framerate=float(framerate),
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
+        # Rate the training data was sampled at; actions are meant to be executed at
+        # this rate. Checkpoints saved before this was tracked default to DEFAULT_FRAMERATE.
+        self.framerate = float(framerate)
         self.action_dim = action_dim
         self.img_size = img_size
         self.num_diffusion_iters = num_diffusion_iters
