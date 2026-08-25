@@ -64,10 +64,11 @@ class TeleoperationReset(EvalRealtimeChunking):
     CONTACT_Z_M = 0.0665          # first contact above this = rim hit, below = in socket
     CABLE_WIDTH_MM = (6.5, 12.0)  # gripper width range when holding the cable
 
-    RETREAT_LOOKBACK_S = 2.0      # how far back (elapsed time) to retreat on failure
+    RETREAT_DISTANCE_M = 0.03      # retreat until the arm has moved back at least this far, on failure
     RETREAT_NUM_WAYPOINTS = 10     # waypoints used to retrace that window in reverse
-    RETREAT_SPEED = 0.03          # m/s; slow, since this retraces near the socket
-    STEP_BACK_INCREMENT_S = 5.0   # trajectory retraced per manual Dpad-Up step
+    RETREAT_SPEED = 0.03           # m/s; slow, since this retraces near the socket
+    RETREAT_MAX_LOOKBACK_S = 10.0  # safety cap on how far back (elapsed time) to search
+    STEP_BACK_DISTANCE_M = 0.005   # distance retraced per manual Dpad-Up step
 
     _fz_baseline = None
     _contact_z = None
@@ -158,27 +159,39 @@ class TeleoperationReset(EvalRealtimeChunking):
         self._fz_cursor = n
         return flag
 
-    def _retreat_waypoints(self, lookback_s, num_waypoints):
-        """Most-recent-first list of URPoses sampled from the last `lookback_s`
-        seconds of self.env.robot_obs, for retracing the approach in reverse
-        instead of jumping straight back to a fixed pose (safer near the
-        socket, since it follows the path the arm actually took). Empty if
-        there isn't `lookback_s` seconds of history yet.
+    def _retreat_waypoints(self, min_distance_m, num_waypoints):
+        """Most-recent-first list of URPoses to retrace, searching backward
+        through self.env.robot_obs until the arm has moved at least
+        `min_distance_m` (straight-line, in position) from where it is now.
+
+        Distance-based rather than a fixed time window: near the socket the
+        policy moves very slowly (careful alignment/insertion), so a fixed
+        time window can correspond to almost no physical displacement --
+        this keeps searching further back until the retreat is actually
+        meaningful. Capped at RETREAT_MAX_LOOKBACK_S of history so a long
+        stationary/force-controlled dwell doesn't scan the whole session.
+        Empty if there's no history yet, or the arm never moved far enough
+        within the lookback cap.
         """
         robot_obs = self.env.robot_obs
         if not robot_obs:
             return []
-        t_start = robot_obs[-1].time - lookback_s
+        current_pos = np.asarray(robot_obs[-1].actual_pose[:3], dtype=float)
+        t_floor = robot_obs[-1].time - self.RETREAT_MAX_LOOKBACK_S
+
         window = []
         for obs in reversed(robot_obs):
-            if obs.time < t_start:
-                break
             window.append(obs)
+            if obs.time < t_floor:
+                break
+            dist = float(np.linalg.norm(np.asarray(obs.actual_pose[:3], dtype=float) - current_pos))
+            if dist >= min_distance_m:
+                break
         if len(window) <= 1:
             return []
-        # window[0] is ~now; skip it and space the rest evenly back to t_start.
+        # window[0] is ~now; skip it and space the rest evenly back to the far end.
         # (np.linspace(..., num=1) returns just the range's start, not its end,
-        # so num_waypoints=1 is special-cased to still land on the oldest pose.)
+        # so num_waypoints=1 is special-cased to still land on the far pose.)
         last_idx = len(window) - 1
         if num_waypoints <= 1:
             idxs = [last_idx]
@@ -233,7 +246,7 @@ class TeleoperationReset(EvalRealtimeChunking):
         self._contact_t = -1
         self._force_edge = StreamingForceEdge(hz=self.env.servo_frequency)
 
-        waypoints = self._retreat_waypoints(self.RETREAT_LOOKBACK_S, self.RETREAT_NUM_WAYPOINTS)
+        waypoints = self._retreat_waypoints(self.RETREAT_DISTANCE_M, self.RETREAT_NUM_WAYPOINTS)
         seq = interrupt(self)
         if not waypoints:
             print('No recent trajectory to retreat through; falling back to a full reset.')
@@ -250,15 +263,16 @@ class TeleoperationReset(EvalRealtimeChunking):
 
     def step_back(self):
         """Manual retreat (Dpad-Up): steps back through recent history one
-        small increment (STEP_BACK_INCREMENT_S) at a time, rather than the
-        fixed multi-second retreat reset_cable() does on a detected failure.
-        Number of steps back is entirely up to the operator: one tap moves
-        one increment; holding the button re-triggers this every tick the
-        prior increment's motion finishes on, so it keeps stepping back for
-        as long as it's held. No TTA update -- no failure signal to learn
-        from here, just manual repositioning.
+        small increment (STEP_BACK_DISTANCE_M of actual displacement) at a
+        time, rather than the larger retreat reset_cable() does on a
+        detected failure. Number of steps back is entirely up to the
+        operator: one tap moves one increment; holding the button
+        re-triggers this every tick the prior increment's motion finishes
+        on, so it keeps stepping back for as long as it's held. No TTA
+        update -- no failure signal to learn from here, just manual
+        repositioning.
         """
-        waypoints = self._retreat_waypoints(self.STEP_BACK_INCREMENT_S, num_waypoints=1)
+        waypoints = self._retreat_waypoints(self.STEP_BACK_DISTANCE_M, num_waypoints=1)
         if not waypoints:
             print('No recent trajectory to step back through.')
             return None  # repeat last action; nothing queued, so get_action isn't shadowed
