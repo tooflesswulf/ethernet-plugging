@@ -1,4 +1,4 @@
-from agent.eval.eval_realtime import EvalRealtimeChunking
+from agent.evaluate.eval_realtime import EvalRealtimeChunking
 from agent.utils.robot_utils import interrupt, build_states
 from collections import deque
 import numpy as np
@@ -65,9 +65,9 @@ class TeleoperationReset(EvalRealtimeChunking):
     CABLE_WIDTH_MM = (6.5, 12.0)  # gripper width range when holding the cable
 
     RETREAT_LOOKBACK_S = 2.0      # how far back (elapsed time) to retreat on failure
-    RETREAT_NUM_WAYPOINTS = 6     # waypoints used to retrace that window in reverse
+    RETREAT_NUM_WAYPOINTS = 10     # waypoints used to retrace that window in reverse
     RETREAT_SPEED = 0.03          # m/s; slow, since this retraces near the socket
-    STEP_BACK_INCREMENT_S = 0.3   # trajectory retraced per manual Dpad-Up step
+    STEP_BACK_INCREMENT_S = 5.0   # trajectory retraced per manual Dpad-Up step
 
     _fz_baseline = None
     _contact_z = None
