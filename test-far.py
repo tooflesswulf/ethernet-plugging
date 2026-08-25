@@ -139,7 +139,7 @@ class TeleoperationReset(EvalRealtimeChunking):
         def _run():
             self._tta_pause.set()
             try:
-                tta_online.do_tta_update(self.policy, recorder, device=self.device)
+                tta_online.do_tta_update(self.policy, recorder, device=self.device, num_negatives=10, num_candidates=8, train_steps=5, lr=1e-5, beta=0.1, bc_weight=1.0)
             finally:
                 self._tta_pause.clear()
 
@@ -177,7 +177,13 @@ class TeleoperationReset(EvalRealtimeChunking):
         if len(window) <= 1:
             return []
         # window[0] is ~now; skip it and space the rest evenly back to t_start.
-        idxs = np.linspace(1, len(window) - 1, num=min(num_waypoints, len(window) - 1), dtype=int)
+        # (np.linspace(..., num=1) returns just the range's start, not its end,
+        # so num_waypoints=1 is special-cased to still land on the oldest pose.)
+        last_idx = len(window) - 1
+        if num_waypoints <= 1:
+            idxs = [last_idx]
+        else:
+            idxs = np.linspace(1, last_idx, num=min(num_waypoints, last_idx), dtype=int)
         return [window[i].actual_pose for i in idxs]
 
     def get_action(self):
