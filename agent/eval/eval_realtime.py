@@ -49,6 +49,10 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
 
         self.prediction_thread.start()
 
+    def runtime_info(self):
+        zf = self.last_obs['state']['filtered_force']
+        print(f'zforce: {zf[2]:.05f}', end='\r')
+
     def get_action(self):
         if self.buffer.is_empty():
             return None
