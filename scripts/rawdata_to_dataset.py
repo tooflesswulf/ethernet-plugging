@@ -99,7 +99,7 @@ if __name__ == '__main__':
     parser.add_argument('--path', type=str,
                         default='/home/albertxu/data/ethernet_plug_v3',
                         help='Base dataset directory')
-    parser.add_argument('--framerate', type=float, default=10.0, help='Framerate to sample the raw data at')
+    parser.add_argument('--framerate', type=float, default=20.0, help='Framerate to sample the raw data at')
     parser.add_argument('--alpha', '-a', type=float, default=0.03, help='Smoothing factor for force EWMA')
     parser.add_argument('--h5_images', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to save images in the HDF5 file (can make it very large)')
