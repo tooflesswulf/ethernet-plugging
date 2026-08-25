@@ -1,5 +1,6 @@
 from agent.evaluate.eval_realtime import EvalRealtimeChunking
 from agent.utils.robot_utils import interrupt, build_states
+from agent.utils.interrupt_sequence import Step
 from collections import deque
 import numpy as np
 import argparse
@@ -43,6 +44,23 @@ class StreamingForceEdge:
             self.cooldown = self.refractory
             return True
         return False
+
+
+class WaitForThreadStep(Step):
+    """Interrupt-sequence step (see agent/utils/interrupt_sequence.py) that
+    holds the current commanded pose/gripper until `thread` finishes.
+    Used to keep an interrupt sequence -- and hence normal policy control --
+    from resuming until a background TTA update has actually completed.
+    """
+
+    def __init__(self, rexec, thread):
+        super().__init__(rexec)
+        self.thread = thread
+
+    def tick(self, t):
+        if self.thread.is_alive():
+            return URPose(*self.env.des_pose), self.env.des_gripper_state, False, 0.
+        return None
 
 
 class TeleoperationReset(EvalRealtimeChunking):
@@ -123,29 +141,46 @@ class TeleoperationReset(EvalRealtimeChunking):
             obs_state = build_states(obs_deque, self.policy.obs_fields)
             self.buffer.dolog(chnk, obs_state, time.time())
 
-    def trigger_tta_update(self):
-        """Fire a background TTA update on the trajectory recorded since the
-        last update, using the current failure as the negative signal. Runs
-        in its own thread so reset_cable()'s interrupt sequence stays
-        non-blocking; pauses prediction_loop for the duration so training
-        doesn't race live inference on the same weights.
+    def _freeze_tta_trajectory(self):
+        """Called at the top of reset_cable(), before the retreat starts:
+        snapshots the trajectory recorded since the last update and pauses
+        prediction_loop immediately, so the retreat motion that follows
+        doesn't record new (retreat-driven, not policy-driven) predictions
+        over the failure-relevant ones before training gets to them.
+        Returns the frozen recorder, or None if there's nothing to train on
+        (nothing recorded, or an update is already running).
         """
         if self._tta_thread is not None and self._tta_thread.is_alive():
             print('TTA update already running, skipping.')
-            return
+            return None
         recorder, self._tta_recorder = self._tta_recorder, tta_online.TTATrajectoryRecorder(maxlen=200)
         if len(recorder) == 0:
-            return
+            return None
+        self._tta_pause.set()
+        return recorder
+
+    def _start_tta_wait(self, seq, recorder):
+        """Called once the retreat finishes: starts training on the
+        trajectory frozen by _freeze_tta_trajectory() and queues a step that
+        holds position until it's done, so the interrupt sequence -- and
+        hence normal policy control -- doesn't resume until the update has
+        actually completed. Returns the queued step's Promise so the
+        reset_cable() .then() chain waits on it.
+        """
+        if recorder is None:
+            return None
 
         def _run():
-            self._tta_pause.set()
             try:
-                tta_online.do_tta_update(self.policy, recorder, device=self.device, num_negatives=10, num_candidates=8, train_steps=5, lr=1e-5, beta=0.1, bc_weight=1.0)
+                tta_online.do_tta_update(self.policy, recorder, device=self.device,
+                                          num_negatives=10, num_candidates=8, train_steps=5,
+                                          lr=1e-5, beta=0.1, bc_weight=1.0)
             finally:
                 self._tta_pause.clear()
 
         self._tta_thread = threading.Thread(target=_run, daemon=True)
         self._tta_thread.start()
+        return seq.add(WaitForThreadStep(self, self._tta_thread))
 
     def detect_force_edge(self):
         # robot_obs is appended by the receive thread at servo_frequency (~500Hz),
@@ -237,8 +272,11 @@ class TeleoperationReset(EvalRealtimeChunking):
         # Start interrupt sequence. The seq methods queue up instructions behind the scenes,
         #   so custom logic needs to be 1. run through promise.then() and 2. be non-blocking.
         print('Starting cable reset sequence.')
-        if self.enable_tta:
-            self.trigger_tta_update()
+        # Freeze the failure trajectory and pause prediction_loop *now* (before
+        # the retreat runs), then defer the actual training until the retreat
+        # below has finished: retreat -> TTA -> only then resume normal control.
+        tta_recorder = self._freeze_tta_trajectory() if self.enable_tta else None
+
         # Clear force-edge/contact-timeout state: normally this happens when the
         # reset opens the gripper, but a retreat keeps holding the cable, so it
         # needs to be done explicitly here.
@@ -257,7 +295,14 @@ class TeleoperationReset(EvalRealtimeChunking):
         else:
             for pose in waypoints:
                 last = seq.move_to(pose, speed=self.RETREAT_SPEED)
+
+        # Retreat done -> clear the stale action buffer -> train TTA on the
+        # frozen trajectory, holding position for its whole duration -> re-zero
+        # F/T -> resume normal control. Chained through .then() (each stage's
+        # callback can return a Promise the chain will wait on) so nothing here
+        # jumps ahead of the previous stage actually finishing.
         last.then(lambda _: self.buffer.clear()) \
+            .then(lambda _: self._start_tta_wait(seq, tta_recorder)) \
             .then(lambda _: self.env.request_zero_ft())
         return self.get_action()
 
