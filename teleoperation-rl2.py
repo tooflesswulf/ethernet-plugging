@@ -50,8 +50,9 @@ if __name__ == "__main__":
     parser.add_argument('--log_dir', type=str,
                         default='/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset/ethernet_plugin_unplug_rl2',
                         help='Base dataset directory')
-    parser.add_argument('--control_freq', '--hz', type=float, default=20,
-                        help='control/command frequency (Hz) for the real-time loop')
+    parser.add_argument('--control_freq', '--hz', type=float, default=None,
+                        help='control/command frequency (Hz) for the real-time loop '
+                             "(default: the policy's training framerate)")
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
     parser.add_argument('-d', '--debug', action=argparse.BooleanOptionalAction, default=False)
