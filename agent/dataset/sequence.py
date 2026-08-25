@@ -12,6 +12,9 @@ import h5py, pathlib, os, torch
 
 
 IMAGE_SIZE = 128
+# Framerate assumed for datasets/checkpoints that predate the stored `framerate`
+# metadata; everything collected before that was sampled/run at 20Hz.
+DEFAULT_FRAMERATE = 20.0
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
 GripperStats = namedtuple('GripperStats', ['grip_width_mm', 'grip_force_n', 'grip_speed_mmps', 'grip_pullback_mm'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
@@ -87,6 +90,15 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 self.h5_image = False
             else:
                 raise ValueError('Invalid image storage format in dataset.')
+
+            # Rate the raw data was resampled at (scripts/rawdata_to_dataset.py --framerate).
+            # It gets baked into the policy so evaluation replays actions at the same rate.
+            if 'framerate' in f['metadata'].attrs:
+                self.framerate = float(f['metadata'].attrs['framerate'])
+            else:
+                print(f'Warning: dataset framerate not found in {self.dataset_path}. '
+                      f'Assuming {DEFAULT_FRAMERATE}Hz.')
+                self.framerate = DEFAULT_FRAMERATE
 
             # Gripper metadata
             self.grip_stats = None

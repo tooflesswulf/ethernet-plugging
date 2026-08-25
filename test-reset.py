@@ -143,8 +143,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Teleoperation script for Ethernet Plugging task')
     parser.add_argument('--ckpt', type=str, required=True, help='path to checkpoint file')
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--control_freq', '--hz', type=float, default=20,
-                        help='control/command frequency (Hz) for the real-time loop')
+    parser.add_argument('--control_freq', '--hz', type=float, default=None,
+                        help='control/command frequency (Hz) for the real-time loop '
+                             "(default: the policy's training framerate)")
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
     parser.add_argument('--log', type=str, default=None, help='log directory')
