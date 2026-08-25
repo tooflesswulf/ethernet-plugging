@@ -8,6 +8,20 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
 
 
+def build_encoder(
+        encoder_type='resnet',
+        obs_shape=(3, 128, 128),
+):
+    if encoder_type == 'resnet':
+        vision_feature_dim = 512
+        # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
+        # work with EMA — performance will tank if you forget to do this!
+        vision_encoder = replace_bn_with_gn(get_resnet('resnet18'))
+    else:
+        raise ValueError(f"Unknown encoder_type {encoder_type}")
+    return vision_encoder, vision_feature_dim
+
+
 def build_diffusion_policy(
     # train parameters
     num_training_steps,

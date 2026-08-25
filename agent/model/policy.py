@@ -5,6 +5,7 @@ import torch.nn as nn
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers import DDIMScheduler
 
+from agent.model.diffusion import build_encoder
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
 from agent.dataset.sequence import ActionMode, GripperStats
 from env import GRIP_OPEN, GRIP_CLOSED
@@ -27,7 +28,6 @@ class DiffusionPolicy(nn.Module):
         self,
         obs_horizon=1,
         action_horizon=16,
-        vision_feature_dim=512,
         state_dim=7,
         action_dim=7,
         img_size=128,
@@ -48,13 +48,13 @@ class DiffusionPolicy(nn.Module):
 
         # Actions are [pose(6), gripper(1), done(1)], so assume it if predict_done is None.
         self.predict_done = (action_dim > 7) if predict_done is None else predict_done
+        self.predict_gripper = action_dim > 6
 
         # Architecture/config args; saved alongside the weights by save_checkpoint so
         # from_checkpoint can rebuild the policy without the caller knowing the dims.
         self.config = dict(
             obs_horizon=obs_horizon,
             action_horizon=action_horizon,
-            vision_feature_dim=vision_feature_dim,
             state_dim=state_dim,
             action_dim=action_dim,
             img_size=img_size,
@@ -65,7 +65,9 @@ class DiffusionPolicy(nn.Module):
             obs_fields=obs_fields,
             grip_stats=list(self.grip_stats),
             predict_done=self.predict_done,
+            predict_gripper=self.predict_gripper,
         )
+        self.encode_images = (encoder_type != 'none')
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
         self.action_dim = action_dim
@@ -74,7 +76,13 @@ class DiffusionPolicy(nn.Module):
 
         # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
         # work with EMA — performance will tank if you forget to do this!
-        vision_encoder = replace_bn_with_gn(get_resnet('resnet18'))
+        if encoder_type == 'resnet':
+            vision_encoder, vision_feature_dim = build_encoder(encoder_type, obs_shape=(3, img_size, img_size))
+        elif encoder_type == 'none':
+            vision_encoder = None
+            vision_feature_dim = 0
+        else:
+            raise ValueError(f"Unknown encoder_type {encoder_type}")
         noise_pred_net = ConditionalUnet1D(
             input_dim=action_dim,
             global_cond_dim=(vision_feature_dim + state_dim) * obs_horizon,
@@ -156,11 +164,14 @@ class DiffusionPolicy(nn.Module):
         conditions: {'rgb': (B, T, C, H, W) in [0, 1], 'state': (B, T, state_dim) raw}
         Returns flattened observation conditioning (B, T * obs_dim).
         """
-        images = conditions['rgb'].float()
         states = self.normalize_states(conditions['state'].float())
-        # BxTxCxHxW -> (B T)xCxHxW -> (B T) x d -> BxTxd
-        image_features = self.nets['vision_encoder'](images.flatten(end_dim=1)).reshape(*images.shape[:2], -1)
-        obs_features = torch.cat([image_features, states], dim=-1)
+        if self.encode_images:
+            images = conditions['rgb'].float()
+            # BxTxCxHxW -> (B T)xCxHxW -> (B T) x d -> BxTxd
+            image_features = self.nets['vision_encoder'](images.flatten(end_dim=1)).reshape(*images.shape[:2], -1)
+            obs_features = torch.cat([image_features, states], dim=-1)
+        else:
+            obs_features = states
         return obs_features.flatten(start_dim=1)
 
     def compute_loss(self, actions, conditions):
@@ -225,7 +236,7 @@ class DiffusionPolicy(nn.Module):
             actions = actions.detach().cpu().numpy()
         actions = np.asarray(actions)
         curr_pose = np.asarray(curr_pose, dtype=float)
-        pose_actions, g_actions = actions[:, :6], actions[:, 6]
+        pose_actions = actions[:, :6]
 
         if self.action_mode == 'absolute':
             des_poses = pose_actions.copy()
@@ -257,7 +268,11 @@ class DiffusionPolicy(nn.Module):
                 np.concatenate([t.translation, t.rotation.as_rotvec()]) for t in des_tfs])
 
         # Map gripper action (-1 -> 1, 1 -> 0)
-        des_gripper = np.where(g_actions > 0, GRIP_OPEN, GRIP_CLOSED)
+        if self.predict_gripper:
+            g_actions = actions[:, 6]
+            des_gripper = np.where(g_actions > 0, GRIP_OPEN, GRIP_CLOSED)
+        else:
+            des_gripper = np.full((len(des_poses),), GRIP_OPEN, dtype=float)
 
         # Decode the end-of-episode channel (±1) into a [0, 1] completion score. Zeros
         # (never done) when this policy has no done channel.
