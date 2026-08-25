@@ -1,6 +1,6 @@
 from tqdm import tqdm
 import numpy as np
-import argparse
+import argparse, os
 import pathlib
 import torch.nn as nn
 import torch
@@ -11,7 +11,7 @@ from diffusers.optimization import get_scheduler
 from agent.utils.utils import save_checkpoint, compute_norm_stats
 from agent.utils.logging import NoOpLogger, setup_logger
 from agent.model.policy import DiffusionPolicy
-from agent.dataset.sequence import ActionMode, StitchedSequenceDataset
+from agent.dataset.sequence import ActionMode, StitchedSequenceForceDataset
 
 DEVICE = "cuda:0"
 
@@ -33,26 +33,18 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
           use_wandb=False, log_interval=10, save_interval=10,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
-    obs_fields = ['pose', 'gripper_width']
-    obs_horizon = 3
-    if 'follow-line' in name:
-        obs_fields += ['force']
-        obs_horizon = 1
-    
-    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
-                                      cond_steps=obs_horizon, img_cond_steps=obs_horizon,
-                                      predict_done=predict_done, end_signal_steps=end_signal_steps,
-                                      horizon_steps=16, action_mode=action_mode, device=device,
+    obs_fields = ['force', 'pose']
+    obs_horizon = 1; horizon = 16
+    dataset = StitchedSequenceForceDataset(dataset_path, obs_fields=obs_fields, cond_steps=obs_horizon,
+                                      horizon_steps=horizon, action_mode=action_mode, device=device,
                                       max_n_episodes=50)
 
-    val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
-                                          cond_steps=obs_horizon, img_cond_steps=obs_horizon,
-                                          predict_done=predict_done, end_signal_steps=end_signal_steps,
-                                          horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
+    val_dataset = StitchedSequenceForceDataset(dataset_path, obs_fields=obs_fields, cond_steps=obs_horizon, 
+                                          horizon_steps=horizon, max_n_episodes=1, action_mode=action_mode, device=device)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=128,
-        num_workers=0, # npz dataset in memory, worker=0 to avoid error
+        num_workers=0, # workers > 0 cause error
         shuffle=True,
     )
     val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=64)
@@ -60,10 +52,11 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     # Normalization stats from the training set; stored as buffers inside the
     # policy so they're saved in the checkpoint for un-normalizing at eval time.
     norm_stats = compute_norm_stats(dataset)
-    policy = DiffusionPolicy(action_horizon=16, obs_horizon=obs_horizon, norm_stats=norm_stats,
+  
+    policy = DiffusionPolicy(encoder_type='none', num_diffusion_iters=20, action_horizon=horizon, obs_horizon=obs_horizon, norm_stats=norm_stats,
                              state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
                              action_mode=dataset.action_mode,
-                             grip_stats=dataset.grip_stats,
+                             grip_stats=None,
                              obs_fields=obs_fields).to(device)
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
@@ -73,7 +66,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
         num_warmup_steps=len(dataloader),
         num_training_steps=len(dataloader) * epochs,
     )
-    logger = setup_logger(use_wandb=use_wandb, project="realrobot-learning", name=name)
+    logger = setup_logger(use_wandb=use_wandb, project="force-learning", name=name)
     logger.log_config(policy.config)
 
     pbar = tqdm(range(epochs))
@@ -85,9 +78,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
             loss = policy.compute_loss(batch.actions, batch.conditions)
 
             # optimize
-            loss.backward()
-            opt.step()
-            opt.zero_grad()
+            loss.backward(); opt.step(); opt.zero_grad()
             lr_scheduler.step()
 
             # update Exponential Moving Average of the model weights
@@ -109,7 +100,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
         def binary_correctness(pred, tgt):
             return (torch.sign(pred) == torch.sign(tgt)).float().mean().item()
 
-        val_mses, gripper_correctness, done_correctness = [], [], []
+        val_mses = []
         for i, batch in enumerate(val_dataloader):
             with torch.no_grad():
                 batch = batch_to_device(batch, device)
@@ -118,15 +109,8 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                 naction = policy.predict_action(batch.conditions)
 
                 val_mses.append(nn.functional.mse_loss(naction, actions).mean().item())
-                # gripper is channel 6; the optional end-of-episode signal is channel 7.
-                gripper_correctness.append(binary_correctness(naction[:, :, 6], actions[:, :, 6]))
-                if policy.predict_done:
-                    done_correctness.append(binary_correctness(naction[:, :, 7], actions[:, :, 7]))
-
-        val_log = {"val/mse_loss": np.mean(val_mses),
-                   "val/gripper_correctness": np.mean(gripper_correctness), "val/epoch": epoch}
-        if done_correctness:
-            val_log["val/done_correctness"] = np.mean(done_correctness)
+               
+        val_log = {"val/mse_loss": np.mean(val_mses), "val/epoch": epoch}
         logger.log(val_log, step=step)
 
     # save the lastest model (with EMA weights applied)
@@ -138,7 +122,7 @@ def parse_args():
     parser.add_argument('--name', type=str, default=None)
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--epochs', type=int, default=150)
+    parser.add_argument('--epochs', type=int, default=1000)
     parser.add_argument('--data_dirs', nargs='+', type=str,  default=['/zfsauton/scratch/yiqiw2/100%/datasets/',])
     parser.add_argument('--ckpt_dir', type=str, default='logs')
     parser.add_argument('--end_signal', action='store_true', default=True)
@@ -150,7 +134,7 @@ if __name__ == '__main__':
     if args.name is None:
         args.name = pathlib.Path(args.ckpt_dir).stem
         print('Name not given. Assuming name for logging and wandb:', args.name)
-    dataset_paths = args.data_dirs
+    dataset_paths =[ os.path.join(args.data_dirs[0], name) for name in os.listdir( args.data_dirs[0]) ]
     ckpt_path = pathlib.Path(args.ckpt_dir) / args.name
 
     # if the ckpt_path already exists, save to a subdirectory with the name of the run (e.g. logs/pretrain-ethernet-unplug-red-topdown)

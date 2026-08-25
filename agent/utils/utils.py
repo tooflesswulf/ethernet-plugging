@@ -102,6 +102,8 @@ def compute_norm_stats(dataset) -> dict:
     actions = np.asarray(dataset.actions)
     flat_actions = actions.reshape(-1, actions.shape[-1])
     obs = dataset.obs
+    if isinstance(obs, torch.Tensor):
+        obs = obs.cpu().numpy() # torch.tensor cause policy set_norm_stats throw an error
     return {
         'actions': {'min': flat_actions.min(0), 'max': flat_actions.max(0)},
         'states': {'min': obs.min(0), 'max': obs.max(0)},

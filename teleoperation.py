@@ -5,10 +5,16 @@ import argparse
 import numpy as np
 import os
 
-GRIP_WIDTH_MM = 10
-GRIP_FORCE_N = 40
+# GRIP_WIDTH_MM = 10
+# GRIP_FORCE_N = 40
+# GRIP_SPEED_MMPS = 50
+# GRIP_PULLBACK_MM = 10
+
+# Force touch (expo marker)
+GRIP_WIDTH_MM = 15
+GRIP_FORCE_N = 20
 GRIP_SPEED_MMPS = 50
-GRIP_PULLBACK_MM = 10
+GRIP_PULLBACK_MM = 15
 
 
 class Teleoperation(robot_execution.RobotExecution):
@@ -51,11 +57,18 @@ class Teleoperation(robot_execution.RobotExecution):
             return self.move_to_port()
         if self.iface.dualsense.state.DpadUp:
             return self.unplug_and_release()
+        if self.iface.dualsense.state.DpadLeft:
+            return self.move_home()
         des_pose = URPose(*self.iface.target_pose)
         des_gripper = self.iface.gripper_state
         des_zforce = self.iface.target_zforce
         adaptive_mode = self.iface.adaptive_mode
         return des_pose, des_gripper, adaptive_mode, des_zforce
+
+    def move_home(self):
+        seq = interrupt(self)
+        seq.move_to(self.home_pose)
+        return self.get_action()
 
     def move_to_port(self):
         seq = interrupt(self)

@@ -50,17 +50,17 @@ if __name__ == '__main__':
     assert len(total_images) == len(total_poses)
 
     # # save states
-    # os.makedirs(save_dir, exist_ok=True)
-    # np.savez_compressed(
-    #     save_state_path,
-    #     pose=total_poses,
-    #     force=total_forces,
-    #     gripper_width=total_widths,
-    #     gripper_force=total_g_forces,
-    #     traj_length=np.array(lens)
-    # )
-    # # save images
-    # os.makedirs(save_img_dir, exist_ok=True)
-    # for i, img_path in enumerate(tqdm(total_images)):
-    #     save_img_path = os.path.join(save_img_dir, f'{i}.png')
-    #     shutil.copy(img_path, save_img_path)
+    os.makedirs(save_dir, exist_ok=True)
+    np.savez_compressed(
+        save_state_path,
+        pose=total_poses,
+        force=total_forces,
+        gripper_width=total_widths,
+        gripper_force=total_g_forces,
+        traj_length=np.array(lens)
+    )
+    # save images
+    os.makedirs(save_img_dir, exist_ok=True)
+    for i, img_path in enumerate(tqdm(total_images)):
+        save_img_path = os.path.join(save_img_dir, f'{i}.png')
+        shutil.copy(img_path, save_img_path)

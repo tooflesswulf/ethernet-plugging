@@ -108,17 +108,18 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             # Extract states and actions up to max_n_episodes
             poses = dataset['pose'][:total_num_steps]  # (N, 6)
             g_widths = dataset['gripper_width'][:total_num_steps]  # (N,)
-            obs = torch.from_numpy(obs[:total_num_steps]).float().to(device)  # (N, obs_dim)
-            images = torch.from_numpy(get_images(img_dir, total_num_steps, img_size=img_size)).to(device)  # (N, H, W, C)
+            obs = obs[:total_num_steps]  # (N, obs_dim)
+            images = torch.from_numpy( get_images(img_dir, total_num_steps, img_size=img_size) ).float()  # (N, H, W, C)
             if self.poses is None:
                 self.poses, self.g_widths, self.obs, self.images = poses, g_widths, obs, images 
             else:
                 self.poses = np.concatenate([self.poses, poses])
                 self.g_widths = np.concatenate([self.g_widths, g_widths])
-                self.obs = torch.cat([self.obs, obs])
+                self.obs = np.concatenate([self.obs, obs])
                 self.images = torch.cat([self.images, images]) 
-               
 
+        # Gripper metadata
+        self.grip_stats = None
         self.obs_dim = self.obs.shape[-1]
         self._precompute_actions()  # precompute all actions for faster sampling during training
         self.act_dim = self.actions.shape[-1]
@@ -130,8 +131,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         """
         repeat states/images if using history observation at the beginning of the episode
         """
-        if self.h5 is None:
-            self.h5 = h5py.File(self.dataset_path / 'dataset.h5', 'r')
 
         start, ep_start, ep_end = self.indices[idx]
         end = min(start + self.horizon_steps, ep_end)
@@ -144,7 +143,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                           for t in reversed(range(self.cond_steps))])  # more recent is at the end, # cond_steps x dim
         images = torch.stack([self.images[max(start - t, ep_start)]
                              for t in reversed(range(self.img_cond_steps))])  # img_cond_steps x H x W x C
-        conditions = {'state': obs, 'rgb': rearrange(images, ' T H W C -> T C H W') / 255.0}
+        conditions = {'state': obs_np, 'rgb': rearrange(images, ' T H W C -> T C H W') / 255.0}
 
         batch = DataBatch(self.actions[idx], conditions)
         if self.transform is not None:
@@ -207,6 +206,158 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
     def _pose_action_local_delta(self, poses):
         # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
         transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
+        t0 = transforms[0]
+        deltas = [t0.inv() * t for t in transforms]
+        return np.array([delta.as_exp_coords() for delta in deltas])
+
+    def _pose_action_umi(self, poses):
+        # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
+        delta_xyz = poses[1:, :3] - poses[:1, :3]
+        eulers = np.array([ R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:] ])
+        # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
+        delta_eulers = eulers[1:] - eulers[:1]
+        # wrap to [-pi, pi]
+        delta_euler = (delta_eulers + np.pi) % (2 * np.pi) - np.pi
+        delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
+        return np.concatenate([delta_umi, delta_umi[-1:]])  # poor decision here, pad by 1 by repeating last one.
+
+    def _pose_action_global_delta(self, poses):
+        # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
+        transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
+        t0 = transforms[0]
+        deltas = [t * t0.inv() for t in transforms]
+        return np.array([delta.as_exp_coords() for delta in deltas])
+
+    def pose_action(self, poses):
+        if self.action_mode == 'absolute':
+            return self._pose_action_absolute(poses)
+        elif self.action_mode == 'local_delta':
+            return self._pose_action_local_delta(poses)
+        elif self.action_mode == 'global_delta':
+            return self._pose_action_global_delta(poses)
+        elif self.action_mode == 'umi':
+            return self._pose_action_umi(poses)
+        else:
+            raise ValueError(f"Invalid action_mode: {self.action_mode}")
+
+class StitchedSequenceForceDataset(torch.utils.data.Dataset):
+    """
+    force-based, no image.
+    """
+
+    def __init__(
+        self,
+        dataset_paths,
+        horizon_steps=3,
+        cond_steps=1,
+        max_n_episodes=10000,
+        obs_fields=['force'],
+        action_mode: ActionMode = 'local_delta',
+        device="cuda:0",
+    ):
+       
+        self.horizon_steps = horizon_steps
+        self.cond_steps = cond_steps  # states (proprio, etc.)
+        self.device = device
+        self.action_mode = action_mode
+        self.max_n_episodes = max_n_episodes
+        self.g_thr = 18 # (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
+        self.indices = None; traj_start = 0
+        self.poses, self.g_widths, self.obs, self.images = None, None, None, None
+        for dataset_path in dataset_paths[:max_n_episodes]:
+            dataset_path = pathlib.Path(dataset_path)
+
+            # Load dataset to device
+            state_path = dataset_path / 'states.npz'
+            dataset = np.load(state_path, allow_pickle=False)  # only np arrays
+            traj_lengths = dataset['traj_length']  if 'traj_length' in dataset else np.array([len(dataset['pose'])])
+            total_num_steps = np.sum(traj_lengths)
+            obs = np.c_[*[dataset[key] for key in obs_fields]]  # Concat along columns, (total_num_steps, obs_dim)
+
+            # Set up indices for sampling
+            indices = self.make_indices(traj_lengths, horizon_steps, traj_start=traj_start)
+            if self.indices is None:
+                self.indices = indices 
+            else:
+                self.indices = np.concatenate([self.indices, indices])
+            traj_start += total_num_steps
+
+            # Extract states and actions up to max_n_episodes
+            poses = dataset['pose'][:total_num_steps]  # (N, 6)
+            obs = obs[:total_num_steps] # (N, obs_dim)
+           
+            if self.poses is None:
+                self.poses, self.obs = poses, obs
+            else:
+                self.poses = np.concatenate([self.poses, poses])
+                self.obs =  np.concatenate([self.obs, obs])
+                
+        self.obs_dim = self.obs.shape[-1]
+        self._precompute_actions()  # precompute all actions for faster sampling during training
+        self.act_dim = self.actions.shape[-1]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        """
+        repeat states/images if using history observation at the beginning of the episode
+        """
+        # if self.h5 is None:
+        #     self.h5 = h5py.File(self.dataset_path / 'dataset.h5', 'r')
+
+        start, ep_start, ep_end = self.indices[idx]
+        end = min(start + self.horizon_steps, ep_end)
+        if end > ep_end:
+            # Shouldn't happen because make_indices should ensure we only sample valid start indices, but just in case
+            raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
+
+        # Conditioning observations: current and history states + images
+        obs_np = np.array([self.obs[max(start - t, ep_start)]
+                          for t in reversed(range(self.cond_steps))])  # more recent is at the end, # cond_steps x dim
+        conditions = {'state': obs_np,}
+
+        batch = DataBatch(self.actions[idx], conditions)
+        return batch
+
+    def make_indices(self, traj_lengths, horizon_steps, traj_start = 0):
+        """
+        makes indices for sampling from dataset;
+        each index maps to a datapoint and its bounds within the same trajectory.
+        Returns list[(start_index, traj_start_index, traj_end_index)]
+        """
+        indices = []
+       
+        for traj_length in traj_lengths:
+            max_start = traj_start + traj_length - horizon_steps
+            traj_end = traj_start + traj_length
+            indices += [(i, traj_start, traj_end) for i in range(traj_start, max_start + 1)]
+            traj_start += traj_length
+        return np.array(indices)
+
+    def _precompute_actions(self):
+        actions = []
+        for i in tqdm(range(len(self)), desc='precomputing actions'):
+            start, ep_start, ep_end = self.indices[i]
+            end = min(start + self.horizon_steps, ep_end)
+            if end > ep_end:
+                # TODO: replication pad if end out of ep_end
+                raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
+            poses = self.poses[start:end]
+
+            pose_action = self.pose_action(poses)
+            actions.append(np.c_[pose_action])
+        self.actions = np.array(actions)
+        return self.actions
+
+    def _pose_action_absolute(self, poses):
+        # Returns (N, 6): [tx, ty, tz, rx, ry, rz]
+        return poses
+
+    def _pose_action_local_delta(self, poses):
+        # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
+        transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
+       
         t0 = transforms[0]
         deltas = [t0.inv() * t for t in transforms]
         return np.array([delta.as_exp_coords() for delta in deltas])

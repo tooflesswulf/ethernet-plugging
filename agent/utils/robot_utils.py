@@ -68,6 +68,36 @@ def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda'):
     # integrate deltas (per the policy's action_mode) into absolute poses + widths
     return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
 
+def get_actions2(policy: DiffusionPolicy, obs_deque, device='cuda'):
+    """
+    obs_deque: sequence of env obs dicts (len == policy.obs_horizon), each with
+               'image' and 'state'. Images and the proprio state vector are built
+               here; the state follows policy.obs_fields so it matches training.
+    Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,),
+    des_done (H,) end-of-episode score in [0, 1]) ready to execute.
+    """
+    img_size = policy.img_size
+    images = np.stack([resize_image(o['image'], (img_size, img_size), flip_channel=True) for o in obs_deque])
+    states = build_states(obs_deque, policy.obs_fields)  # (T, state_dim)
+
+    # current absolute pose/width to integrate the (possibly delta) actions from
+    last = obs_deque[-1]['state']
+    curr_pose, curr_gripper_width = np.asarray(last['actual_pose']), last['gripper_width']
+
+    nimages = einops.rearrange(
+        torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
+    nstates = torch.from_numpy(states).to(device, dtype=torch.float32)
+
+    conditions = {
+        # 'rgb': (nimages / 255.0).unsqueeze(0),  # (1, T, C, H, W)
+        'state': nstates.unsqueeze(0),          # (1, T, state_dim); policy normalizes internally
+    }
+    naction = policy.predict_action(conditions)
+    naction = naction.detach().to('cpu').numpy()[0]
+    time.sleep(.1)
+
+    # integrate deltas (per the policy's action_mode) into absolute poses + widths
+    return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
 
 def interrupt(rexec):
     """The active InterruptSequence on `rexec`, installing one if needed."""
