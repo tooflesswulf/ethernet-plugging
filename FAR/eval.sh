@@ -1,0 +1,1 @@
+python test-far.py --ckpt ../ckpts/c2r2-50-pose/ckpt_final.pth 
