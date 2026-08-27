@@ -1,6 +1,6 @@
 python agent/pretrain/train.py \
     --epochs 200 \
-    --name plugin-unplug-pos-local_delta-50 \
+    --name rigid-follow-force-exp \
     --ckpt_dir ../ckpts \
-    --data_dir ../data/ethernet_plugin_unplug_dataset \
+    --data_dir ../dataset/rigid-follow-exp_dataset \
     --use_wandb

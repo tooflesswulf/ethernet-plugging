@@ -15,7 +15,7 @@ class Teleoperation(robot_execution.RobotExecution):
     # port_pose = URPose(x=-0.1269, y=0.5979, z=0.0730, rx=1.7296, ry=1.7668, rz=-0.760357)
     # release_pose = URPose(x=-0.0297, y=0.7031, z=0.0813, rx=-2.1029, ry=-2.0230, rz=-0.4256)
 
-    port_pose = URPose(x=-0.1205, y=0.4358, z=0.0489, rx=1.7429, ry=1.5768, rz=-0.7897)
+    port_pose = URPose(x=-0.1105, y=0.4358, z=0.0489, rx=1.7429, ry=1.5768, rz=-0.7897)
     unplug_pose = URPose(x=-0.1242, y=0.4285, z=0.0053, rx=1.6390, ry=1.6874, rz=-0.7822)
     release_pose1 = URPose(x=0.0120, y=0.7152, z=0.0271, rx=-1.8993, ry=-1.7929, rz=-0.4988)
     release_pose2 = URPose(x=-0.2713, y=0.5808, z=0.0271, rx=-1.8993, ry=-1.7928, rz=-0.4988)
@@ -87,7 +87,8 @@ class Teleoperation(robot_execution.RobotExecution):
         force = obs['state']['filtered_force']
         # print(f"Pose: {st['actual_pose']}", end='\r')
         # print(f'URPose(x={p.x:.4f}, y={p.y:.4f}, z={p.z:.4f}, rx={p.rx:.4f}, ry={p.ry:.4f}, rz={p.rz:.4f})', end='\r')
-        print(f'Network is: {self.last_obs['network_status']}', end='\r')
+        zf = self.last_obs['state']['filtered_force']
+        print(f'Network is: {self.last_obs['network_status']}, Force={zf[2]:.05f}', end='\r')
 
     def __init__(self, args):
         control_freq = 100
