@@ -51,7 +51,8 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
 
     def runtime_info(self):
         zf = self.last_obs['state']['filtered_force']
-        print(f'zforce: {zf[2]:.05f}', end='\r')
+       
+        print(self.buffer._chunk_count / (time.time() - self.env.t0), f'zforce: {zf[2]:.05f}', end='\r')
 
     def get_action(self):
         if self.buffer.is_empty():
