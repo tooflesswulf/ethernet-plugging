@@ -49,7 +49,7 @@ class ResidualTD3AlgoConfig(RLPDAlgoConfig):
     # ------------------------------------------------------------------
     # Scale for random action noise during initial exploration phase
     # Actions are sampled as: rand_actions = torch.rand(...) * 2 * random_action_noise_scale - random_action_noise_scale
-    random_action_noise_scale: float = 0.02 # 0.02  # Default: uniform in [-1, 1]
+    random_action_noise_scale: float = 0.05 # 0.02  # Default: uniform in [-1, 1]
 
     # Whether to use base policy + noise (True) or pure uniform noise (False) during warmup
     # Note: Environment wrapper always applies base_action + residual_action
@@ -122,11 +122,11 @@ class ResidualTD3DexmgConfig(RLPDDexmgConfig):
 
 @dataclass
 class ResidualTD3NetConfig(ResidualTD3DexmgConfig):
-    task: str = "Net"
+    task: str = "RigidFollow"
 
     offline_data: OfflineDataConfig = field(
         default_factory=lambda: OfflineDataConfig(
-            name = "cableflat-smallrouter_dataset",
+            name = "rigid-follow-exp_dataset",
             dir_path = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/dataset',
             num_episodes=300,
         )
@@ -137,7 +137,7 @@ class ResidualTD3NetConfig(ResidualTD3DexmgConfig):
         )
     )
 
-    wandb: WandBConfig = field(default_factory=lambda: WandBConfig(project="robomimic-net-residual-td3"))
+    wandb: WandBConfig = field(default_factory=lambda: WandBConfig(project="robomimic-rigid-follow-residual-td3"))
 
 
 # -----------------------------------------------------------------------------

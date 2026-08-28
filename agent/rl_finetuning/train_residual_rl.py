@@ -36,6 +36,7 @@ rl_scratch_dir = "./../../rl_online_buffer"
 rl_scratch_dir2 = "./../../rl_offline_buffer"
 rl_buffer_dir = "./../../rl_dump_buffer"
 
+# def get_force_reward()
 
 def _add_transitions_to_buffer(
     *,
@@ -55,7 +56,7 @@ def _add_transitions_to_buffer(
 
     Handles terminal observations correctly and convert images to uint8 for storage.
     """
-    obs_keys_set = ['observation.base_action', 'observation.rgb', 'observation.state']
+    obs_keys_set = ['observation.base_action', 'observation.rgb', 'observation.state',]
 
     # Keep only relevant keys & convert images to uint8 for storage
     curr_obs_i = {k: v for k, v in obs.items() if k in obs_keys_set}
@@ -202,7 +203,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     offline_episodes, total_transitions = parse_offline_dataset(
         offline_dataset_path, lowdim_keys, cfg.offline_data.num_episodes)
     grip = GripperStats(*base_policy.grip_stats)
-
+    assert False
     def get_envs(
         base_policy,
     ):
@@ -306,7 +307,6 @@ def main(cfg: ResidualTD3DexmgConfig):
     )
 
     # Calculate buffer size for simplified approach (1 transition per frame pair)
-    max_offline_transitions = total_transitions
     storage2 = LazyMemmapStorage(total_transitions, scratch_dir=rl_scratch_dir2)
     offline_rb = TensorDictPrioritizedReplayBuffer(
         # storage=LazyTensorStorage(max_size=max_offline_transitions, device="cpu"),  # keep in RAM

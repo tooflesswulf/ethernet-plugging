@@ -112,12 +112,12 @@ class BasePolicyVecEnvWrapper:
 
     def _process_obs(self, obs_dict):
         rgb = np.array( Image.fromarray( obs_dict['image'] ).resize(self.image_size) )
-        keys = [ 'actual_pose' if k == 'pose' else k for k in self.lowdim_keys]; state = obs_dict['state']
+        keys = [ 'actual_pose' if k == 'pose' else k for k in self.lowdim_keys]; state = obs_dict['state']; force = obs_dict['force']
         if 'actual_pose' in keys:
             pose = np.array( state['actual_pose'] )
         if 'gripper_width' in keys:
             gripper_width = np.array([ state['gripper_width'] ])
-        state = np.concatenate([pose, gripper_width])
+        state = np.concatenate([pose, gripper_width, force])
         
         return {
             "observation.state": state, # (7, )

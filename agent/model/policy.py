@@ -6,9 +6,7 @@ from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers import DDIMScheduler
 
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
-from agent.model.diffusion import build_encoder
-from agent.model.vit import RandomShiftsAug
-from agent.dataset.sequence import ActionMode, GripperStats
+from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
 from env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
@@ -32,7 +30,7 @@ class DiffusionPolicy(nn.Module):
         vision_feature_dim=512,
         state_dim=7,
         action_dim=7,
-        img_size=96,
+        img_size=128,
         num_diffusion_iters=100,
         num_inference_steps=10,
         norm_stats: dict | None = None,
@@ -42,6 +40,7 @@ class DiffusionPolicy(nn.Module):
         grip_stats: GripperStats | None = None,
         obs_fields: list[str] | None = None,
         predict_done: bool | None = None,
+        framerate: float = DEFAULT_FRAMERATE,
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
@@ -50,17 +49,9 @@ class DiffusionPolicy(nn.Module):
 
         # Actions are [pose(6), gripper(1), done(1)], so assume it if predict_done is None.
         self.predict_done = (action_dim > 7) if predict_done is None else predict_done
-        self.predict_gripper = action_dim > 6
 
         # Architecture/config args; saved alongside the weights by save_checkpoint so
         # from_checkpoint can rebuild the policy without the caller knowing the dims.
-        if encoder_type != 'none':
-            vision_encoder, vision_feature_dim = build_encoder(encoder_type, (3,img_size, img_size ))
-        else:
-            vision_encoder, vision_feature_dim = None, 0
-        self.augment = augment
-        if augment:
-            self.aug = RandomShiftsAug(4)
         self.config = dict(
             obs_horizon=obs_horizon,
             action_horizon=action_horizon,
@@ -75,13 +66,20 @@ class DiffusionPolicy(nn.Module):
             obs_fields=obs_fields,
             grip_stats=list(self.grip_stats),
             predict_done=self.predict_done,
+            framerate=float(framerate),
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
+        # Rate the training data was sampled at; actions are meant to be executed at
+        # this rate. Checkpoints saved before this was tracked default to DEFAULT_FRAMERATE.
+        self.framerate = float(framerate)
         self.action_dim = action_dim
         self.img_size = img_size
         self.num_diffusion_iters = num_diffusion_iters
 
+        # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
+        # work with EMA — performance will tank if you forget to do this!
+        vision_encoder = replace_bn_with_gn(get_resnet('resnet18'))
         noise_pred_net = ConditionalUnet1D(
             input_dim=action_dim,
             global_cond_dim=(vision_feature_dim + state_dim) * obs_horizon,
@@ -121,7 +119,7 @@ class DiffusionPolicy(nn.Module):
         Rebuild a policy entirely from a checkpoint: architecture config, weights,
         and normalization stats all come from the file.
         """
-        checkpoint = torch.load(ckpt_path, weights_only=False, map_location=device)
+        checkpoint = torch.load(ckpt_path, map_location=device)
         assert 'config' in checkpoint, (
             f"Checkpoint {ckpt_path} has no 'config' entry; it predates config-saving. "
             "Construct DiffusionPolicy with explicit dims and use load_checkpoint instead.")
@@ -163,17 +161,11 @@ class DiffusionPolicy(nn.Module):
         conditions: {'rgb': (B, T, C, H, W) in [0, 1], 'state': (B, T, state_dim) raw}
         Returns flattened observation conditioning (B, T * obs_dim).
         """
-        images = conditions['rgb'].float() if 'rgb' in conditions else None
+        images = conditions['rgb'].float()
         states = self.normalize_states(conditions['state'].float())
         # BxTxCxHxW -> (B T)xCxHxW -> (B T) x d -> BxTxd
-        if images is not None:
-            flatten_images = images.flatten(end_dim=1)
-            if self.training and self.augment:
-                flatten_images = self.aug(flatten_images)
-            image_features = self.nets['vision_encoder'](flatten_images).reshape(*images.shape[:2], -1)
-            obs_features = torch.cat([image_features, states], dim=-1)
-        else:
-            obs_features = states
+        image_features = self.nets['vision_encoder'](images.flatten(end_dim=1)).reshape(*images.shape[:2], -1)
+        obs_features = torch.cat([image_features, states], dim=-1)
         return obs_features.flatten(start_dim=1)
 
     def compute_loss(self, actions, conditions):
@@ -186,14 +178,13 @@ class DiffusionPolicy(nn.Module):
         actions = self.normalize_actions(actions.float())
         obs_cond = self.encode_obs(conditions)
         B = actions.shape[0]
-        
+
         noise = torch.randn_like(actions)
         timesteps = torch.randint(
             0, self.noise_scheduler.config.num_train_timesteps, (B,), device=actions.device
         ).long()
         noisy_actions = self.noise_scheduler.add_noise(actions, noise, timesteps)
         noise_pred = self.nets['noise_pred_net'](noisy_actions, timesteps, global_cond=obs_cond)
-        
         return nn.functional.mse_loss(noise_pred, noise)
 
     @torch.no_grad()
@@ -239,7 +230,7 @@ class DiffusionPolicy(nn.Module):
             actions = actions.detach().cpu().numpy()
         actions = np.asarray(actions)
         curr_pose = np.asarray(curr_pose, dtype=float)
-        pose_actions = actions[:, :6]
+        pose_actions, g_actions = actions[:, :6], actions[:, 6]
 
         if self.action_mode == 'absolute':
             des_poses = pose_actions.copy()
@@ -271,11 +262,7 @@ class DiffusionPolicy(nn.Module):
                 np.concatenate([t.translation, t.rotation.as_rotvec()]) for t in des_tfs])
 
         # Map gripper action (-1 -> 1, 1 -> 0)
-        if self.predict_gripper:
-            g_actions = actions[:, 6]
-            des_gripper = np.where(g_actions > 0, GRIP_OPEN, GRIP_CLOSED)
-        else:
-            des_gripper = np.zeros(len(actions)) + GRIP_OPEN
+        des_gripper = np.where(g_actions > 0, GRIP_OPEN, GRIP_CLOSED)
 
         # Decode the end-of-episode channel (±1) into a [0, 1] completion score. Zeros
         # (never done) when this policy has no done channel.
