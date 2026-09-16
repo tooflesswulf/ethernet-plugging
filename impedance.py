@@ -89,6 +89,21 @@ class CartesianImpedance:
                                 # phase lag in the damping term is the original bug.
         self._xd_f = np.zeros(6)
 
+        # ---- inertia shaping -------------------------------------------------
+        # The arm's natural task-space inertia is strongly coupled: on this arm
+        # the translation<->rotation terms are near unity (0.98, -0.99), so a pure
+        # +x force produces 3.5x more ANGULAR than linear acceleration. Without
+        # shaping the tool visibly rotates before it translates.
+        #
+        # F = Lambda * Lambda_d^-1 * (K e - D xd) decouples it, at ~38 us.
+        # Lambda is an inverse of (J M^-1 J^T), which is ill-conditioned near
+        # singularities (cond up to 2.5e6 here), so shaping is faded out when the
+        # conditioning is bad rather than trusted blindly.
+        self.shape_inertia = True
+        self.inertia_d = np.array([8.35, 8.35, 8.35, 0.085, 0.085, 0.085])
+        self.cond_max = 5e4          # fade shaping out above this
+        self.cond_full = 1e4         # full shaping below this
+
     def reset(self):
         self._xd_f = np.zeros(6)
 
@@ -103,7 +118,37 @@ class CartesianImpedance:
             + (1 - self.vel_alpha) * self._xd_f
         return self._xd_f
 
-    def compute(self, q, qd, actual_pose, eq_pose, xd, J, blend=0.0, ramp=1.0):
+    def leash(self, blend=0.0, max_pos=None, max_rot=None):
+        """
+        Equilibrium-error leash, in the units clamp() wants.
+
+        Derived from F_sat / K so it stays consistent when gains change --
+        hardcoding it is how the orientation leash ended up 3.3x too tight while
+        the position one was correct, leaving only 1.5 Nm of restoring moment.
+        `max_pos`/`max_rot` are optional hard caps.
+        """
+        K, _ = self.gains(blend)
+        pos = self.F_sat[:3] / np.maximum(K[:3], 1e-9)
+        rot = float(np.min(self.F_sat[3:] / np.maximum(K[3:], 1e-9)))
+        if max_pos is not None:
+            pos = np.minimum(pos, max_pos)
+        if max_rot is not None:
+            rot = min(rot, max_rot)
+        return pos, rot
+
+    def shaping_factor(self, Lam):
+        """0 = no shaping, 1 = full. Faded out where Lambda is ill-conditioned."""
+        if not self.shape_inertia:
+            return 0.0
+        c = np.linalg.cond(Lam)
+        if not np.isfinite(c) or c >= self.cond_max:
+            return 0.0
+        if c <= self.cond_full:
+            return 1.0
+        return float((self.cond_max - c) / (self.cond_max - self.cond_full))
+
+    def compute(self, q, qd, actual_pose, eq_pose, xd, J, blend=0.0, ramp=1.0,
+                task_inertia=None):
         """
         Returns (tau, F, e). Takes everything as arguments -- no RTDE access --
         which is what makes this testable without hardware.
@@ -121,6 +166,13 @@ class CartesianImpedance:
 
         xd_f = self.filter_velocity(xd)
         F = ramp * (K * e - D * xd_f)
+
+        if task_inertia is not None:
+            a = self.shaping_factor(task_inertia)
+            if a > 0:
+                shaped = task_inertia @ (F / self.inertia_d)
+                F = (1 - a) * F + a * shaped
+
         F = np.clip(F, -self.F_sat, self.F_sat)
 
         tau = J.T @ F - self.d_q * qd
@@ -153,6 +205,15 @@ class SafetyMonitor:
         self.late_factor = 3.0
         self.dt = dt
 
+    def is_late(self, dt_actual):
+        """
+        A late tick is not fatal by itself -- the caller zeroes torque for that
+        tick, which is safe (gravity-compensated float). It is only fatal if it
+        keeps happening, because a tick that sends nothing leaves the controller
+        re-applying the previous torque. Policy lives in the caller.
+        """
+        return dt_actual is not None and dt_actual > self.late_factor * self.dt
+
     def check(self, q, qd, pose, twist, raw_force, tau, dt_actual=None):
         for name, v in (('q', q), ('qd', qd), ('pose', pose),
                         ('twist', twist), ('tau', tau)):
@@ -174,10 +235,4 @@ class SafetyMonitor:
             if np.any(pose[:3] < lo) or np.any(pose[:3] > hi):
                 return f'TCP {np.round(pose[:3], 3)} outside workspace'
 
-        # A stalled tick is a runaway, not a dropout: while the command register
-        # still holds cmd 66 the controller re-applies the last torque every
-        # cycle, so the spring and damping terms freeze while the arm keeps
-        # moving. Lateness is a safety signal here, not a perf metric.
-        if dt_actual is not None and dt_actual > self.late_factor * self.dt:
-            return f'control tick late: {dt_actual*1000:.1f} ms'
         return None

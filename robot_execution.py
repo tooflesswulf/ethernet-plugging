@@ -146,7 +146,8 @@ class RobotExecution:
         fault = self.env._fault
         print(f"g_width: {obs['state']['gripper_width']:7.2f}  "
               f"ctrl: {self.env._loop_hz:5.0f} Hz  "
-              f"|F|: {np.linalg.norm(self.env._last_wrench[:3]):6.2f} N"
+              f"|F|: {np.linalg.norm(self.env._last_wrench[:3]):6.2f} N  "
+              f"late: {len(self.env._late):3d}/{self.env._late_worst*1000:.0f}ms"
               + (f"  FAULT: {fault}" if fault else ""), end='\r')
 
     def close(self):

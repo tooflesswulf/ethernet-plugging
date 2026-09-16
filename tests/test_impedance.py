@@ -175,6 +175,79 @@ def test_velocity_filter_is_fast_not_force_alpha():
     assert CartesianImpedance().vel_alpha >= 0.3
 
 
+def test_leash_is_derived_from_F_sat_over_K():
+    """
+    Regression: max_orientation_step was left at servoL's 0.05 while the position
+    leash was updated, so only 1.5 Nm of restoring moment was available instead of
+    the intended 5 -- the tool could not hold orientation.
+    """
+    imp = _imp()
+    pos, rot = imp.leash(0.0)
+    K, _ = imp.gains(0.0)
+    assert np.allclose(pos, imp.F_sat[:3] / K[:3])
+    assert rot == pytest.approx(np.min(imp.F_sat[3:] / K[3:]))
+    assert rot > 0.05                       # the old hardcoded value was too tight
+    assert K[3] * rot == pytest.approx(imp.F_sat[3])
+
+
+def test_leash_tracks_the_gain_schedule():
+    """Softer contact gains must give a longer leash for the same force."""
+    imp = _imp()
+    assert imp.leash(1.0)[0][2] > imp.leash(0.0)[0][2]
+
+
+def test_leash_respects_hard_caps():
+    imp = _imp()
+    pos, rot = imp.leash(0.0, max_pos=np.full(3, 0.001), max_rot=0.001)
+    assert np.all(pos <= 0.001 + 1e-12) and rot <= 0.001 + 1e-12
+
+
+def test_inertia_shaping_decouples_translation_from_rotation():
+    """
+    Unshaped, a pure +x force on this arm gives 3.5x more angular than linear
+    acceleration -- the tool rotates before it translates.
+    """
+    kin = URKin(TCP)
+    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    Lam = kin.task_inertia(q)
+    F = np.r_[1., 0, 0, 0, 0, 0]
+
+    a_un = np.linalg.solve(Lam, F)
+    assert np.linalg.norm(a_un[3:]) / np.linalg.norm(a_un[:3]) > 2.0
+
+    imp = _imp()
+    a_sh = np.linalg.solve(Lam, Lam @ (F / imp.inertia_d))
+    assert np.linalg.norm(a_sh[3:]) / np.linalg.norm(a_sh[:3]) < 1e-6
+
+
+def test_shaping_fades_out_when_ill_conditioned():
+    """cond(Lambda) reaches 2.5e6 near singularities; Lambda^-1 must not be trusted."""
+    imp = _imp()
+    assert imp.shaping_factor(np.eye(6)) == 1.0
+    bad = np.diag([1e-9, 1, 1, 1, 1, 1.0])
+    assert imp.shaping_factor(bad) == 0.0
+    assert imp.shaping_factor(np.diag([1 / 2e4, 1, 1, 1, 1, 1.0])) == pytest.approx(
+        (imp.cond_max - 2e4) / (imp.cond_max - imp.cond_full))
+
+
+def test_shaping_can_be_disabled():
+    imp = _imp()
+    imp.shape_inertia = False
+    assert imp.shaping_factor(np.eye(6)) == 0.0
+
+
+def test_shaping_off_leaves_law_unchanged():
+    imp = _imp()
+    eq = HOME.copy()
+    eq[0] += 0.01
+    _, F_none, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6), np.eye(6))
+    imp.reset()
+    imp.shape_inertia = False
+    _, F_off, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6), np.eye(6),
+                              task_inertia=np.eye(6))
+    assert np.allclose(F_none, F_off)
+
+
 # ------------------------------------------------------------- SafetyMonitor
 def _ok():
     return dict(q=np.zeros(6), qd=np.zeros(6), pose=HOME, twist=np.zeros(6),
@@ -204,10 +277,16 @@ def test_force_trips():
     assert 'force' in SafetyMonitor().check(**kw)
 
 
-def test_late_tick_trips():
-    """A stalled tick holds the last torque rather than decaying -- a runaway."""
-    assert SafetyMonitor(dt=0.002).check(**_ok(), dt_actual=0.05) is not None
-    assert SafetyMonitor(dt=0.002).check(**_ok(), dt_actual=0.002) is None
+def test_is_late_detects_stall():
+    """Lateness is reported, but the POLICY lives in Env: one late tick zeroes
+    torque, only sustained lateness trips. A stalled tick holds the last torque
+    rather than decaying, which is why it matters at all."""
+    s = SafetyMonitor(dt=0.002)
+    assert s.is_late(0.05)
+    assert not s.is_late(0.002)
+    assert not s.is_late(None)
+    # and it is no longer a check() fault
+    assert s.check(**_ok()) is None
 
 
 def test_workspace_trips():

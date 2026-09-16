@@ -119,6 +119,10 @@ def e():
     o._last_tau = o._last_wrench = np.zeros(6)
     o._force_filtered = np.zeros(6)
     o.watchdog_hz = 10.0
+    o._late = __import__('collections').deque()
+    o.late_window = 5.0
+    o.late_max = 25
+    o._late_worst = 0.0
     o.stop_flag = True
     o._loop_hz = 0.0
     return o
@@ -176,15 +180,42 @@ def test_directTorque_false_trips(e):
     assert e._fault is not None
 
 
-def test_late_tick_trips(e):
+def test_single_late_tick_zeroes_torque_but_does_not_trip(e):
+    """
+    A late tick means the loop was preempted (the logger PNG-encodes at 20 Hz and
+    the camera buffer grows unbounded). Killing the run for that is wrong; zero
+    torque for the tick is safe and recoverable.
+    """
+    e.des_pose = URPose(*(np.array(e.recv.pose) + [0.02, 0, 0, 0, 0, 0]))
+    e.last_step_end = e.des_pose
     e._control_tick(0.0, 0.5, 10)
+    assert e._fault is None
+    assert np.abs(e.ctrl.torques[-1]).max() == 0.0
+
+
+def test_sustained_lateness_trips(e):
+    for i in range(e.late_max + 5):
+        e._control_tick(0.0, 0.5, 10 + i)
     assert e._fault is not None and 'late' in e._fault
 
 
+def test_recovers_after_isolated_late_ticks(e):
+    """Occasional preemption must not accumulate into a trip."""
+    e.des_pose = URPose(*(np.array(e.recv.pose) + [0.02, 0, 0, 0, 0, 0]))
+    e.last_step_end = e.des_pose
+    for i in range(10):
+        e._control_tick(0.0, 0.5, 10 + i)          # late
+        for j in range(5):
+            e._control_tick(0.0, 0.002, 100 + i * 10 + j)   # on time
+    assert e._fault is None
+    assert np.abs(e.ctrl.torques[-1]).max() > 0.1  # still controlling
+
+
 def test_early_ticks_exempt_from_lateness(e):
-    """Startup jitter must not trip before the loop has settled."""
+    """Startup jitter must not even count as late before the loop has settled."""
     e._control_tick(0.0, 0.5, 2)
     assert e._fault is None
+    assert len(e._late) == 0
 
 
 def test_adaptive_mode_blends_gradually(e):

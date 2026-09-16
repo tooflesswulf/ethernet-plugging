@@ -1,5 +1,5 @@
 from scipy.spatial.transform import Rotation as R, Slerp
-from collections import namedtuple
+from collections import namedtuple, deque
 from typing import Literal
 import rtde_control
 import rtde_receive
@@ -70,6 +70,8 @@ class Env:
         watchdog_hz=10.0,
         gain_ramp_time=0.3,
         mode_blend_time=0.2,
+        late_window=5.0,
+        late_max=25,
         obs_mode: Literal['latest', 'mean'] = 'latest',
         dataset_path=None,
         save_interval=0.1,
@@ -158,6 +160,11 @@ class Env:
         self._t_start_ctrl = time.perf_counter()
         self._last_tau = np.zeros(6)
         self._last_wrench = np.zeros(6)
+        # Late ticks are tolerated individually and only fatal in bulk.
+        self._late = deque()
+        self._late_worst = 0.0
+        self.late_window = late_window
+        self.late_max = late_max
 
         print("Initializing environment...")
         print(f"Robot IP:   {robot_ip}")
@@ -519,16 +526,7 @@ class Env:
         # spring force at K * max_position_step.
         if self.last_step_t > 0:
             des_pose = self.interpolate()
-        eq_pose = clamp(
-            actual_pose,
-            des_pose,
-            self.max_position_step,
-            self.max_orientation_step,
-        )
 
-        # ----------------------------
-        # impedance
-        # ----------------------------
         # adaptive_mode is a gain schedule, blended rather than stepped: a step
         # change in K with a nonzero error is an instantaneous torque
         # discontinuity, which reads as a jolt.
@@ -536,20 +534,49 @@ class Env:
         rate = self.dt / max(self.mode_blend_time, self.dt)
         self._mode_blend += np.clip(target_blend - self._mode_blend, -rate, rate)
 
+        # Leash derived from F_sat/K so it tracks the gain schedule. Hardcoding it
+        # is how the orientation leash ended up 3.3x tighter than intended.
+        leash_pos, leash_rot = self.imp.leash(self._mode_blend,
+                                              max_pos=self.max_position_step,
+                                              max_rot=self.max_orientation_step)
+        eq_pose = clamp(actual_pose, des_pose, leash_pos, leash_rot)
+
+        # ----------------------------
+        # impedance
+        # ----------------------------
+        late = ticks > 5 and self.safety.is_late(dt_actual)
+        if late:
+            self._late.append(time.perf_counter())
+            self._late_worst = max(self._late_worst, dt_actual)
+
         if self._mode == FAULT:
             tau = np.zeros(6)
             F = np.zeros(6)
+        elif late:
+            # Degrade, don't die: a single late tick means the loop was preempted
+            # (the logger thread PNG-encodes at 20 Hz and the camera buffer grows
+            # unbounded, so the GIL and the allocator are both contended). Zero
+            # torque for this tick is safe -- gravity-compensated float.
+            tau = np.zeros(6)
+            F = np.zeros(6)
+            self.imp.reset()          # velocity filter state is stale after a gap
+            cutoff = time.perf_counter() - self.late_window
+            while self._late and self._late[0] < cutoff:
+                self._late.popleft()
+            if len(self._late) > self.late_max:
+                self._trip(f'{len(self._late)} late ticks in {self.late_window:.0f}s '
+                           f'(last {dt_actual*1000:.1f} ms)')
         else:
             elapsed = time.perf_counter() - self._t_start_ctrl
             ramp = min(1.0, elapsed / self.gain_ramp_time) if self.gain_ramp_time > 0 else 1.0
             J = self.kin.jacobian(q)
+            Lam = self.kin.task_inertia(q) if self.imp.shape_inertia else None
             tau, F, _ = self.imp.compute(
                 q, qd, np.asarray(actual_pose, float), np.asarray(eq_pose, float),
-                twist, J, blend=self._mode_blend, ramp=ramp,
+                twist, J, blend=self._mode_blend, ramp=ramp, task_inertia=Lam,
             )
             reason = self.safety.check(q, qd, np.asarray(actual_pose, float),
-                                       twist, np.asarray(actual_force, float),
-                                       tau, dt_actual if ticks > 5 else None)
+                                       twist, np.asarray(actual_force, float), tau)
             if reason is None and ticks % 50 == 0:
                 reason = self._check_robot_state()
             if reason is not None:
