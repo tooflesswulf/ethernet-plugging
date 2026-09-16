@@ -141,6 +141,37 @@ def pose_error(actual, desired):
     return np.r_[desired[:3] - actual[:3], (R_des * R_act.inv()).as_rotvec()]
 
 
+def make_torque_fn(ctrl, viscous=None, coulomb=None):
+    """
+    directTorque's extra args are version-dependent:
+      1.6.3  directTorque(torque, friction_comp: bool)               <- works
+      1.6.5  directTorque(torque, viscous_scale[], coulomb_scale[])  <- script drops them
+    Bind the right call once instead of branching in the 500 Hz loop.
+    """
+    doc = ctrl.directTorque.__doc__ or ''
+    if 'viscous' in doc:
+        if viscous is None and coulomb is None:
+            print('directTorque : 1.6.5 scale-vector form -- NOTE its control script '
+                  'never applies the scales, so friction comp is off')
+            return ctrl.directTorque
+        vs = [viscous if viscous is not None else v for v in (.9, .9, .8, .9, .9, .9)]
+        cs = [coulomb if coulomb is not None else c for c in (.8, .8, .7, .8, .8, .8)]
+        print(f'directTorque : scale-vector form, viscous {vs} coulomb {cs}')
+        return lambda t: ctrl.directTorque(t, vs, cs)
+    print('directTorque : friction_comp=True (1.6.3 form)')
+    return lambda t: ctrl.directTorque(t, True)
+
+
+def parse_fc(args, tau_rated):
+    """Per-joint Coulomb torques [Nm]. Explicit --fc-nm wins over scalar --fc."""
+    if getattr(args, 'fc_nm', None):
+        v = np.array([float(x) for x in args.fc_nm.split(',')], float)
+        if v.size != 6:
+            raise SystemExit('--fc-nm needs 6 comma-separated values')
+        return v
+    return args.fc * tau_rated
+
+
 def connect(kin=True):
     # NOTE: do NOT pass FLAG_UPPER_RANGE_REGISTERS -- it hangs construction on
     # this controller. It is only needed for getJacobian()/getMassMatrix(), and
@@ -276,6 +307,72 @@ def cmd_frames(args):
 
 
 # ======================================================================
+# 1b. identify -- measure per-joint breakaway (Coulomb) torque
+# ======================================================================
+def cmd_identify(args):
+    """
+    Ramp one joint's torque until it breaks free, every other joint at zero
+    torque (gravity-compensated float, so the arm holds pose). The torque at
+    first motion IS that joint's static friction -- measured, not inferred from
+    rated torque, which is what a single --fc scalar gets wrong: over-compensating
+    some joints into a limit cycle while others still have a deadband.
+
+    Both directions, because Coulomb friction is usually asymmetric.
+    """
+    ctrl, recv, _, dt, _ = connect(kin=False)
+    torque_cmd = make_torque_fn(ctrl)
+    ctrl.setWatchdog(50.0)
+
+    print(f'\nramp {args.rate} Nm/s, cap {args.cap} Nm, breakaway at '
+          f'|qd| > {args.qd_thresh} rad/s')
+    print('The arm WILL twitch at each breakaway. Clear space, hand on the e-stop.')
+    input('enter to start, ctrl-C to abort: ')
+
+    res = np.full((6, 2), np.nan)
+    try:
+        for j in range(6):
+            for k, sgn in enumerate((1.0, -1.0)):
+                tau = np.zeros(6)
+                q0 = recv.getActualQ()[j]
+                t0 = time.perf_counter()
+                while True:
+                    ts = ctrl.initPeriod()
+                    mag = args.rate * (time.perf_counter() - t0)
+                    if mag > args.cap:
+                        print(f'  joint {j} {"+-"[k]} : no breakaway below {args.cap} Nm')
+                        break
+                    tau[j] = sgn * mag
+                    torque_cmd(tau.tolist())
+                    if (abs(recv.getActualQd()[j]) > args.qd_thresh
+                            or abs(recv.getActualQ()[j] - q0) > 0.02):
+                        res[j, k] = mag
+                        print(f'  joint {j} {"+-"[k]} : breakaway {mag:6.2f} Nm')
+                        break
+                    ctrl.waitPeriod(ts)
+                for _ in range(100):                      # settle at zero torque
+                    torque_cmd([0.0] * 6)
+                    time.sleep(dt)
+    except KeyboardInterrupt:
+        print('\naborted')
+    finally:
+        for _ in range(5):
+            torque_cmd([0.0] * 6)
+        ctrl.stopJ(2.0)
+        ctrl.stopScript()
+
+    print('\n       joint :  ' + '  '.join(f'{j:6d}' for j in range(6)))
+    print('  breakaway + :  ' + '  '.join(f'{v:6.2f}' for v in res[:, 0]))
+    print('  breakaway - :  ' + '  '.join(f'{v:6.2f}' for v in res[:, 1]))
+    mean = np.nanmean(res, axis=1)
+    if not np.all(np.isnan(mean)):
+        print('  mean        :  ' + '  '.join(f'{v:6.2f}' for v in mean))
+        use = np.nan_to_num(mean, nan=0.0) * args.frac
+        print(f'\nCompensate at {args.frac:.0%} of measured -- under-compensate on')
+        print('purpose, since over-compensation turns a deadband into a limit cycle:\n')
+        print('  --fc-nm ' + ','.join(f'{v:.2f}' for v in use))
+
+
+# ======================================================================
 # 2/3. impedance hold, and a setpoint step
 # ======================================================================
 def impedance_loop(args, step_delta=None):
@@ -295,28 +392,14 @@ def impedance_loop(args, step_delta=None):
     K = np.r_[np.full(3, args.kp), np.full(3, args.kr)]
     D = np.r_[np.full(3, args.dp), np.full(3, args.dr)]
     tau_max = args.tau_frac * kin.tau_rated
+    f_c = parse_fc(args, kin.tau_rated)
 
     print(f'\nK        : {K}')
     print(f'D        : {D}')
     print(f'tau clip : {np.round(tau_max, 1)} Nm  ({args.tau_frac:.0%} of rated)')
 
-    # ur_rtde 1.6.5:
-    #   directTorque(torque, viscous_scale=[.9,.9,.8,.9,.9,.9],
-    #                        coulomb_scale=[.8,.8,.7,.8,.8,.8])
-    # Both are per-joint FRICTION COMPENSATION scales, not damping. The stock
-    # values are deliberately under 1.0 -- full compensation tends to limit-cycle.
-    # Leave them alone unless you have a reason; 0 means no compensation, which
-    # gives a wide stiction deadband but is dissipative, hence safer.
-    if args.viscous is None and args.coulomb is None:
-        torque_cmd = ctrl.directTorque
-        print('friction  : library defaults')
-    else:
-        vs = [args.viscous if args.viscous is not None else v
-              for v in (0.9, 0.9, 0.8, 0.9, 0.9, 0.9)]
-        cs = [args.coulomb if args.coulomb is not None else c
-              for c in (0.8, 0.8, 0.7, 0.8, 0.8, 0.8)]
-        torque_cmd = lambda t: ctrl.directTorque(t, vs, cs)
-        print(f'friction  : viscous {vs}  coulomb {cs}')
+    torque_cmd = make_torque_fn(ctrl, args.viscous, args.coulomb)
+    print(f'coulomb ff : {np.round(f_c, 2)} Nm')
 
     ctrl.setWatchdog(50.0)   # robot-side: stops control if this process dies
 
@@ -361,9 +444,9 @@ def impedance_loop(args, step_delta=None):
             F = ramp * (K * e - D * xd_f)
             J = kin.jacobian(q)
             tau = J.T @ F - args.dq * qd
-            if args.fc > 0:
+            if np.any(f_c > 0):
                 tau = tau + ramp * friction_feedforward(
-                    qd, tau, args.fc * kin.tau_rated, args.fc_veps, args.fc_teps)
+                    qd, tau, f_c, args.fc_veps, args.fc_teps)
 
             if not np.isfinite(tau).all():
                 print('\nnon-finite torque, aborting')
@@ -426,6 +509,11 @@ def main():
                         help='Coulomb friction feedforward, as a fraction of each '
                              'rated joint torque. 0 = off. Try 0.005 and raise until '
                              'the deadband closes; back off if it buzzes or creeps.')
+        sp.add_argument('--fc-nm', default=None,
+                        help='per-joint Coulomb torques [Nm], 6 comma-separated, '
+                             'from `identify`. Overrides --fc. A single scalar '
+                             'cannot work -- real breakaway friction does not '
+                             'scale with rated torque.')
         sp.add_argument('--fc-veps', type=float, default=0.02,
                         help='joint speed [rad/s] at which Coulomb comp saturates')
         sp.add_argument('--fc-teps', type=float, default=2.0,
@@ -441,6 +529,13 @@ def main():
                         help='whichever frame `frames` reported as best')
         sp.add_argument('--tool', default='tool0', choices=('tool0', 'flange'))
 
+    i = sub.add_parser('identify', help='measure per-joint breakaway torque')
+    i.add_argument('--rate', type=float, default=1.0, help='torque ramp rate [Nm/s]')
+    i.add_argument('--cap', type=float, default=25.0, help='give up above this [Nm]')
+    i.add_argument('--qd-thresh', type=float, default=0.02, help='breakaway speed [rad/s]')
+    i.add_argument('--frac', type=float, default=0.8,
+                   help='fraction of measured friction to compensate')
+
     h = sub.add_parser('hold', help='impedance hold at the current pose')
     add_gains(h)
 
@@ -453,6 +548,8 @@ def main():
     args = p.parse_args()
     if args.cmd == 'frames':
         cmd_frames(args)
+    elif args.cmd == 'identify':
+        cmd_identify(args)
     elif args.cmd == 'hold':
         args.settle = 0.0
         impedance_loop(args)
