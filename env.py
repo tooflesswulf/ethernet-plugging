@@ -565,10 +565,10 @@ class Env:
             f.create_dataset('commands/adaptive_mode', data=[cmd.adaptive_mode for cmd in self.commands])
             f.create_dataset('commands/des_zforce', data=[cmd.des_zforce for cmd in self.commands])
 
-            control = [vars(cmd.controller_state) for cmd in self.commands]
-            f.create_dataset('dualsense/time', data=[cmd.time for cmd in self.commands])
-            for key in control[0].keys():
-                f.create_dataset(f'dualsense/{key}', data=[item[key] for item in control])
+            # control = [vars(cmd.controller_state) for cmd in self.commands]
+            # f.create_dataset('dualsense/time', data=[cmd.time for cmd in self.commands])
+            # for key in control[0].keys():
+            #     f.create_dataset(f'dualsense/{key}', data=[item[key] for item in control])
 
             m = f.create_group('metadata')
             dict2hdf5(m, self.metadata)

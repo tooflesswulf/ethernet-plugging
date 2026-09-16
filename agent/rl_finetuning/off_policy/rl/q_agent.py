@@ -87,7 +87,7 @@ class QAgent(nn.Module):
             repr_dim=repr_dim,
             patch_repr_dim=patch_repr_dim,
             prop_dim=prop_dim,
-            action_dim=action_dim,
+            action_dim=7,
             cfg=self.cfg.critic,
         )
         self.actor = Actor(repr_dim, patch_repr_dim, prop_dim, action_dim, cfg.actor, residual_actor=residual_actor)
@@ -210,24 +210,24 @@ class QAgent(nn.Module):
         The safeguards are applied here rather than at use time, so the buffers that
         land in a checkpoint are exactly the transform act()/update() apply.
         """
-        action_min = torch.as_tensor(stats["actions"]["min"], dtype=torch.float32)
-        action_max = torch.as_tensor(stats["actions"]["max"], dtype=torch.float32)
+        # action_min = torch.as_tensor(stats["actions"]["min"], dtype=torch.float32)
+        # action_max = torch.as_tensor(stats["actions"]["max"], dtype=torch.float32)
         state_mean = torch.as_tensor(stats["states"]["mean"], dtype=torch.float32)
         state_std = torch.as_tensor(stats["states"]["std"], dtype=torch.float32)
 
         # Widen degenerate action dims symmetrically around their midpoint
-        action_mid = (action_min + action_max) / 2
-        action_half_range = torch.clamp((action_max - action_min) / 2, min=min_action_range / 2)
+        # action_mid = (action_min + action_max) / 2
+        # action_half_range = torch.clamp((action_max - action_min) / 2, min=min_action_range / 2)
 
-        self.action_min.copy_(action_mid - action_half_range)
-        self.action_max.copy_(action_mid + action_half_range)
+        # self.action_min.copy_(action_mid - action_half_range)
+        # self.action_max.copy_(action_mid + action_half_range)
         self.state_mean.copy_(state_mean)
         self.state_std.copy_(torch.clamp(state_std, min=min_state_std))
         self._norm_stats_set.fill_(True)
 
         print("QAgent normalization stats set:")
-        print(f"  action min: {self.action_min.tolist()}")
-        print(f"  action max: {self.action_max.tolist()}")
+        # print(f"  action min: {self.action_min.tolist()}")
+        # print(f"  action max: {self.action_max.tolist()}")
         print(f"  state mean: {self.state_mean.tolist()}")
         print(f"  state std : {self.state_std.tolist()}")
 
@@ -266,8 +266,8 @@ class QAgent(nn.Module):
         """
         obs = obs.copy()
         obs["observation.state"] = self.normalize_state(obs["observation.state"].float())
-        if "observation.base_action" in obs.keys():
-            obs["observation.base_action"] = self.scale_action(obs["observation.base_action"].float())
+        # if "observation.base_action" in obs.keys():
+        #     obs["observation.base_action"] = self.scale_action(obs["observation.base_action"].float())
         return obs
 
     def train(self, training=True):
@@ -373,11 +373,17 @@ class QAgent(nn.Module):
             action = action.squeeze(0)
 
         # Networks work in [-1, 1]; the caller (env) works in raw units
-        action = self.unscale_action_delta(action) if self.residual_actor else self.unscale_action(action)
+        # action = self.unscale_action_delta(action) if self.residual_actor else self.unscale_action(action)
 
         action = action.detach()
         if cpu:
             action = action.cpu()
+
+        if action.dim() == 2 and action.shape[-1] == 1:
+            action_template = torch.zeros((action.shape[0], 7)).float().to(action.device)
+            action_template[:,2:3] = action 
+            action = action_template
+
         return action
 
     def _act_default(
@@ -402,6 +408,11 @@ class QAgent(nn.Module):
             action = dist.mean
         else:
             action = dist.sample(clip=clip)
+
+        if action.dim() == 2 and action.shape[-1] == 1:
+            action_template = torch.zeros((action.shape[0], 7)).float().to(action.device)
+            action_template[:,2:3] = action 
+            action = action_template
 
         return action
 
@@ -567,12 +578,12 @@ class QAgent(nn.Module):
         # The buffers hold raw measurements; normalize them here so every caller can
         # stay in raw units (see set_norm_stats / _normalize_obs).
         obs: dict[str, torch.Tensor] = self._normalize_obs(batch["obs"].float())
-        action: torch.Tensor = self.scale_action(batch["action"].float())
+        action: torch.Tensor = batch["action"].float() # self.scale_action(batch["action"].float())
         reward: torch.Tensor = batch[("next", "reward")].float()
         discount: torch.Tensor = batch["gamma"]
         next_nonterminal: torch.Tensor = batch["nonterminal"]
         next_obs: dict[str, torch.Tensor] = self._normalize_obs(batch[("next", "obs")].float())
-    
+
         # To not bootstrap on terminal states we zero out the discount factor for terminal next states
         effective_discount = discount * next_nonterminal
 

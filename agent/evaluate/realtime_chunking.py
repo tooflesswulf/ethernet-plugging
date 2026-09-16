@@ -115,6 +115,7 @@ class RealtimeActionChunkingBuffer:
         """Insert a freshly predicted chunk anchored at observation time ``t_obs``."""
         chunk = _Chunk(t_obs, des_poses, des_widths, des_dones, self.action_dt)
         with self._lock:
+            self._chunks = []
             self._chunks.append(chunk)
             # keep newest first; bound memory
             self._chunks.sort(key=lambda c: c.t_obs, reverse=True)

@@ -42,14 +42,14 @@ class ResidualTD3AlgoConfig(RLPDAlgoConfig):
     # Critic warmup phase ----------------------------------------------
     # ------------------------------------------------------------------
     # Number of critic-only updates before training the actor
-    critic_warmup_steps: int = 8000 # 10_000
+    critic_warmup_steps: int = 10_000 # 10_000
 
     # ------------------------------------------------------------------
     # Random action exploration -----------------------------------------
     # ------------------------------------------------------------------
     # Scale for random action noise during initial exploration phase
     # Actions are sampled as: rand_actions = torch.rand(...) * 2 * random_action_noise_scale - random_action_noise_scale
-    random_action_noise_scale: float = 0.05 # 0.02  # Default: uniform in [-1, 1]
+    random_action_noise_scale: float = 0.001 # 0.02  # Default: uniform in [-1, 1]
 
     # Whether to use base policy + noise (True) or pure uniform noise (False) during warmup
     # Note: Environment wrapper always applies base_action + residual_action
@@ -60,9 +60,9 @@ class ResidualTD3AlgoConfig(RLPDAlgoConfig):
     # ------------------------------------------------------------------
     # Standard deviation schedule -------------------------------------------
     # ------------------------------------------------------------------
-    stddev_max: float = 0.05
-    stddev_min: float = 0.05
-    stddev_step: int = 300_000
+    stddev_max: float = 0.001 # 0.001
+    stddev_min: float = 0.0
+    stddev_step: int = 100_000 # 100_000
 
     # Progressive clipping schedule for the residual actions
     # I.e., starts clipping linearly from 0 to action scale over progressive_clipping_steps steps
@@ -90,7 +90,7 @@ class ResidualTD3DexmgConfig(RLPDDexmgConfig):
             critic_lr=1e-4,
             critic_target_tau=0.005,
             actor=ActorConfig(
-                action_scale= 0.02, # 0.1,
+                action_scale=  0.001, # 0.1,
                 actor_last_layer_init_scale=0.0,  # imp for residual
             ),
         )

@@ -71,6 +71,7 @@ def parse_offline_dataset(
     lowdim_keys: list[str],
     num_episodes: int | None = None,
     g_thr: float = 18,
+    reward_function = None,
 ) -> tuple[list[OfflineEpisode], int]:
     """Read the per-episode states, reference commands and rewards out of ``dataset.h5``.
 
@@ -102,22 +103,12 @@ def parse_offline_dataset(
                 value = np.asarray(f[key][sl])
                 fields.append(value if value.ndim == 2 else value[:, None])
             state = np.concatenate(fields, -1)
-
             poses = np.asarray(f['pose'][sl])
             gripper_widths = np.asarray(f['gripper_width'][sl])
             g_action = gripper_action(gripper_widths, threshold=g_thr)
-
-            chunks = find_chunks(g_action.flatten())
-            if not (len(chunks) == 5 and chunks[2][-1] == 1):
-                print(f"Skip episode {ep_idx}: expected 5 gripper segments, got {len(chunks)}")
-                continue
-
-            phase1 = chunks[1][1] - 30
-            phase2 = chunks[2][1] + 10
-            reward = np.zeros(length)
-            reward[phase1:phase2] = 1.0
-            reward[phase2:] = 2.0
-
+            zforce = f['force'][sl][:, 2]
+            reward = reward_function(zforce)
+           
             # Same encoding integrate_actions produces: +1/-1 open/closed -> 0/1 state
             g_state = np.where(g_action > 0, GRIP_OPEN, GRIP_CLOSED)
 

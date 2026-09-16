@@ -84,10 +84,11 @@ class BasePolicyVecEnvWrapper:
     def __init__(
         self,
         env: Env,
-
+        home_pose: URPose,
         base_policy,
         image_size,
         lowdim_keys,
+        reward_function,
         device='cuda'
   
     ):
@@ -96,7 +97,8 @@ class BasePolicyVecEnvWrapper:
             env: Vectorized environment from create_vectorized_env
             base_policy: Base policy (e.g., ACTPolicy) to augment with residual actions
         """
-        self.env = env; self.iface =  interface.DualSenseInterface( self.env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5. )
+        self.env = env; self.iface =  interface.DualSenseInterface( home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5. )
+        self.home_pose = home_pose
         self.base_policy = BasePolicy(base_policy, env, device=device)
         self.device = device
         self.image_size = image_size
@@ -106,13 +108,14 @@ class BasePolicyVecEnvWrapper:
         control_freq = 20
         self.control_freq = control_freq
         self.control_dt = 1 / control_freq
-
-        self.env.reset(self.env.home_pose)
+        self.reward_function = reward_function
+        self.env.reset(self.home_pose)
         self.env.start()
 
     def _process_obs(self, obs_dict):
         rgb = np.array( Image.fromarray( obs_dict['image'] ).resize(self.image_size) )
-        keys = [ 'actual_pose' if k == 'pose' else k for k in self.lowdim_keys]; state = obs_dict['state']; force = obs_dict['force']
+        keys = [ 'actual_pose' if k == 'pose' else k for k in self.lowdim_keys]; state = obs_dict['state']; force = np.array(obs_dict['state']['actual_force'])
+
         if 'actual_pose' in keys:
             pose = np.array( state['actual_pose'] )
         if 'gripper_width' in keys:
@@ -186,16 +189,18 @@ class BasePolicyVecEnvWrapper:
         info = {}
         residual_pose = residual_naction[0][:6] if  residual_naction.dim() == 2 else residual_naction[:6]
         dpose = ( torch.tensor(base_dpose).to(residual_naction.device) + residual_pose ).cpu().numpy()
-        dpose = base_dpose
         combined_naction = torch.tensor( np.concatenate([dpose, np.array([gripper])], -1) )
         # do we need clipping here?
 
         # Step the underlying environment
         self.env.step(URPose(*dpose), gripper)
-
-        raw_obs = self._process_obs(self.env.get_obs())
-        self.step_task_stage(raw_obs)
-        reward = self.task_stage
+        raw_obs = self.env.get_obs()
+        zf = np.array( raw_obs['state']['filtered_force'] )[2]
+        raw_obs = self._process_obs(raw_obs )
+        reward = self.reward_function(zf)
+        if reward.ndim == 1:
+            reward = reward[0]
+       
         self.iface.update(self.control_dt)
         terminated = self.iface.dualsense.state.Cross or not self.iface.dualsense.thread.is_alive()
         

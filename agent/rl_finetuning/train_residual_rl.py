@@ -14,6 +14,7 @@ import wandb
 import hydra
 import interface
 import cv2
+import plotly.express as px
 
 from omegaconf import OmegaConf
 from tensordict import TensorDict
@@ -32,11 +33,29 @@ from agent.rl_finetuning.utils.rb_transforms import MultiStepTransform
 from agent.rl_finetuning.wrappers.rl_env import BasePolicyVecEnvWrapper
 from agent.rl_finetuning.utils.checkpoint import save_replay_buffers, load_replay_buffers
 
-rl_scratch_dir = "./../../rl_online_buffer"
-rl_scratch_dir2 = "./../../rl_offline_buffer"
-rl_buffer_dir = "./../../rl_dump_buffer"
+rl_scratch_dir = "./../../rl_online_buffer_force"
+rl_scratch_dir2 = "./../../rl_offline_buffer_force"
+rl_buffer_dir = "./../../rl_dump_buffer_force"
 
-# def get_force_reward()
+# def get_force_reward(zf, min_f=1.0, large_f=5, max_f=10):
+#     r = np.zeros_like(zf); cond1 = min_f <= zf; cond2 = zf <= large_f; cond3 = large_f < zf; cond3_ = zf <= max_f; cond4 = zf > max_f 
+#     positive_mask = np.logical_and(cond1, cond2); negative_mask = np.logical_and(cond3_, cond3); negative_rewards = -( zf[negative_mask] - large_f )/(max_f - large_f)
+
+#     # assign rewards 
+#     if np.any(positive_mask):
+#         r[positive_mask] = 1.0 
+#     if np.any(negative_mask):
+#         r[negative_mask] = negative_rewards
+#     if np.any(cond4):
+#         r[cond4] = -1.0 
+#     return r
+
+def get_force_reward(zf, target_f=8.0, min_f = -2.0):
+    zf = np.atleast_1d(zf)
+    zf = np.clip(zf, min_f, target_f + (target_f-min_f)) 
+    r = - (zf - target_f)**2
+    r /= (target_f - min_f)**2
+    return r
 
 def _add_transitions_to_buffer(
     *,
@@ -201,9 +220,9 @@ def main(cfg: ResidualTD3DexmgConfig):
     # Commands are absolute, so the parse no longer needs the policy's action_mode; the
     # base policy's deltas are integrated into commands when the buffer is populated.
     offline_episodes, total_transitions = parse_offline_dataset(
-        offline_dataset_path, lowdim_keys, cfg.offline_data.num_episodes)
+        offline_dataset_path, lowdim_keys, cfg.offline_data.num_episodes, reward_function = get_force_reward)
     grip = GripperStats(*base_policy.grip_stats)
-    assert False
+   
     def get_envs(
         base_policy,
     ):
@@ -214,7 +233,8 @@ def main(cfg: ResidualTD3DexmgConfig):
             robot_ip="192.168.0.100",
             gripper_ip="192.168.0.20",
             camera_crop_mode=1,
-            dataset_path=None,
+            # dataset_path=None,
+            dataset_path=None, # 'logs-rigid-follow-rl-debug',
             control_frequency=20,
             save_interval=1.0 / 20,
             gwidth=grip.grip_width_mm,
@@ -222,8 +242,9 @@ def main(cfg: ResidualTD3DexmgConfig):
             gspeed=grip.grip_speed_mmps,
             gpullback=grip.grip_pullback_mm,
         )
+        home_pose = URPose(-0.147, 0.612, 0.184, 2.44, 2.44, 0.633)
         # Wrap it with the base policy wrapper
-        return BasePolicyVecEnvWrapper(env=env, base_policy=base_policy, image_size=(img_h, img_w), lowdim_keys=lowdim_keys, device=device)
+        return BasePolicyVecEnvWrapper(env=env, home_pose=home_pose, base_policy=base_policy, image_size=(img_h, img_w), lowdim_keys=lowdim_keys, reward_function = get_force_reward, device=device)
 
     # ---------------------------------------------------------------------
     # Seeding (must be done before environment creation) ------------------
@@ -258,7 +279,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     agent = QAgent(
         obs_shape=(img_c, img_h, img_w),
         prop_shape=(lowdim_dim,),
-        action_dim=action_dim,
+        action_dim= 1, # action_dim,
         rl_cameras=['observation.rgb'],
         cfg=cfg.agent,
         residual_actor=True,  # Enable residual actor mode
@@ -348,6 +369,7 @@ def main(cfg: ResidualTD3DexmgConfig):
     # ------------------------------------------------------------------
     online_rb, flag = load_replay_buffers(online_rb, 'warmup_rb', rl_buffer_dir)
     print(f"Added {len(online_rb)} online transitions to online buffer")
+    force_lists = []; force_list = []
     if len(online_rb) < cfg.algo.learning_starts:
         print(f"Warm-up: filling online buffer with {cfg.algo.learning_starts - len(online_rb)} random steps…")
 
@@ -359,6 +381,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         reward_sum = 0
         episode_count = 0
         obs, _ = env.reset()
+
         while len(online_rb) < cfg.algo.learning_starts:
 
             if cfg.algo.use_base_policy_for_warmup:
@@ -367,7 +390,10 @@ def main(cfg: ResidualTD3DexmgConfig):
                 # we just need to provide the noise as the residual action
                 rand_actions = (
                     torch.rand((cfg.num_envs, action_dim), device=device) * 2 - 1
-                ) * cfg.algo.random_action_noise_scale
+                ) * cfg.algo.random_action_noise_scale 
+                rand_actions[:,:2] *=0
+                rand_actions[:,3:] *= 0
+                rand_actions *= 0
             else:
                 # Pure uniform random actions - need to cancel out the base policy action
                 # Since env does: combined = base_action + residual_action
@@ -377,13 +403,12 @@ def main(cfg: ResidualTD3DexmgConfig):
                     torch.rand((cfg.num_envs, action_dim), device=device) * 2 - 1
                 ) * cfg.algo.random_action_noise_scale
                 rand_actions = pure_random - base_action
-
-            next_obs, reward, terminated, info = env.step(rand_actions)
-
+           
+            next_obs, reward, terminated, info = env.step(rand_actions); zf = env.env.robot_obs[-1].filtered_force[2]; force_list.append(zf)
             done = terminated
-            reward_sum += reward
+            reward_sum += reward.sum()
             episode_count += int(done)
-
+            
             # Use the executed combined action returned by the environment
             combined_action = info["scaled_action"]
             _add_transitions_to_buffer(
@@ -415,22 +440,28 @@ def main(cfg: ResidualTD3DexmgConfig):
             if terminated or (not len(online_rb) < cfg.algo.learning_starts):
                 # env.env.des_gripper_state = 0
                 # env.env._homing()
-                print('\t\tGet reward:', reward)
+                print('\t\tGet reward:', reward_sum)
                 print('Gripper before reset:', env.env.des_gripper_state, env.env.gripper_state)
-                env.env.reset(env.env.home_pose)
+                env.env.reset(env.home_pose)
                 # hardcode to cancelout previous behavior
                 env.env.des_gripper_state = 0
                 env.env.start()
                 time.sleep(2)
                 obs, _ = env.reset()
                 print('Gripper after reset:', env.env.des_gripper_state, env.env.gripper_state)
-
+                reward_sum = 0
+                force_lists.append(force_list); force_list = []
+                if len(force_lists) == 10:
+                    import pickle as pkl 
+                    with open('/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/logs/logs_force_warmup/saved_force_nooverlap.pkl', 'wb') as f:
+                        pkl.dump(force_lists, f)
+                    exit(1)
                 # Check if interface died
                 if not env.iface.dualsense.thread.is_alive():
                     while not env.iface.dualsense.thread.is_alive():
                         print('Detected dualsense disconnected! Reconnecting...')
                         try:
-                            new_iface = interface.DualSenseInterface(env.env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5.)
+                            new_iface = interface.DualSenseInterface(env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5.)
                             env.iface = new_iface
                         except TypeError:
                             # failed
@@ -569,6 +600,7 @@ def main(cfg: ResidualTD3DexmgConfig):
         obs, _ = env.reset()
         done = False
         episode_length = 0
+        reward_sum = 0
         while not done:
             with torch.no_grad(), utils.eval_mode(agent):
                 stddev = utils.schedule(cfg.algo.stddev_schedule, global_step)
@@ -604,38 +636,45 @@ def main(cfg: ResidualTD3DexmgConfig):
             obs = next_obs
             global_step += cfg.num_envs
             episode_length += 1
-
+            reward_sum += reward
             if done:
-                print('\t\tGet reward:', reward)
+                print('\t\tGet reward:', reward_sum)
                 print('Gripper before reset:', env.env.des_gripper_state, env.env.gripper_state)
-                env.env.reset(env.env.home_pose)
+                prev_episode_obs = env.env.robot_obs.copy()
+                env.env.reset(env.home_pose)
                 env.env.des_gripper_state = 0
                 env.env.start()
                 time.sleep(2)
                 obs, _ = env.reset()
                 print('Gripper after reset:', env.env.des_gripper_state, env.env.gripper_state)
                 episode_count += int(done)
-
+                
                 wandb.log(
                     {
-                        "training/episode_reward": reward,  # track the last reward
+                        "training/episode_reward": reward_sum,  # track the last reward
                         "training/episode_count": episode_count,
+                        "training/stddev": stddev
                     },
                     step=global_step,
                 )
-
+                reward_sum = 0
                 # Check if interface died
                 if not env.iface.dualsense.thread.is_alive():
                     while not env.iface.dualsense.thread.is_alive():
                         print('Detected dualsense disconnected! Reconnecting...')
                         try:
-                            new_iface = interface.DualSenseInterface(env.env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5.)
+                            new_iface = interface.DualSenseInterface(env.home_pose, xyzspeed=0.08, rpyspeed=0.9, forcespeed=5.)
                             env.iface = new_iface
                         except TypeError:
                             # failed
                             pass
                         time.sleep(3)
                     print('Successfully reconnected dualsense.')
+
+        # Log z forces of previous episode to W&B
+        zforces = np.array([(obs.time, obs.filtered_force.z) for obs in prev_episode_obs])
+        zfig = px.line(x=zforces[:, 0], y=zforces[:, 1], labels={'x': 'time', 'y': 'z-force'})
+        wandb.log({'Z forces per episode': wandb.Plotly(zfig), 'epoch': episode_count}, step=global_step)
 
         # ------------------------------------------------------------------
         # (4) Updates -------------------------------------------------------

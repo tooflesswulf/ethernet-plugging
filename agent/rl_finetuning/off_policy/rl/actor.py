@@ -75,7 +75,7 @@ class Actor(nn.Module):
 
         if residual_actor:
             # The residual actor takes the base action as input alongside the state
-            self.prop_dim += action_dim
+            self.prop_dim += 7 # action_dim, hard coded to be full action_dim
 
         if cfg.spatial_emb > 0:
             assert cfg.spatial_emb > 1, "this is the dimension"
@@ -170,8 +170,8 @@ class Actor(nn.Module):
         # Scale the mean by action_scale
         # NOTE: std is already in environment action space (more interpretable)
         scaled_mu = mu * self.cfg.action_scale
-
+       
         # Create distribution with scaled mean but environment-scale std
         action_dist = utils.TruncatedNormal(scaled_mu, std)
-
+        
         return action_dist  # noqa: RET504

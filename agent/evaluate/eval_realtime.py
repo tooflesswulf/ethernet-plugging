@@ -53,6 +53,10 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             self.stop()
         return des_pose, des_width
 
+    def runtime_info(self):
+        zf = self.last_obs['state']['filtered_force']
+        print(f'zforce: {zf[2]:.05f}', end='\r')
+
     def prediction_loop(self):
         action_horizon = self.policy.action_horizon
         obs_horizon = self.policy.obs_horizon

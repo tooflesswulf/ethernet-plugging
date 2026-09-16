@@ -300,6 +300,7 @@ class Critic(nn.Module):
         return (probs * support).sum(-1, keepdim=True)  # E[z]
 
     def forward(self, feat, prop, act, *, return_logits: bool = False):
+       
         # logits_per_head: [num_q, B, out_dim] where out_dim is either 1 or K (bins)
         logits_per_head = self.q_ensemble(feat, prop, act)
 
