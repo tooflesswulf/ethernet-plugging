@@ -215,12 +215,23 @@ def cmd_frames(args):
     rv = R.from_matrix(R_fit).as_rotvec()
     ang = np.linalg.norm(rv)
 
-    print(f'\nbest-fit rotation model->controller:')
-    print(f'  angle {np.degrees(ang):7.2f} deg  about {np.round(rv/ang, 4) if ang > 1e-9 else "n/a"}')
-    print(f'  residual after applying it: {resid*1000:.3f} mm')
+    passed = results[best][0] < 2e-3 and results[best][1] < 5e-3
+    if not passed:
+        # Only meaningful when something is wrong: a large angle with a small
+        # residual means the whole error is one rigid rotation, i.e. a frame
+        # convention. On a passing run this just absorbs sub-mm calibration
+        # error into a meaningless tiny angle, so don't show it.
+        print(f'\nbest-fit rotation model->controller:')
+        print(f'  angle {np.degrees(ang):7.2f} deg  about {np.round(rv/ang, 4) if ang > 1e-9 else "n/a"}')
+        print(f'  residual after applying it: {resid*1000:.3f} mm')
 
-    if results[best][0] < 2e-3 and results[best][1] < 5e-3:
+    if passed:
         print(f'\nPASS -- use base={best[0]!r} tool={best[1]!r}. Safe to try `hold`.')
+        print(f'  Residual {results[best][0]*1000:.2f} mm is per-robot delta-DH calibration,')
+        print(f'  which the controller applies and the nominal URDF does not carry.')
+        print(f'  Expected at ~1 mm; it is ~0.1% of reach and irrelevant to J^T F.')
+        if best != ('base', 'tool0'):
+            print(f'\n  !! Non-default frames -- pass --base {best[0]} --tool {best[1]} to hold/step.')
     elif resid < 2e-3 and ang > 1e-3:
         print(f'\nMISMATCH IS A PURE ROTATION of {np.degrees(ang):.2f} deg.')
         print('  ~180 deg about z  -> base frame convention; switch base_link <-> base.')
@@ -264,6 +275,24 @@ def impedance_loop(args, step_delta=None):
     print(f'\nK        : {K}')
     print(f'D        : {D}')
     print(f'tau clip : {np.round(tau_max, 1)} Nm  ({args.tau_frac:.0%} of rated)')
+
+    # ur_rtde 1.6.5:
+    #   directTorque(torque, viscous_scale=[.9,.9,.8,.9,.9,.9],
+    #                        coulomb_scale=[.8,.8,.7,.8,.8,.8])
+    # Both are per-joint FRICTION COMPENSATION scales, not damping. The stock
+    # values are deliberately under 1.0 -- full compensation tends to limit-cycle.
+    # Leave them alone unless you have a reason; 0 means no compensation, which
+    # gives a wide stiction deadband but is dissipative, hence safer.
+    if args.viscous is None and args.coulomb is None:
+        torque_cmd = ctrl.directTorque
+        print('friction  : library defaults')
+    else:
+        vs = [args.viscous if args.viscous is not None else v
+              for v in (0.9, 0.9, 0.8, 0.9, 0.9, 0.9)]
+        cs = [args.coulomb if args.coulomb is not None else c
+              for c in (0.8, 0.8, 0.7, 0.8, 0.8, 0.8)]
+        torque_cmd = lambda t: ctrl.directTorque(t, vs, cs)
+        print(f'friction  : viscous {vs}  coulomb {cs}')
 
     ctrl.setWatchdog(50.0)   # robot-side: stops control if this process dies
 
@@ -314,7 +343,10 @@ def impedance_loop(args, step_delta=None):
                 break
             tau = np.clip(tau, -tau_max, tau_max)
 
-            ctrl.directTorque(tau.tolist(), args.friction_comp)
+            ok = torque_cmd(tau.tolist())
+            if ok is False:
+                print('\ndirectTorque() returned False -- command rejected.')
+                break
 
             ticks += 1
             if (time.perf_counter() - t_prev) > 3 * dt:
@@ -335,7 +367,7 @@ def impedance_loop(args, step_delta=None):
         # its own. Zero it, then stopJ to leave torque mode entirely.
         try:
             for _ in range(5):
-                ctrl.directTorque([0.0] * 6, False)
+                ctrl.directTorque([0.0] * 6)
             ctrl.stopJ(2.0)
         finally:
             ctrl.stopScript()
@@ -362,8 +394,12 @@ def main():
         sp.add_argument('--vel-alpha', type=float, default=0.4)
         sp.add_argument('--tau-frac', type=float, default=0.20, help='fraction of rated joint torque')
         sp.add_argument('--ramp', type=float, default=0.5)
-        sp.add_argument('--friction-comp', action='store_true', default=True)
-        sp.add_argument('--no-friction-comp', dest='friction_comp', action='store_false')
+        sp.add_argument('--viscous', type=float, default=None,
+                        help='viscous friction-compensation scale, all joints '
+                             '(default: library values ~0.9). 0 disables.')
+        sp.add_argument('--coulomb', type=float, default=None,
+                        help='coulomb friction-compensation scale, all joints '
+                             '(default: library values ~0.8). 0 disables.')
         sp.add_argument('--robot', default=ROBOT_DESC)
         sp.add_argument('--base', default='base', choices=('base', 'base_link'),
                         help='whichever frame `frames` reported as best')
