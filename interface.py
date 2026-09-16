@@ -1,6 +1,5 @@
 from scipy.spatial.transform import Rotation as R
 from dualsense import DualSense
-from robosuite import make
 import numpy as np
 
 from env import GRIP_OPEN, GRIP_CLOSED
@@ -11,8 +10,7 @@ class DualSenseInterface:
     adaptive_mode = False
 
     def __init__(self, start_pose, xyzspeed=0.1, rpyspeed=1.0, forcespeed=1.0, enable_zadaptive=True):
-        self.env = make("Lift", robots="Panda")
-        self.dualsense = DualSense(self.env)
+        self.dualsense = DualSense()
         self.dualsense.start_control()
 
         self.targ_pose = np.array(start_pose)
