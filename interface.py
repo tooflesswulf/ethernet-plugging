@@ -16,9 +16,12 @@ class DualSenseInterface:
         self.dualsense.start_control()
 
         self.targ_pose = np.array(start_pose)
+        # Vestigial: impedance control has no z-force setpoint (adaptive_mode just
+        # lowers Kz). Kept at 0 so the Command/HDF5 schema and interrupt_sequence's
+        # existing assignments keep working on old episodes.
         self.targ_zforce = 0.
         self.speed = np.r_[xyzspeed, xyzspeed, xyzspeed, rpyspeed, rpyspeed, 2 * rpyspeed]
-        self.zfspeed = forcespeed
+        self.zfspeed = forcespeed   # unused; constructor arg kept for callers
         self.enable_zadaptive = enable_zadaptive
 
     @property
@@ -61,10 +64,12 @@ class DualSenseInterface:
                 self.activate_adaptive_mode()
 
         self.flip_actions(act)
-        if self.adaptive_mode:
-            self.update_force_mode(act, dt)
-        else:
-            self.update_pos_mode(act, dt)
+        # adaptive_mode is now purely a gain schedule in Env: it lowers Kz so the
+        # operator commands force by driving the z target into the surface
+        # (F_z = Kz * penetration). The joystick mapping is therefore identical in
+        # both modes, and the old update_force_mode -- which zeroed delta[2] and
+        # redirected the z stick into targ_zforce -- is gone.
+        self.update_pos_mode(act, dt)
 
     def update_pos_mode(self, act, dt):
         delta = act['right_delta']
@@ -82,29 +87,18 @@ class DualSenseInterface:
         # R_delta = R.from_euler('ZYX', [-drz, -dry, drx])
         self.targ_pose[3:] = (Rz * R_cur * R_delta).as_rotvec() # Mixed rotation
 
-    def update_force_mode(self, act, dt):
-        delta = act['right_delta']
-        self.targ_zforce += delta[2] * dt * self.zfspeed
-        delta[2] = 0
-
-        # Position: simple addition
-        dpos = delta[:3] * self.speed[:3] * dt
-        self.targ_pose[:3] += dpos
-
-        # Orientation: compose delta Euler (ZYX) onto current rotation vector
-        drx, dry, drz = delta[3:] * self.speed[3:] * dt
-        R_cur = R.from_rotvec(self.targ_pose[3:])
-        # R_delta = R.from_euler('ZYX', [drz, dry, drx])
-        # self.targ_pose[3:] = (R_cur * R_delta).as_rotvec() # Local rotation
-        R_delta = R.from_euler('ZYX', [-drz, -dry, drx])
-        self.targ_pose[3:] = (R_delta * R_cur).as_rotvec() # Global rotation
-
     def activate_adaptive_mode(self):
-        self.targ_zforce = self.latest_obs['state']['filtered_force'].z
+        # Nothing to latch: entering the soft gain set with e = 0 is already
+        # bumpless, and Env ramps the gain change over mode_blend_time.
+        pass
 
     def deactivate_adaptive_mode(self):
+        # LOAD-BEARING, not housekeeping. In adaptive mode the z target sits
+        # centimetres below the surface -- that offset IS the force command.
+        # Restoring stiff Kz against a 4 cm error would command ~60 N, so the
+        # target must be re-synced to the measured pose FIRST; Env then ramps
+        # the gains over mode_blend_time.
         self.targ_pose = np.array(self.latest_obs['state']['actual_pose'])
-        self.targ_zforce = 0.
 
     def store_obs(self, obs):
         self.latest_obs = obs

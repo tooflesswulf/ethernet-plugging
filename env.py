@@ -13,6 +13,8 @@ import os
 
 from net_isup import is_network_up
 from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
+from kinematics import URKin
+from impedance import CartesianImpedance, SafetyMonitor, IDLE, IMPEDANCE, FAULT
 from camera import Camera
 import wsg
 
@@ -22,7 +24,8 @@ GRIP_CLOSED = 1
 GRIP_MOVING = -1
 
 
-class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
+class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force',
+                                       'actual_q', 'actual_qd', 'tau_cmd', 'cmd_wrench'))):
     pass
 
 
@@ -60,10 +63,13 @@ class Env:
         control_frequency=20,
         servo_frequency=500,
         gripper_query_frequency=250,
-        max_position_step=(0.008, 0.008, 0.008),
+        max_position_step=(0.03, 0.03, 0.03),
         max_orientation_step=0.05,
-        lookahead_time=0.1,
-        servo_gain=500,
+        coulomb_friction=None,
+        workspace=None,
+        watchdog_hz=10.0,
+        gain_ramp_time=0.3,
+        mode_blend_time=0.2,
         obs_mode: Literal['latest', 'mean'] = 'latest',
         dataset_path=None,
         save_interval=0.1,
@@ -105,6 +111,9 @@ class Env:
         # ============================================================
         self.robot_ip = robot_ip
         self.gripper_ip = gripper_ip
+        # NOTE: do not pass FLAG_UPPER_RANGE_REGISTERS -- it hangs construction on
+        # this controller. It is only needed for getJacobian()/getMassMatrix(),
+        # and the Jacobian is computed locally (kinematics.URKin, ~16 us).
         self.ctrl = rtde_control.RTDEControlInterface(robot_ip)
         self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
         self.gripper = wsg.WSG(ip=gripper_ip)
@@ -119,15 +128,42 @@ class Env:
         self.input_frequency = control_frequency
         self.servo_frequency = servo_frequency
         self.dt = 1.0 / servo_frequency
+        # Under impedance control these are the equilibrium-error LEASH, not a
+        # speed limit: the spring force is bounded by K * max_position_step, so
+        # size them per gain set as F_sat / K.
         self.max_position_step = np.array(max_position_step)
         self.max_orientation_step = max_orientation_step
-        self.lookahead_time = lookahead_time
-        self.servo_gain = servo_gain
+
+        # ============================================================
+        # Impedance control
+        # ============================================================
+        step = self.ctrl.getStepTime()
+        if step <= 0:
+            # Observed on this controller. Don't divide by it.
+            print(f'Warning: getStepTime() returned {step}; assuming {self.dt} s.')
+            step = self.dt
+        self.dt = step
+        self.tcp_offset = self.ctrl.getTCPOffset()
+        self.kin = URKin(self.tcp_offset)
+        self.imp = CartesianImpedance(f_c=coulomb_friction,
+                                      tau_rated=self.kin.tau_rated)
+        self.safety = SafetyMonitor(workspace=workspace, dt=self.dt)
+        self.watchdog_hz = watchdog_hz
+        self.gain_ramp_time = gain_ramp_time
+        self.mode_blend_time = mode_blend_time
+        self._mode = IDLE
+        self._fault = None
+        self._mode_blend = 0.0      # 0 = free-space gains, 1 = contact gains
+        self._loop_hz = 0.0
+        self._t_start_ctrl = time.perf_counter()
+        self._last_tau = np.zeros(6)
+        self._last_wrench = np.zeros(6)
 
         print("Initializing environment...")
         print(f"Robot IP:   {robot_ip}")
         print(f"Gripper IP: {gripper_ip}")
-        print(f"Servo  {self.home_pose} frequency: {servo_frequency} Hz")
+        print(f"Impedance {self.home_pose} at {1/self.dt:.0f} Hz")
+        print(f"TCP offset: {np.round(self.tcp_offset, 5)}")
 
         # ----------------------------
         # threading
@@ -185,13 +221,15 @@ class Env:
                           controller_state=dualsense)
         self.commands.append(log_cmd)
 
-        if self.adaptive_mode and not adaptive_mode:
-            # Transitioning adaptive -> position
-            self.last_step_t = time.perf_counter()
-            self.last_step_end = des_pose
-        else:
-            self.last_step_t = time.perf_counter()
-            self.last_step_end = self.des_pose
+        # The old adaptive/position branch here existed only because zforce_pid
+        # left des_pose.z stale. Under impedance, z is always tracked from the
+        # setpoint, so there is one case.
+        self.last_step_t = time.perf_counter()
+        self.last_step_end = self.des_pose
+
+        if self._fault is not None:
+            # Latched fault: keep serving observations, ignore new setpoints.
+            return self.get_obs()
 
         self.des_pose = des_pose
         self.des_gripper_state = des_gripper_state
@@ -238,10 +276,17 @@ class Env:
         print('Resetting environment...')
         if len(self.threads) > 0:
             self.stop_flag = True
+            # Bounded, for the same reason close() is: a worker can park forever
+            # in a blocking RTDE call after a protective stop. An unbounded join
+            # here wedges the main thread.
             for thr in self.threads:
-                thr.join()
+                thr.join(timeout=2.0)
+                if thr.is_alive():
+                    print(f'Warning: thread {thr.name} did not exit during reset.')
             if self.dataset_path is not None:
                 self.save_data()
+        self._fault = None
+        self._mode = IDLE
         self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
 
         # ============================================================
@@ -296,10 +341,23 @@ class Env:
         # (gripper query .wait(), or ctrl.servoL after a protective stop) and
         # never re-check stop_flag. Since these are daemon threads, don't wait
         # on them forever -- that wedges the main thread and forces a ctrl-Z.
+        wedged = False
         for thr in self.threads:
             thr.join(timeout=2.0)
             if thr.is_alive():
+                wedged = True
                 print(f'Warning: thread {thr.name} did not exit; leaving it to daemon cleanup.')
+        if wedged:
+            # Under servoL a wedged control thread was survivable. Under torque
+            # control it means returning from close() with the arm still holding
+            # a stale torque, so escalate. This knowingly reaches for self.ctrl
+            # from outside _control_loop (see request_zero_ft) -- it is the
+            # nuclear option, and stopping the script is always safe for the arm.
+            print('Control thread wedged; calling stopScript() to drop torque.')
+            try:
+                self.ctrl.stopScript()
+            except Exception as e:
+                print(f'stopScript() failed: {e}')
         self.camera.close()
         if self.dataset_path is not None:
             self.save_data()
@@ -327,19 +385,47 @@ class Env:
         self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
         return self._force_filtered
 
-    _prev_force_err = 0.
+    def _trip(self, reason):
+        """
+        Freeze: stop commanding a wrench, latch the fault, ignore new setpoints.
+        Zero torque is gravity-compensated float, so the arm holds against gravity
+        and does not lurch. Sticky on purpose -- a controller that re-arms itself
+        after a divergence trip will diverge again immediately. The loop stays
+        alive so camera/gripper/logging continue for post-mortem.
+        """
+        if self._fault is None:
+            self._fault = reason
+            self._mode = FAULT
+            print(f'\n!!! IMPEDANCE TRIP: {reason}')
 
-    def zforce_pid(self, actual_pose, filtered_force):
-        kp = .0007
-        kd = .00001
-        fz = filtered_force.z
-        force_err = fz - self.des_zforce
-        d_force_err = (force_err - self._prev_force_err) / self.dt
-        self._prev_force_err = force_err
+    def clear_fault(self):
+        """Explicit operator action. Re-arms at the current pose."""
+        self._fault = None
+        self.des_pose = URPose(*self.recv.getActualTCPPose())
+        self.last_step_end = self.des_pose
+        self.last_step_t = -1
+        self.imp.reset()
+        self._mode = IDLE
+        print('Fault cleared.')
 
-        zdes = actual_pose.z + kp * force_err + kd * d_force_err
-        return zdes
-    
+    def _safe_stop_torque(self):
+        """
+        directTorque is re-applied by the controller every cycle while the command
+        register still holds cmd 66 (the dispatch loop skips sync() for it), so a
+        stale torque does NOT decay on its own. Zero it, then stopJ -- which is
+        non-realtime, so it changes the register away from 66 and decelerates
+        under the controller's own position control.
+        """
+        try:
+            for _ in range(5):
+                self.ctrl.directTorque([0.0] * 6)
+            self.ctrl.stopJ(2.0)
+        except Exception as e:
+            print(f'safe stop failed: {e}')
+        finally:
+            self._mode = IDLE
+
+
     def _set_gripstate(self, gs):
         self.gripper_state = gs
 
@@ -354,76 +440,146 @@ class Env:
         self._zero_ft_request = True
 
     def _control_loop(self):
-        while not self.stop_flag:
-            t_start = self.ctrl.initPeriod()
-            if self._zero_ft_request:
-                self.ctrl.zeroFtSensor()
-                self._zero_ft_request = False
-            actual_pose = URPose(*self.recv.getActualTCPPose())
-            actual_force = URPose(*self.recv.getActualTCPForce())
-            filtered_force = URPose(*self.filter_force(actual_force))
-            self.robot_obs.append(RobotObs(time=time.time() - self.t0,
-                                  actual_pose=actual_pose, actual_force=actual_force,
-                                  filtered_force=filtered_force))
+        # Arm the robot-side watchdog last, immediately before streaming starts:
+        # once armed, any pause longer than 1/watchdog_hz stops the robot with
+        # "fieldbus interrupted". 10 Hz, not 50 -- 20 ms is inside what Python GC
+        # and terminal I/O can take.
+        self.ctrl.setWatchdog(self.watchdog_hz)
+        self._mode = IMPEDANCE
+        self.imp.reset()
+        self._t_start_ctrl = time.perf_counter()
+        t_prev = self._t_start_ctrl
+        ticks = 0
+        try:
+            while not self.stop_flag:
+                t_start = self.ctrl.initPeriod()
+                now = time.perf_counter()
+                dt_actual = now - t_prev
+                t_prev = now
+                ticks += 1
+                self._loop_hz = ticks / max(now - self._t_start_ctrl, 1e-9)
+                try:
+                    self._control_tick(t_start, dt_actual, ticks)
+                except Exception as e:
+                    self._trip(f'exception in control tick: {e!r}')
+                    # The tick may have raised BEFORE commanding anything, and a
+                    # tick that sends nothing leaves the controller re-applying
+                    # the previous torque forever. Always command zero here.
+                    try:
+                        self.ctrl.directTorque([0.0] * 6)
+                    except Exception:
+                        pass
+                self.ctrl.waitPeriod(t_start)
+        finally:
+            self._safe_stop_torque()
 
-            des_pose = self.des_pose
-            des_gripper_state = self.des_gripper_state
-            gripper_state = self.gripper_state
+    def _control_tick(self, t_start, dt_actual, ticks):
+        if self._zero_ft_request:
+            self.ctrl.zeroFtSensor()
+            self._zero_ft_request = False
+        actual_pose = URPose(*self.recv.getActualTCPPose())
+        actual_force = URPose(*self.recv.getActualTCPForce())
+        filtered_force = URPose(*self.filter_force(actual_force))
+        q = np.array(self.recv.getActualQ())
+        qd = np.array(self.recv.getActualQd())
+        twist = np.array(self.recv.getActualTCPSpeed())
 
-            # ----------------------------
-            # gripper logic (non-blocking preferred)
-            # ----------------------------
-            if gripper_state != GRIP_MOVING and gripper_state != des_gripper_state:
-                self.gripper_state = GRIP_MOVING
-                if gripper_state == GRIP_OPEN:
-                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
-                        .finished.then(lambda _: self._set_gripstate(GRIP_CLOSED)) \
-                        .catch(lambda e: (
-                            self._set_gripstate(GRIP_CLOSED),
-                            print(f'Gripper GRIP failed: {e}'),
-                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
-                            ))
-                else:
-                    cur_width = self.gripper_obs[-1].gripper_width
-                    self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
-                        .finished.then(lambda _: self._set_gripstate(GRIP_OPEN)) \
-                        .catch(lambda e: (
-                            self._set_gripstate(GRIP_OPEN),
-                            print(f'Gripper RELEASE failed: {e}'),
-                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+        des_pose = self.des_pose
+        des_gripper_state = self.des_gripper_state
+        gripper_state = self.gripper_state
+
+        # ----------------------------
+        # gripper logic (non-blocking preferred)
+        # ----------------------------
+        if gripper_state != GRIP_MOVING and gripper_state != des_gripper_state:
+            self.gripper_state = GRIP_MOVING
+            if gripper_state == GRIP_OPEN:
+                self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
+                    .finished.then(lambda _: self._set_gripstate(GRIP_CLOSED)) \
+                    .catch(lambda e: (
+                        self._set_gripstate(GRIP_CLOSED),
+                        print(f'Gripper GRIP failed: {e}'),
+                        print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
                         ))
-
-            # ----------------------------
-            # blend + servo
-            # ----------------------------
-            if self.last_step_t > 0:
-                # Received at least 1 input
-                des_pose = self.interpolate()
-            command = clamp(
-                actual_pose,
-                des_pose,
-                self.max_position_step,
-                self.max_orientation_step,
-            )
-
-            # ----------------------------
-            # adaptive z-force control
-            # ----------------------------
-            if self.adaptive_mode:
-                command = command._replace(z=self.zforce_pid(actual_pose, filtered_force))
             else:
-                self._prev_force_err = 0.
+                cur_width = self.gripper_obs[-1].gripper_width
+                self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
+                    .finished.then(lambda _: self._set_gripstate(GRIP_OPEN)) \
+                    .catch(lambda e: (
+                        self._set_gripstate(GRIP_OPEN),
+                        print(f'Gripper RELEASE failed: {e}'),
+                        print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                    ))
 
-            self.ctrl.servoL(
-                command,
-                0.0,
-                0.0,
-                self.dt,
-                self.lookahead_time,
-                self.servo_gain,
+        # ----------------------------
+        # equilibrium pose
+        # ----------------------------
+        # interpolate() smooths the 20-100 Hz setpoint stream up to the servo
+        # rate; clamp() is now the equilibrium-error leash, which bounds the
+        # spring force at K * max_position_step.
+        if self.last_step_t > 0:
+            des_pose = self.interpolate()
+        eq_pose = clamp(
+            actual_pose,
+            des_pose,
+            self.max_position_step,
+            self.max_orientation_step,
+        )
+
+        # ----------------------------
+        # impedance
+        # ----------------------------
+        # adaptive_mode is a gain schedule, blended rather than stepped: a step
+        # change in K with a nonzero error is an instantaneous torque
+        # discontinuity, which reads as a jolt.
+        target_blend = 1.0 if self.adaptive_mode else 0.0
+        rate = self.dt / max(self.mode_blend_time, self.dt)
+        self._mode_blend += np.clip(target_blend - self._mode_blend, -rate, rate)
+
+        if self._mode == FAULT:
+            tau = np.zeros(6)
+            F = np.zeros(6)
+        else:
+            elapsed = time.perf_counter() - self._t_start_ctrl
+            ramp = min(1.0, elapsed / self.gain_ramp_time) if self.gain_ramp_time > 0 else 1.0
+            J = self.kin.jacobian(q)
+            tau, F, _ = self.imp.compute(
+                q, qd, np.asarray(actual_pose, float), np.asarray(eq_pose, float),
+                twist, J, blend=self._mode_blend, ramp=ramp,
             )
+            reason = self.safety.check(q, qd, np.asarray(actual_pose, float),
+                                       twist, np.asarray(actual_force, float),
+                                       tau, dt_actual if ticks > 5 else None)
+            if reason is None and ticks % 50 == 0:
+                reason = self._check_robot_state()
+            if reason is not None:
+                self._trip(reason)
+                tau = np.zeros(6)
 
-            self.ctrl.waitPeriod(t_start)
+        self._last_tau = tau
+        self._last_wrench = F
+        # Logged after the law runs so tau/wrench belong to the same tick.
+        self.robot_obs.append(RobotObs(time=time.time() - self.t0,
+                              actual_pose=actual_pose, actual_force=actual_force,
+                              filtered_force=filtered_force,
+                              actual_q=q, actual_qd=qd,
+                              tau_cmd=tau, cmd_wrench=F))
+        if self.ctrl.directTorque(tau.tolist()) is False:
+            self._trip('directTorque() returned False')
+
+    def _check_robot_state(self):
+        """
+        Slow checks, polled from self.recv only -- receive reads are cached RTDE
+        state and are cheap, while ctrl.* goes through the control script and
+        would block the loop.
+        """
+        if self.recv.isProtectiveStopped():
+            return 'protective stop'
+        if self.recv.isEmergencyStopped():
+            return 'emergency stop'
+        if self.recv.getSafetyMode() != 1:
+            return f'safety mode {self.recv.getSafetyMode()}'
+        return None
 
     def _camera_loop(self):
         while not self.stop_flag:
@@ -513,6 +669,13 @@ class Env:
             f.create_dataset('robot_obs/time', data=[obs.time for obs in self.robot_obs])
             f.create_dataset('robot_obs/actual_pose', data=[obs.actual_pose for obs in self.robot_obs])
             f.create_dataset('robot_obs/actual_force', data=[obs.actual_force for obs in self.robot_obs])
+            # Added for impedance tuning. Existing keys are untouched --
+            # scripts/rawdata_to_dataset.py reads by explicit key, so extras are
+            # ignored and old checkpoints keep working.
+            f.create_dataset('robot_obs/actual_q', data=[obs.actual_q for obs in self.robot_obs])
+            f.create_dataset('robot_obs/actual_qd', data=[obs.actual_qd for obs in self.robot_obs])
+            f.create_dataset('robot_obs/tau_cmd', data=[obs.tau_cmd for obs in self.robot_obs])
+            f.create_dataset('robot_obs/cmd_wrench', data=[obs.cmd_wrench for obs in self.robot_obs])
 
             f.create_dataset('gripper_obs/time', data=[obs.time for obs in self.gripper_obs])
             f.create_dataset('gripper_obs/gripper_width', data=[obs.gripper_width for obs in self.gripper_obs])

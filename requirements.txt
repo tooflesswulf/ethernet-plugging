@@ -13,6 +13,12 @@ robot_descriptions
 scipy
 tqdm
 transformers
-ur-rtde
+# Pin 1.6.5 deliberately. Its control script never applies the
+# viscous/coulomb scales it reads, so directTorque friction comp is
+# off -- and our per-joint feedforward (impedance.friction_feedforward)
+# was identified against that uncompensated plant. 1.6.3 DOES apply
+# them, so downgrading would stack two compensations and limit-cycle.
+ur-rtde==1.6.5
 wandb
 xacrodoc
+pinocchio

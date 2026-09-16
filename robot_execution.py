@@ -1,5 +1,6 @@
 from env import Env, URPose, GRIP_OPEN
 import interface
+import numpy as np
 import threading
 import cv2
 
@@ -52,7 +53,7 @@ class RobotExecution:
         self.pre_start()
         self.env.start()  # start threads
         self.post_start()
-        self.last_action = (self.home_pose, GRIP_OPEN, 0., False)
+        self.last_action = (self.home_pose, GRIP_OPEN, False, 0.)
 
     def get_action(self):
         """ Returns the action to send to _unshortcut_action.
@@ -67,12 +68,12 @@ class RobotExecution:
         """ Converts action shortcuts into unified format.
         act: None             -> repeat last action
         act: (float[6], int)  -> pose + gripper (GRIP_OPEN=0, GRIP_CLOSED=1)
-        act: (float[6], int, bool, float) -> pose, grip, zforce, mode
+        act: (float[6], int, bool, float) -> pose, grip, adaptive_mode, zforce
         """
         if act is None:
             return self.last_action
         if len(act) == 2:
-            return (URPose(*act[0]), int(round(act[1])), 0, False)
+            return (URPose(*act[0]), int(round(act[1])), False, 0.)
         return (URPose(*act[0]), int(round(act[1])), bool(act[2]), act[3])
 
     def run(self):
@@ -138,7 +139,15 @@ class RobotExecution:
 
     def runtime_info(self):
         obs = self.last_obs
-        print(f"g_width: {obs['state']['gripper_width']:7.2f}", end='\r')
+        # Loop rate is worth watching: directTorque blocks a robot cycle itself
+        # and the control script skips sync() for it, so waitPeriod may or may
+        # not be adding a second cycle. If this sits near half servo_frequency,
+        # that is why.
+        fault = self.env._fault
+        print(f"g_width: {obs['state']['gripper_width']:7.2f}  "
+              f"ctrl: {self.env._loop_hz:5.0f} Hz  "
+              f"|F|: {np.linalg.norm(self.env._last_wrench[:3]):6.2f} N"
+              + (f"  FAULT: {fault}" if fault else ""), end='\r')
 
     def close(self):
         self.env.close()

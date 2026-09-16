@@ -368,12 +368,30 @@ def cmd_identify(args):
     print('  breakaway + :  ' + '  '.join(f'{v:6.2f}' for v in res[:, 0]))
     print('  breakaway - :  ' + '  '.join(f'{v:6.2f}' for v in res[:, 1]))
     mean = np.nanmean(res, axis=1)
-    if not np.all(np.isnan(mean)):
-        print('  mean        :  ' + '  '.join(f'{v:6.2f}' for v in mean))
-        use = np.nan_to_num(mean, nan=0.0) * args.frac
-        print(f'\nCompensate at {args.frac:.0%} of measured -- under-compensate on')
-        print('purpose, since over-compensation turns a deadband into a limit cycle:\n')
-        print('  --fc-nm ' + ','.join(f'{v:.2f}' for v in use))
+    lo = np.nanmin(res, axis=1)
+    asym = np.abs(res[:, 0] - res[:, 1]) / np.fmax(mean, 1e-9)
+    if np.all(np.isnan(mean)):
+        return
+    print('  mean        :  ' + '  '.join(f'{v:6.2f}' for v in mean))
+    print('  asymmetry   :  ' + '  '.join(f'{v:5.0%} ' for v in asym))
+
+    # Compensation must stay under the SMALLER of the two directions. Using the
+    # mean over-compensates the weak direction on an asymmetric joint, which is
+    # exactly what produces a limit cycle in one direction while the opposite
+    # direction still has a deadband.
+    use = np.nan_to_num(lo, nan=0.0) * args.frac
+    print(f'\nCompensating {args.frac:.0%} of the weaker direction (not the mean):')
+    print('  --fc-nm ' + ','.join(f'{v:.2f}' for v in use))
+
+    bad = np.where(asym > 0.3)[0]
+    if bad.size:
+        print(f'\n  NOTE joints {list(bad)} are >30% asymmetric. Half the +/- gap is a')
+        print('  residual gravity-compensation error, not friction:')
+        for j in bad:
+            print(f'    joint {j}: ~{abs(res[j,0]-res[j,1])/2:.2f} Nm bias')
+        print('  Gravity-loaded joints (shoulder/elbow) reading asymmetric usually')
+        print('  means the payload mass or CoG is wrong. Worth checking -- that bias')
+        print('  is a constant torque the impedance controller has to fight.')
 
 
 # ======================================================================
