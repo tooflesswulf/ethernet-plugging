@@ -53,12 +53,16 @@ class UR5eKin:
     (NOT `flange`, which shares tool0's origin but not its orientation).
     """
 
-    def __init__(self, tcp_offset):
-        robot = load_robot_description("ur5e_description")
-        self.model = robot.model
+    _cache = None
+
+    def __init__(self, tcp_offset, base="base", tool="tool0"):
+        if UR5eKin._cache is None:
+            UR5eKin._cache = load_robot_description("ur5e_description").model
+        self.model = UR5eKin._cache
         self.data = self.model.createData()
-        self.f_base = self.model.getFrameId("base")
-        self.f_tool = self.model.getFrameId("tool0")
+        self.base_name, self.tool_name = base, tool
+        self.f_base = self.model.getFrameId(base)
+        self.f_tool = self.model.getFrameId(tool)
         self.tcp = pose_to_se3(tcp_offset)
 
     def _update(self, q):
@@ -108,77 +112,148 @@ def pose_error(actual, desired):
     return np.r_[desired[:3] - actual[:3], (R_des * R_act.inv()).as_rotvec()]
 
 
-def connect():
-    flags = (rtde_control.RTDEControlInterface.FLAGS_DEFAULT
-             | rtde_control.RTDEControlInterface.FLAG_UPPER_RANGE_REGISTERS)
-    ctrl = rtde_control.RTDEControlInterface(ROBOT_IP, flags=flags)
+def connect(kin=True):
+    # NOTE: do NOT pass FLAG_UPPER_RANGE_REGISTERS -- it hangs construction on
+    # this controller. It is only needed for getJacobian()/getMassMatrix(), and
+    # we compute the Jacobian locally anyway.
+    ctrl = rtde_control.RTDEControlInterface(ROBOT_IP)
     recv = rtde_receive.RTDEReceiveInterface(ROBOT_IP)
     tcp_offset = ctrl.getTCPOffset()
+    step = ctrl.getStepTime()
     print(f'TCP offset : {np.round(tcp_offset, 5)}')
-    print(f'step time  : {ctrl.getStepTime()} s')
-    print(f'payload    : {recv.getPayload() if hasattr(recv, "getPayload") else "?"} kg')
-    return ctrl, recv, UR5eKin(tcp_offset)
+    print(f'step time  : {step} s')
+    print(f'payload    : {recv.getPayload()} kg   cog {np.round(recv.getPayloadCog(), 4)}')
+    print(f'prog running: {ctrl.isProgramRunning()}   connected: {ctrl.isConnected()}')
+
+    if step <= 0:
+        print('\n!! getStepTime() returned 0. The control script is probably not')
+        print('!! running, which means directTorque() will also fail silently.')
+        print('!! Assuming 0.002 s, but fix this before commanding any torque.\n')
+        step = 0.002
+
+    return ctrl, recv, tcp_offset, step, (UR5eKin(tcp_offset) if kin else None)
 
 
 # ======================================================================
 # 1. frames -- no torque commanded, hand-move the arm
 # ======================================================================
 def cmd_frames(args):
-    ctrl, recv, kin = connect()
-    print('\nEntering freedrive. Move the arm slowly through a few poses.')
-    print('Sampling for %.0f s...\n' % args.duration)
+    """
+    Collect (q, pose, qd, twist) samples, then work out empirically which frame
+    convention the controller is actually using instead of assuming one.
+    """
+    ctrl, recv, tcp_offset, _, _ = connect(kin=False)
 
-    v_err, w_err, fk_err, n, worst = [], [], [], 0, 0.0
+    print('\nEntering freedrive. Move the arm slowly through several DIFFERENT poses')
+    print('-- vary all 6 joints, not just one. Sampling for %.0f s...\n' % args.duration)
+
+    S = []
     try:
         ctrl.teachMode()
         t_end = time.time() + args.duration
+        last = 0.0
         while time.time() < t_end:
             q = np.array(recv.getActualQ())
             qd = np.array(recv.getActualQd())
-            twist = np.array(recv.getActualTCPSpeed())
-            pose = np.array(recv.getActualTCPPose())
-
-            if np.linalg.norm(qd) < 0.05:      # only score while actually moving
-                time.sleep(0.02)
-                continue
-
-            pred = kin.jacobian(q) @ qd
-            v_err.append(np.abs(pred[:3] - twist[:3]).max())
-            w_err.append(np.abs(pred[3:] - twist[3:]).max())
-            fk_err.append(np.abs(kin.fk(q)[:3] - pose[:3]).max())
-            worst = max(worst, v_err[-1])
-            n += 1
+            S.append((q, qd,
+                      np.array(recv.getActualTCPPose()),
+                      np.array(recv.getActualTCPSpeed())))
+            if time.time() - last > 2.0:
+                last = time.time()
+                print(f'  {len(S):4d} samples, {t_end - time.time():4.0f}s left', end='\r')
             time.sleep(0.02)
     finally:
         ctrl.endTeachMode()
 
-    if n == 0:
-        print('No motion sampled -- nothing was validated. Move the arm and retry.')
+    moving = [s for s in S if np.linalg.norm(s[1]) > 0.05]
+    print(f'\n{len(S)} samples, {len(moving)} while moving\n')
+    if len(S) < 20:
+        print('Too few samples.')
         return
 
-    print(f'samples: {n}')
-    print(f'  FK position     : mean {np.mean(fk_err)*1000:7.3f} mm   max {np.max(fk_err)*1000:7.3f} mm')
-    print(f'  J@qd vs v_tcp   : mean {np.mean(v_err)*1000:7.3f} mm/s  max {np.max(v_err)*1000:7.3f} mm/s')
-    print(f'  J@qd vs w_tcp   : mean {np.mean(w_err)*1000:7.3f} mrad/s max {np.max(w_err)*1000:7.3f} mrad/s')
+    # ---- 1. try every frame convention, score FK and J independently --------
+    print(f'{"base":<10} {"tool":<8} {"FK pos [mm]":>12} {"J@qd vs v [mm/s]":>18} {"J@qd vs w [mrad/s]":>20}')
+    print('-' * 72)
+    results = {}
+    for base in ('base', 'base_link'):
+        for tool in ('tool0', 'flange'):
+            try:
+                k = UR5eKin(tcp_offset, base=base, tool=tool)
+            except Exception as e:
+                print(f'{base:<10} {tool:<8}  unavailable ({e})')
+                continue
+            fk_e = [np.abs(k.fk(q)[:3] - p[:3]).max() for q, _, p, _ in S]
+            if moving:
+                ve, we = zip(*[(np.abs((k.jacobian(q) @ qd)[:3] - t[:3]).max(),
+                                np.abs((k.jacobian(q) @ qd)[3:] - t[3:]).max())
+                               for q, qd, _, t in moving])
+            else:
+                ve, we = (np.nan,), (np.nan,)
+            results[(base, tool)] = (np.mean(fk_e), np.mean(ve), np.mean(we))
+            print(f'{base:<10} {tool:<8} {np.mean(fk_e)*1e3:12.3f} '
+                  f'{np.mean(ve)*1e3:18.3f} {np.mean(we)*1e3:20.3f}')
 
-    ok = np.mean(fk_err) < 2e-3 and np.mean(v_err) < 5e-3
-    print('\n' + ('PASS -- frames agree, safe to try `hold`.' if ok else
-                  'FAIL -- do NOT command torque.\n'
-                  '  Large x/y sign errors => wrong base frame (base vs base_link).\n'
-                  '  Orientation errors     => wrong tool frame (tool0 vs flange).\n'
-                  '  Uniform scale errors   => wrong TCP offset.'))
+    best = min(results, key=lambda k: results[k][0])
+    print(f'\nbest FK match: base={best[0]!r} tool={best[1]!r}  '
+          f'({results[best][0]*1000:.3f} mm)')
+
+    # ---- 2. if nothing matches, fit the residual rotation (Kabsch) ----------
+    # If the only error is a wrong base frame, actual = R_fit @ model exactly,
+    # and R_fit tells us precisely which rotation is missing.
+    k = UR5eKin(tcp_offset, base=best[0], tool=best[1])
+    P = np.array([k.fk(q)[:3] for q, _, _, _ in S])       # model
+    Q = np.array([p[:3] for _, _, p, _ in S])             # controller
+    U, _, Vt = np.linalg.svd(P.T @ Q)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    R_fit = Vt.T @ np.diag([1, 1, d]) @ U.T
+    resid = np.abs((R_fit @ P.T).T - Q).max()
+    rv = R.from_matrix(R_fit).as_rotvec()
+    ang = np.linalg.norm(rv)
+
+    print(f'\nbest-fit rotation model->controller:')
+    print(f'  angle {np.degrees(ang):7.2f} deg  about {np.round(rv/ang, 4) if ang > 1e-9 else "n/a"}')
+    print(f'  residual after applying it: {resid*1000:.3f} mm')
+
+    if results[best][0] < 2e-3 and results[best][1] < 5e-3:
+        print(f'\nPASS -- use base={best[0]!r} tool={best[1]!r}. Safe to try `hold`.')
+    elif resid < 2e-3 and ang > 1e-3:
+        print(f'\nMISMATCH IS A PURE ROTATION of {np.degrees(ang):.2f} deg.')
+        print('  ~180 deg about z  -> base frame convention; switch base_link <-> base.')
+        print('  ~90 deg about z   -> the arm is mounted rotated; add it as a fixed offset.')
+        print('  anything else     -> non-standard mounting; use this rotvec as the offset.')
+    else:
+        print('\nFAIL and the residual is NOT a pure rotation, so it is not just a')
+        print('frame convention. Check, in order:')
+        print(f'  - is this really a UR5e? (d1=0.1625; the CB3 UR5 is 0.089 and would')
+        print(f'    show ~80 mm of error here)')
+        print(f'  - TCP offset {np.round(tcp_offset, 4)} -- does it match the pendant?')
+        print(f'  - joint ordering/signs from getActualQ()')
+        print(f'\n  per-axis mean signed FK error [mm]: {np.round((Q - P).mean(0)*1000, 2)}')
+        print(f'  model |p| mean {np.linalg.norm(P,axis=1).mean():.4f} m vs '
+              f'controller {np.linalg.norm(Q,axis=1).mean():.4f} m  '
+              f'(ratio {np.linalg.norm(Q,axis=1).mean()/np.linalg.norm(P,axis=1).mean():.4f})')
 
 
 # ======================================================================
 # 2/3. impedance hold, and a setpoint step
 # ======================================================================
 def impedance_loop(args, step_delta=None):
-    ctrl, recv, kin = connect()
+    ctrl, recv, tcp_offset, dt, _ = connect(kin=False)
+    kin = UR5eKin(tcp_offset, base=args.base, tool=args.tool)
+    print(f'frames     : base={args.base!r} tool={args.tool!r}')
+
+    # Refuse to command torque if the kinematics do not match the controller --
+    # a wrong frame here points the commanded force the wrong way.
+    pose = np.array(recv.getActualTCPPose())
+    fk_err = np.abs(kin.fk(recv.getActualQ())[:3] - pose[:3]).max()
+    print(f'FK check   : {fk_err*1000:.3f} mm')
+    if fk_err > 2e-3:
+        print('\nABORT: kinematics disagree with the controller. Run `frames` first.')
+        return
 
     K = np.r_[np.full(3, args.kp), np.full(3, args.kr)]
     D = np.r_[np.full(3, args.dp), np.full(3, args.dr)]
     tau_max = args.tau_frac * TAU_RATED
-    dt = ctrl.getStepTime()
 
     print(f'\nK        : {K}')
     print(f'D        : {D}')
@@ -186,7 +261,7 @@ def impedance_loop(args, step_delta=None):
 
     ctrl.setWatchdog(50.0)   # robot-side: stops control if this process dies
 
-    eq = np.array(recv.getActualTCPPose())      # equilibrium latched here, never moves
+    eq = pose.copy()                            # equilibrium latched here, never moves
     print(f'equilibrium: {np.round(eq, 4)}')
     if step_delta is not None:
         print(f'stepping after {args.settle:.1f} s by {step_delta}')
@@ -281,6 +356,9 @@ def main():
         sp.add_argument('--ramp', type=float, default=0.5)
         sp.add_argument('--friction-comp', action='store_true', default=True)
         sp.add_argument('--no-friction-comp', dest='friction_comp', action='store_false')
+        sp.add_argument('--base', default='base', choices=('base', 'base_link'),
+                        help='whichever frame `frames` reported as best')
+        sp.add_argument('--tool', default='tool0', choices=('tool0', 'flange'))
 
     h = sub.add_parser('hold', help='impedance hold at the current pose')
     add_gains(h)
