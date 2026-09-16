@@ -102,6 +102,30 @@ class URKin:
         return np.block([[Rb.T, np.zeros((3, 3))], [np.zeros((3, 3)), Rb.T]]) @ J
 
 
+def friction_feedforward(qd, tau_cmd, f_c, v_eps, t_eps):
+    """
+    Per-joint Coulomb friction compensation, needed because ur_rtde 1.6.5's
+    control script never applies the viscous/coulomb scales it reads:
+
+        viscous_scaling = [0,0,0,0,0,0]          # never assigned
+        viscous_scale   = q_from_input_float_registers(6)
+        direct_torque(torque, viscous_scale=viscous_scaling, ...)
+
+    so friction compensation is off no matter what directTorque() is passed.
+
+    A pure tanh(qd) Coulomb term cannot break away from rest -- at qd = 0 it is
+    identically 0, which is exactly the stiction case we care about. So blend:
+    use velocity direction while moving, and fall back to the direction of the
+    commanded torque while stationary.
+
+    Under-compensate (f_c below the true breakaway torque). Over-compensation
+    turns stiction into a limit cycle, which is worse than a deadband.
+    """
+    s_v = np.tanh(qd / v_eps)
+    s_t = np.tanh(tau_cmd / t_eps)
+    return f_c * (s_v + (1.0 - np.abs(s_v)) * s_t)
+
+
 def pose_error(actual, desired):
     """
     6-vector [dp; drotvec] in the base frame, pointing from actual to desired.
@@ -337,6 +361,9 @@ def impedance_loop(args, step_delta=None):
             F = ramp * (K * e - D * xd_f)
             J = kin.jacobian(q)
             tau = J.T @ F - args.dq * qd
+            if args.fc > 0:
+                tau = tau + ramp * friction_feedforward(
+                    qd, tau, args.fc * kin.tau_rated, args.fc_veps, args.fc_teps)
 
             if not np.isfinite(tau).all():
                 print('\nnon-finite torque, aborting')
@@ -356,6 +383,7 @@ def impedance_loop(args, step_delta=None):
             if ticks % 250 == 0:
                 print(f'  t={now:6.2f}s  |e_p|={np.linalg.norm(e[:3])*1000:6.2f}mm  '
                       f'|F|={np.linalg.norm(F[:3]):6.2f}N  |tau|={np.abs(tau).max():6.2f}Nm  '
+                      f'clip={"Y" if np.any(np.abs(tau) >= tau_max - 1e-9) else "n"}  '
                       f'rate={ticks/now:5.0f}Hz  late={late}', end='\r')
 
             ctrl.waitPeriod(t_start)
@@ -394,6 +422,14 @@ def main():
         sp.add_argument('--vel-alpha', type=float, default=0.4)
         sp.add_argument('--tau-frac', type=float, default=0.20, help='fraction of rated joint torque')
         sp.add_argument('--ramp', type=float, default=0.5)
+        sp.add_argument('--fc', type=float, default=0.0,
+                        help='Coulomb friction feedforward, as a fraction of each '
+                             'rated joint torque. 0 = off. Try 0.005 and raise until '
+                             'the deadband closes; back off if it buzzes or creeps.')
+        sp.add_argument('--fc-veps', type=float, default=0.02,
+                        help='joint speed [rad/s] at which Coulomb comp saturates')
+        sp.add_argument('--fc-teps', type=float, default=2.0,
+                        help='torque [Nm] at which the stationary breakaway assist saturates')
         sp.add_argument('--viscous', type=float, default=None,
                         help='viscous friction-compensation scale, all joints '
                              '(default: library values ~0.9). 0 disables.')
