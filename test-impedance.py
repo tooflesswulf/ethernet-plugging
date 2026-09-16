@@ -321,12 +321,14 @@ def cmd_identify(args):
     """
     ctrl, recv, _, dt, _ = connect(kin=False)
     torque_cmd = make_torque_fn(ctrl)
-    ctrl.setWatchdog(50.0)
 
     print(f'\nramp {args.rate} Nm/s, cap {args.cap} Nm, breakaway at '
           f'|qd| > {args.qd_thresh} rad/s')
     print('The arm WILL twitch at each breakaway. Clear space, hand on the e-stop.')
+    # Prompt BEFORE arming the watchdog: once armed, any pause longer than
+    # 1/min_frequency stops the robot with "fieldbus interrupted".
     input('enter to start, ctrl-C to abort: ')
+    ctrl.setWatchdog(args.watchdog)
 
     res = np.full((6, 2), np.nan)
     try:
@@ -349,9 +351,11 @@ def cmd_identify(args):
                         print(f'  joint {j} {"+-"[k]} : breakaway {mag:6.2f} Nm')
                         break
                     ctrl.waitPeriod(ts)
-                for _ in range(100):                      # settle at zero torque
+                # Keep streaming while settling -- any gap trips the watchdog.
+                for _ in range(100):
+                    ts = ctrl.initPeriod()
                     torque_cmd([0.0] * 6)
-                    time.sleep(dt)
+                    ctrl.waitPeriod(ts)
     except KeyboardInterrupt:
         print('\naborted')
     finally:
@@ -400,14 +404,17 @@ def impedance_loop(args, step_delta=None):
 
     torque_cmd = make_torque_fn(ctrl, args.viscous, args.coulomb)
     print(f'coulomb ff : {np.round(f_c, 2)} Nm')
-
-    ctrl.setWatchdog(50.0)   # robot-side: stops control if this process dies
+    print(f'watchdog   : {args.watchdog} Hz '
+          f'({1000.0/args.watchdog:.0f} ms max gap before "fieldbus interrupted")')
 
     eq = pose.copy()                            # equilibrium latched here, never moves
     print(f'equilibrium: {np.round(eq, 4)}')
     if step_delta is not None:
         print(f'stepping after {args.settle:.1f} s by {step_delta}')
     print('\nCtrl-C to stop.\n')
+
+    # Arm last, immediately before streaming starts: nothing may block after this.
+    ctrl.setWatchdog(args.watchdog)
 
     xd_f = np.zeros(6)
     t0 = time.perf_counter()
@@ -509,6 +516,11 @@ def main():
                         help='Coulomb friction feedforward, as a fraction of each '
                              'rated joint torque. 0 = off. Try 0.005 and raise until '
                              'the deadband closes; back off if it buzzes or creeps.')
+        sp.add_argument('--watchdog', type=float, default=10.0,
+                        help='robot-side watchdog [Hz]. Stops the robot if RTDE '
+                             'updates stall for longer than 1/this. Higher is '
+                             'safer but 50 Hz leaves only 20 ms, which Python GC '
+                             'or slow terminal I/O can exceed.')
         sp.add_argument('--fc-nm', default=None,
                         help='per-joint Coulomb torques [Nm], 6 comma-separated, '
                              'from `identify`. Overrides --fc. A single scalar '
@@ -535,6 +547,7 @@ def main():
     i.add_argument('--qd-thresh', type=float, default=0.02, help='breakaway speed [rad/s]')
     i.add_argument('--frac', type=float, default=0.8,
                    help='fraction of measured friction to compensate')
+    i.add_argument('--watchdog', type=float, default=10.0, help='robot-side watchdog [Hz]')
 
     h = sub.add_parser('hold', help='impedance hold at the current pose')
     add_gains(h)
