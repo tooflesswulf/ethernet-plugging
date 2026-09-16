@@ -30,9 +30,7 @@ import rtde_control
 import rtde_receive
 
 ROBOT_IP = "192.168.0.100"
-
-# UR5e rated joint torques [Nm]. The clip below is a fraction of these.
-TAU_RATED = np.array([150., 150., 150., 28., 28., 28.])
+ROBOT_DESC = "ur16e_description"   # UR16e: effort [330,330,150,54,54,54] Nm
 
 
 def skew(v):
@@ -45,25 +43,32 @@ def pose_to_se3(p):
     return pin.SE3(R.from_rotvec(p[3:]).as_matrix(), np.asarray(p[:3], float))
 
 
-class UR5eKin:
+class URKin:
     """
-    pinocchio UR5e wrapped so that everything it returns is in the frames the UR
+    pinocchio UR wrapped so that everything it returns is in the frames the UR
     controller actually reports in: the `base` frame (NOT `base_link`, which is
     the ROS REP-103 convention and is rotated 180 deg about Z), and the TCP
     (NOT `flange`, which shares tool0's origin but not its orientation).
+
+    The robot description must match the actual arm. A UR5e model on a UR16e is
+    76 mm of TCP error on average (131 mm worst case), which looks like a frame
+    problem but is not one.
     """
 
-    _cache = None
+    _cache = {}
 
-    def __init__(self, tcp_offset, base="base", tool="tool0"):
-        if UR5eKin._cache is None:
-            UR5eKin._cache = load_robot_description("ur5e_description").model
-        self.model = UR5eKin._cache
+    def __init__(self, tcp_offset, desc=ROBOT_DESC, base="base", tool="tool0"):
+        if desc not in URKin._cache:
+            URKin._cache[desc] = load_robot_description(desc).model
+        self.model = URKin._cache[desc]
         self.data = self.model.createData()
+        self.desc = desc
         self.base_name, self.tool_name = base, tool
         self.f_base = self.model.getFrameId(base)
         self.f_tool = self.model.getFrameId(tool)
         self.tcp = pose_to_se3(tcp_offset)
+        # Rated joint torques straight from the URDF -- no hardcoded table.
+        self.tau_rated = np.asarray(self.model.effortLimit, float)
 
     def _update(self, q):
         pin.forwardKinematics(self.model, self.data, np.asarray(q, float))
@@ -131,7 +136,7 @@ def connect(kin=True):
         print('!! Assuming 0.002 s, but fix this before commanding any torque.\n')
         step = 0.002
 
-    return ctrl, recv, tcp_offset, step, (UR5eKin(tcp_offset) if kin else None)
+    return ctrl, recv, tcp_offset, step, (URKin(tcp_offset) if kin else None)
 
 
 # ======================================================================
@@ -178,7 +183,7 @@ def cmd_frames(args):
     for base in ('base', 'base_link'):
         for tool in ('tool0', 'flange'):
             try:
-                k = UR5eKin(tcp_offset, base=base, tool=tool)
+                k = URKin(tcp_offset, desc=args.robot, base=base, tool=tool)
             except Exception as e:
                 print(f'{base:<10} {tool:<8}  unavailable ({e})')
                 continue
@@ -200,7 +205,7 @@ def cmd_frames(args):
     # ---- 2. if nothing matches, fit the residual rotation (Kabsch) ----------
     # If the only error is a wrong base frame, actual = R_fit @ model exactly,
     # and R_fit tells us precisely which rotation is missing.
-    k = UR5eKin(tcp_offset, base=best[0], tool=best[1])
+    k = URKin(tcp_offset, desc=args.robot, base=best[0], tool=best[1])
     P = np.array([k.fk(q)[:3] for q, _, _, _ in S])       # model
     Q = np.array([p[:3] for _, _, p, _ in S])             # controller
     U, _, Vt = np.linalg.svd(P.T @ Q)
@@ -224,8 +229,9 @@ def cmd_frames(args):
     else:
         print('\nFAIL and the residual is NOT a pure rotation, so it is not just a')
         print('frame convention. Check, in order:')
-        print(f'  - is this really a UR5e? (d1=0.1625; the CB3 UR5 is 0.089 and would')
-        print(f'    show ~80 mm of error here)')
+        print(f'  - is {args.robot!r} the right arm? a model mismatch dominates')
+        print(f'    everything else -- e.g. a UR5e model on a UR16e is ~76 mm mean,')
+        print(f'    131 mm max, and looks exactly like this. Try --robot')
         print(f'  - TCP offset {np.round(tcp_offset, 4)} -- does it match the pendant?')
         print(f'  - joint ordering/signs from getActualQ()')
         print(f'\n  per-axis mean signed FK error [mm]: {np.round((Q - P).mean(0)*1000, 2)}')
@@ -239,7 +245,7 @@ def cmd_frames(args):
 # ======================================================================
 def impedance_loop(args, step_delta=None):
     ctrl, recv, tcp_offset, dt, _ = connect(kin=False)
-    kin = UR5eKin(tcp_offset, base=args.base, tool=args.tool)
+    kin = URKin(tcp_offset, desc=args.robot, base=args.base, tool=args.tool)
     print(f'frames     : base={args.base!r} tool={args.tool!r}')
 
     # Refuse to command torque if the kinematics do not match the controller --
@@ -253,7 +259,7 @@ def impedance_loop(args, step_delta=None):
 
     K = np.r_[np.full(3, args.kp), np.full(3, args.kr)]
     D = np.r_[np.full(3, args.dp), np.full(3, args.dr)]
-    tau_max = args.tau_frac * TAU_RATED
+    tau_max = args.tau_frac * kin.tau_rated
 
     print(f'\nK        : {K}')
     print(f'D        : {D}')
@@ -344,11 +350,13 @@ def main():
 
     f = sub.add_parser('frames', help='validate frame conventions, no torque')
     f.add_argument('--duration', type=float, default=20.0)
+    f.add_argument('--robot', default=ROBOT_DESC,
+                   help='robot_descriptions name; must match the actual arm')
 
     def add_gains(sp):
         sp.add_argument('--kp', type=float, default=200., help='translational stiffness [N/m]')
         sp.add_argument('--kr', type=float, default=10., help='rotational stiffness [Nm/rad]')
-        sp.add_argument('--dp', type=float, default=40., help='translational damping [Ns/m]')
+        sp.add_argument('--dp', type=float, default=90., help='translational damping [Ns/m]')
         sp.add_argument('--dr', type=float, default=2., help='rotational damping [Nms/rad]')
         sp.add_argument('--dq', type=float, default=0.5, help='joint damping floor [Nms/rad]')
         sp.add_argument('--vel-alpha', type=float, default=0.4)
@@ -356,6 +364,7 @@ def main():
         sp.add_argument('--ramp', type=float, default=0.5)
         sp.add_argument('--friction-comp', action='store_true', default=True)
         sp.add_argument('--no-friction-comp', dest='friction_comp', action='store_false')
+        sp.add_argument('--robot', default=ROBOT_DESC)
         sp.add_argument('--base', default='base', choices=('base', 'base_link'),
                         help='whichever frame `frames` reported as best')
         sp.add_argument('--tool', default='tool0', choices=('tool0', 'flange'))
