@@ -10,9 +10,6 @@ import numpy as np
 import threading
 import time
 
-from robosuite import make
-from robosuite.utils.log_utils import ROBOSUITE_DEFAULT_LOGGER
-
 try:
     import hid
 except ModuleNotFoundError as exc:
@@ -23,9 +20,10 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 
-import robosuite.macros as macros
-from robosuite.devices import Device
-from robosuite.utils.transform_utils import rotation_matrix
+# Copied from robosuite.macros, which is no longer imported: this driver talks to
+# the controller over HID directly and never needs a simulation env.
+DUALSENSE_VENDOR_ID = 0x054C
+DUALSENSE_PRODUCT_ID = 0x0CE6
 
 
 class ConnectionType(IntFlag):
@@ -174,7 +172,7 @@ class DSState:
             self.DpadRight = False
 
 
-class DualSense(Device):
+class DualSense:
     """
     A minimalistic driver class for DualSense with HID library.
 
@@ -186,8 +184,6 @@ class DualSense(Device):
     DualSense HID protocol refer to https://github.com/nondebug/dualsense
 
     Args:
-        env (RobotEnv): The environment which contains the robot(s) to control
-                        using this device.
         pos_sensitivity (float): Magnitude of input position command scaling
         rot_sensitivity (float): Magnitude of scale input rotation commands scaling
         reverse_xy (bool): Whether to reverse the effect of the x and y axes of the joystick. It is used to handle the case that the left/right and front/back sides of the view are opposite to the LX and LY of the joystick(Push LX up but the robot move left in your view)
@@ -195,15 +191,12 @@ class DualSense(Device):
 
     def __init__(
         self,
-        env,
-        vendor_id=macros.DUALSENSE_VENDOR_ID,
-        product_id=macros.DUALSENSE_PRODUCT_ID,
+        vendor_id=DUALSENSE_VENDOR_ID,
+        product_id=DUALSENSE_PRODUCT_ID,
         pos_sensitivity=1.0,
         rot_sensitivity=1.0,
         reverse_xy=False,
     ):
-        super().__init__(env)
-
         print("Opening DualSense device")
         self.vendor_id = vendor_id
         self.product_id = product_id
@@ -213,10 +206,10 @@ class DualSense(Device):
         try:
             self.device.open(self.vendor_id, self.product_id)  # DualSense
         except Exception as e:
-            ROBOSUITE_DEFAULT_LOGGER.warning(
+            print(
                 "Failed to open DualSense device. "
                 "Consider killing other processes that may be using the device, "
-                f"or try other product ids for SONY DualSense in {[hex(id) for id in macros.DUALSENSE_PRODUCT_ID]}"
+                f"or try another SONY DualSense product id (tried {hex(self.product_id)})"
             )
             raise e
 
@@ -258,7 +251,6 @@ class DualSense(Device):
 
         self._control = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self._reset_state = 0
-        self.rotation = np.array([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]])
         self._enabled = False
 
         # launch a new listener thread to listen to DualSense
@@ -292,9 +284,6 @@ class DualSense(Device):
         """
         Resets internal state of controller, except for the reset signal.
         """
-        super()._reset_internal_state()
-
-        self.rotation = np.array([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]])
         # Reset 6-DOF variables
         self.x, self.y, self.z = 0, 0, 0
         self.roll, self.pitch, self.yaw = 0, 0, 0
@@ -411,20 +400,6 @@ class DualSense(Device):
                     self._reset_state = 1
                     self._enabled = False
                     self._reset_internal_state()
-                # controls for mobile base (only applicable if mobile base present)
-                if self._check_btn_changed("Triangle") and self.state.Triangle:
-                    self.base_modes[self.active_robot] = not self.base_modes[self.active_robot]  # toggle mobile base
-
-                if self._check_btn_changed("DpadRight") and self.state.DpadRight:
-                    self.active_arm_index = (self.active_arm_index + 1) % len(self.all_robot_arms[self.active_robot])
-                elif self._check_btn_changed("DpadLeft") and self.state.DpadLeft:
-                    self.active_arm_index = (self.active_arm_index - 1) % len(self.all_robot_arms[self.active_robot])
-
-                if self._check_btn_changed("DpadUp") and self.state.DpadUp:
-                    self.active_robot = (self.active_robot + 1) % self.num_robots
-                if self._check_btn_changed("DpadDown") and self.state.DpadDown:
-                    self.active_robot = (self.active_robot - 1) % self.num_robots
-
     @property
     def control(self):
         """
@@ -449,28 +424,19 @@ class DualSense(Device):
 
     def get_controller_state(self):
         """
-        Grabs the current state of the 3D mouse.
+        Grabs the current state of the controller.
 
         Returns:
-            dict: A dictionary containing dpos, orn, unmodified orn, grasp, and reset
+            dict: A dictionary containing dpos, raw_drotation, grasp, and reset
         """
         dpos = self.control[:3] * 0.005 * self.pos_sensitivity
         roll, pitch, yaw = self.control[3:] * 0.005 * self.rot_sensitivity
 
-        # convert RPY to an absolute orientation
-        drot1 = rotation_matrix(angle=-pitch, direction=[1.0, 0, 0], point=None)[:3, :3]
-        drot2 = rotation_matrix(angle=roll, direction=[0, 1.0, 0], point=None)[:3, :3]
-        drot3 = rotation_matrix(angle=yaw, direction=[0, 0, 1.0], point=None)[:3, :3]
-
-        self.rotation = self.rotation.dot(drot1.dot(drot2.dot(drot3)))
-
         return dict(
             dpos=dpos,
-            rotation=self.rotation,
             raw_drotation=np.array([roll, pitch, yaw]),
             grasp=self.control_gripper,
             reset=self._reset_state,
-            base_mode=int(self.base_mode),
         )
 
     def _postprocess_device_outputs(self, dpos, drotation):
@@ -486,11 +452,29 @@ class DualSense(Device):
     last_circle = False
 
     def input2action(self):
-        act = super().input2action()
-        if act is None:
+        """
+        Converts the current controller state into the action dict consumed by
+        DualSenseInterface. If a reset is triggered, returns None instead.
+
+        Returns:
+            Optional[Dict]: 'right_delta' (normalized 6-DoF delta, clipped to
+                            [-1, 1]), plus rising edges for 'right_gripper' and
+                            'toggle_zforce'.
+        """
+        state = self.get_controller_state()
+        if state["reset"]:
             return None
-        act['right_gripper'] = self.state.Circle and not self.last_circle
-        act['toggle_zforce'] = self.state.Triangle and not self.last_triangle
+
+        # Devices output rotation with x and y swapped and z flipped, to account
+        # for robots starting with the gripper facing down.
+        roll, pitch, yaw = state["raw_drotation"]
+        dpos, drotation = self._postprocess_device_outputs(state["dpos"], np.array([pitch, roll, -yaw]))
+
+        act = {
+            'right_delta': np.concatenate([dpos, drotation]),
+            'right_gripper': self.state.Circle and not self.last_circle,
+            'toggle_zforce': self.state.Triangle and not self.last_triangle,
+        }
         self.last_circle = self.state.Circle
         self.last_triangle = self.state.Triangle
         return act
@@ -601,8 +585,7 @@ def parse_bt31_report(state_bytes: bytearray) -> DSState:
 
 
 if __name__ == "__main__":
-    env = make("Lift", robots="Panda")
-    dualsense = DualSense(env)
+    dualsense = DualSense()
     dualsense.start_control()
     for i in range(100):
         # print(dualsense.control, dualsense.control_gripper)
