@@ -9,8 +9,10 @@ opencv-python
 pyrealsense2
 qwen-vl-utils
 robosuite
+robot_descriptions
 scipy
 tqdm
 transformers
 ur-rtde
 wandb
+xacrodoc
