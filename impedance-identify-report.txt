@@ -1,0 +1,9 @@
+       joint :       0       1       2       3       4       5
+  breakaway + :   13.70   11.90    8.70    3.87    4.38    3.69
+  breakaway - :   12.93   21.87   11.38    3.48    3.68    2.59
+  mean        :   13.31   16.88   10.04    3.68    4.03    3.14
+
+Compensate at 80% of measured -- under-compensate on
+purpose, since over-compensation turns a deadband into a limit cycle:
+
+  --fc-nm 10.65,13.51,8.03,2.94,3.22,2.51
