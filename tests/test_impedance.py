@@ -303,6 +303,52 @@ def test_calibrate_gives_critical_damping():
         assert np.all(zeta[:3] >= 1.0 - 1e-9)          # translational may be raised by d_min
 
 
+def test_calibrate_bounds_damping_for_discrete_stability(kin):
+    """
+    Regression: per-axis zeta=1 is a continuous-time design. At 500 Hz an
+    explicit damper needs lambda(Lambda^-1 D)*dt small, and Lambda has
+    low-inertia directions where zeta=1 gave lambda*dt = 23 -- the discrete loop
+    diverged in ~20 ms and tripped the 60 N force limit.
+    """
+    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    lam = kin.sample_inertia(q, n=40)
+    I = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
+
+    unbounded = _imp()
+    unbounded.calibrate(I, zeta=1.0)
+    worst = max(np.abs(np.linalg.eigvals(
+        np.linalg.solve(L, np.diag(unbounded.D_free)))).max() for L in lam)
+    assert worst * 0.002 > 8, 'unbounded damping really is past the stability boundary'
+
+    bounded = _imp()
+    bounded.calibrate(I, zeta=1.0, dt=0.002, lam_samples=lam, lam_dt_max=4.0)
+    worst_b = max(np.abs(np.linalg.eigvals(
+        np.linalg.solve(L, np.diag(bounded.D_free)))).max() for L in lam)
+    assert worst_b * 0.002 <= 4.0 + 1e-6
+    assert np.all(bounded.D_free <= unbounded.D_free + 1e-9)
+
+
+def test_discrete_loop_does_not_diverge(kin):
+    """Simulate the sampled loop -- the only check that catches this class of bug."""
+    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    lam = kin.sample_inertia(q, n=20)
+    I = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
+    imp = _imp()
+    imp.calibrate(I, dt=0.002, lam_samples=lam)
+    K, D = imp.gains(0.0)
+    dt, alpha = 0.002, imp.vel_alpha
+    for L in lam[:10]:
+        Li = np.linalg.inv(L)
+        for d in range(6):
+            x = np.zeros(6); x[d] = 1e-4
+            v = np.zeros(6); vf = np.zeros(6)
+            for _ in range(2000):
+                vf = alpha * v + (1 - alpha) * vf
+                v = v + dt * (Li @ (-K * x - D * vf))
+                x = x + dt * v
+            assert np.all(np.isfinite(x)) and np.linalg.norm(x) < 1e-3
+
+
 def test_calibrate_enforces_contact_damping_bound():
     """D > K_e*dt/2 (~100 Ns/m) on translation, or stiff contact chatters."""
     imp = _imp()

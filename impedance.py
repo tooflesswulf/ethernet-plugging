@@ -135,7 +135,8 @@ class CartesianImpedance:
         self.cond_full = 1e5
         self.cond_max = 1e6
 
-    def calibrate(self, inertia, zeta=1.0, d_min=100.0):
+    def calibrate(self, inertia, zeta=1.0, d_min=0.0,
+                  dt=None, lam_samples=None, lam_dt_max=4.0):
         """
         Set the desired inertia and derive damping from the MEASURED task inertia
         (kinematics.URKin.reference_inertia), rather than trusting the table.
@@ -145,15 +146,32 @@ class CartesianImpedance:
         small -- which left the rotational axes at zeta 0.31-0.75 instead of 1.0.
         Underdamped rotation is felt as the tool wiggling.
 
-        d_min enforces the sampled-contact bound D > K_e*dt/2 (~100 Ns/m at
-        K_e = 1e5, dt = 2 ms) on the translational axes, where damping rather than
-        stiffness is what buys contact stability.
+        CRITICAL, and not optional: zeta=1 per axis is a CONTINUOUS-time design.
+        An explicitly integrated damper at 500 Hz is only stable while
+        lambda(Lambda^-1 D) * dt stays small, and Lambda has directions with very
+        little apparent inertia, where even modest D violates that. Measured here:
+        per-axis zeta=1 gave lambda*dt = 23 and the discrete loop diverged in
+        ~20 ms. Simulated over 40 poses x 6 excitation directions, the boundary
+        sits near lambda*dt ~ 8, so lam_dt_max = 4 keeps ~2x margin.
+
+        Pass dt and lam_samples (URKin.sample_inertia) to apply the bound. Without
+        them the damping is continuous-time only and WILL diverge on this arm.
+
+        Note the conflict this exposes: the sampled-contact guideline wants
+        D > K_e*dt/2 (~100 Ns/m at K_e = 1e5), while discrete stability here caps
+        translational D near 70. At 500 Hz with this arm you cannot have both, and
+        divergence is the harder constraint -- so d_min defaults to 0.
         """
         I = np.asarray(inertia, float)
         self.inertia_d = I.copy()
         for K, name in ((self.K_free, 'D_free'), (self.K_contact, 'D_contact')):
             D = 2.0 * zeta * np.sqrt(K * I)
             D[:3] = np.maximum(D[:3], d_min)
+            if dt is not None and lam_samples is not None:
+                worst = max(np.abs(np.linalg.eigvals(np.linalg.solve(L, np.diag(D)))).max()
+                            for L in np.asarray(lam_samples))
+                if worst * dt > lam_dt_max:
+                    D = D * (lam_dt_max / (worst * dt))
             setattr(self, name, D)
         return I
 

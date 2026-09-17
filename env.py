@@ -158,10 +158,17 @@ class Env:
         # whatever TCP offset is configured. Hardcoding these is how the rotational
         # damping ended up at zeta 0.31 -- the reference was measured at tool0,
         # without the 154 mm TCP offset that dominates rotational inertia.
-        self.ref_inertia = self.kin.reference_inertia(self.recv.getActualQ())
-        self.imp.calibrate(self.ref_inertia, zeta=damping_zeta)
+        lam = self.kin.sample_inertia(self.recv.getActualQ())
+        self.ref_inertia = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
+        # dt + lam_samples apply the DISCRETE stability bound on damping. Without
+        # them the loop diverges in ~20 ms on this arm.
+        self.imp.calibrate(self.ref_inertia, zeta=damping_zeta,
+                           dt=self.dt, lam_samples=lam)
+        worst = max(np.abs(np.linalg.eigvals(
+            np.linalg.solve(L, np.diag(self.imp.D_free)))).max() for L in lam)
         print(f'task inertia: {np.round(self.ref_inertia, 3)}')
-        print(f'D_free      : {np.round(self.imp.D_free, 1)}')
+        print(f'D_free      : {np.round(self.imp.D_free, 1)}  '
+              f'(lambda*dt {worst * self.dt:.2f}, must stay well under ~8)')
 
         self.safety = SafetyMonitor(workspace=workspace, dt=self.dt)
         self.watchdog_hz = watchdog_hz

@@ -81,6 +81,13 @@ class URKin:
         Rb = self.data.oMf[self.f_base].rotation
         return np.block([[Rb.T, np.zeros((3, 3))], [np.zeros((3, 3)), Rb.T]]) @ J
 
+    def sample_inertia(self, q0, spread=0.5, n=200, seed=0):
+        """Full task-inertia matrices sampled around q0. Shape (n, 6, 6)."""
+        rng = np.random.default_rng(seed)
+        q0 = np.asarray(q0, float)
+        return np.array([self.task_inertia(q0 + rng.uniform(-spread, spread, 6))
+                         for _ in range(n)])
+
     def reference_inertia(self, q0, spread=0.5, n=200, seed=0):
         """
         Median per-axis task inertia around configuration q0, in the `base` frame
@@ -92,11 +99,8 @@ class URKin:
         here silently underdamps every rotational axis and makes any inertia
         shaping wildly over-amplify.
         """
-        rng = np.random.default_rng(seed)
-        q0 = np.asarray(q0, float)
-        diag = np.array([np.diag(self.task_inertia(q0 + rng.uniform(-spread, spread, 6)))
-                         for _ in range(n)])
-        return np.median(diag, axis=0)
+        lam = self.sample_inertia(q0, spread, n, seed)
+        return np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
 
     def task_inertia(self, q):
         """
