@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""
+Chirp system-identification for the impedance controller.
+
+Everything so far has been tuned from offline models, and those models have been
+wrong more than once (task inertia measured at tool0 rather than the TCP; a
+discrete stability bound that says the old damping diverges when in practice it
+only wiggled). This measures the actual plant instead.
+
+Two experiments:
+
+  chirp --mode setpoint   sweep the EQUILIBRIUM pose with the impedance loop
+                          running. Gives the closed-loop response eq -> actual:
+                          where it rings, how damped it really is, where it goes
+                          unstable.
+
+  chirp --mode wrench     hold position with a low stiffness and inject a chirp
+                          WRENCH on top. Gives the plant response F -> accel,
+                          i.e. whether the task-inertia model is right at all.
+
+Then:
+
+  analyze <file.npz>      frequency response, resonances, damping estimates.
+
+Logs t, q, qd, actual_pose, twist, raw force, equilibrium pose, commanded wrench
+and commanded torque every tick into preallocated arrays -- no allocation in the
+control loop, because allocation pressure is one of the things that makes ticks
+run late.
+
+Amplitudes are deliberately small. Keep a hand on the e-stop.
+"""
+from scipy.spatial.transform import Rotation as R
+import numpy as np
+import argparse
+import time
+
+from impedance import CartesianImpedance, saturate_direction, pose_error
+
+# rtde_* and kinematics (pinocchio) are imported lazily inside cmd_chirp, so
+# `analyze` runs on a machine that has neither the robot nor pinocchio.
+
+ROBOT_IP = "192.168.0.100"
+AXES = ['x', 'y', 'z', 'rx', 'ry', 'rz']
+
+
+# ======================================================================
+# connection
+# ======================================================================
+def make_torque_fn(ctrl):
+    """1.6.3 takes friction_comp: bool, 1.6.5 takes per-joint scale vectors."""
+    doc = ctrl.directTorque.__doc__ or ''
+    if 'viscous' in doc:
+        print('directTorque : 1.6.5 scale-vector form (its script drops the scales)')
+        return ctrl.directTorque
+    print('directTorque : friction_comp=True (1.6.3 form)')
+    return lambda t: ctrl.directTorque(t, True)
+
+
+def connect():
+    import rtde_control
+    import rtde_receive
+    # No FLAG_UPPER_RANGE_REGISTERS -- it hangs construction on this controller.
+    ctrl = rtde_control.RTDEControlInterface(ROBOT_IP)
+    recv = rtde_receive.RTDEReceiveInterface(ROBOT_IP)
+    tcp = ctrl.getTCPOffset()
+    dt = ctrl.getStepTime()
+    if dt <= 0:
+        print(f'getStepTime() returned {dt}; assuming 0.002 s')
+        dt = 0.002
+    print(f'TCP offset : {np.round(tcp, 5)}')
+    print(f'payload    : {recv.getPayload()} kg  cog {np.round(recv.getPayloadCog(), 4)}')
+    print(f'dt         : {dt} s')
+    return ctrl, recv, tcp, dt
+
+
+# ======================================================================
+# chirp
+# ======================================================================
+def log_chirp_phase(t, f0, f1, T):
+    """
+    Exponential sweep. Logarithmic spacing spends comparable time per octave,
+    which is what you want when the interesting dynamics span 1-100 Hz.
+    """
+    k = (f1 / f0) ** (t / T)
+    return 2 * np.pi * f0 * T / np.log(f1 / f0) * (k - 1.0)
+
+
+def envelope(t, T, ramp=0.5):
+    """Fade in/out so the sweep does not start or stop with a step."""
+    a = min(t / ramp, 1.0) if t < ramp else 1.0
+    b = min((T - t) / ramp, 1.0) if t > T - ramp else 1.0
+    return min(a, b)
+
+
+def offset_pose(base, axis, delta):
+    """Apply a scalar displacement along one of the 6 task axes."""
+    p = np.array(base, float)
+    if axis < 3:
+        p[axis] += delta
+        return p
+    rv = np.zeros(3)
+    rv[axis - 3] = delta
+    p[3:] = (R.from_rotvec(rv) * R.from_rotvec(p[3:])).as_rotvec()
+    return p
+
+
+def cmd_chirp(args):
+    from kinematics import URKin
+    ctrl, recv, tcp, dt = connect()
+    kin = URKin(tcp)
+    imp = CartesianImpedance(tau_rated=kin.tau_rated)
+
+    q0 = np.array(recv.getActualQ())
+    lam = kin.sample_inertia(q0)
+    ref = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
+    imp.calibrate(ref, zeta=args.zeta, dt=dt, lam_samples=lam,
+                  lam_dt_max=args.lam_dt_max)
+    if args.fc_nm:
+        imp.f_c = np.array([float(x) for x in args.fc_nm.split(',')])
+    if args.no_friction:
+        imp.f_c = np.zeros(6)
+
+    axis = AXES.index(args.axis)
+    mode = args.mode
+    if mode == 'wrench':
+        # Hold position weakly so it cannot drift, and inject the wrench on top.
+        k = args.hold_k
+        imp.K_free = np.array([k, k, k, k / 20, k / 20, k / 20], float)
+        imp.calibrate(ref, zeta=args.zeta, dt=dt, lam_samples=lam,
+                      lam_dt_max=args.lam_dt_max)
+
+    K, D = imp.gains(0.0)
+    print(f'\nmode       : {mode}')
+    print(f'axis       : {args.axis}')
+    print(f'amplitude  : {args.amp}{" m" if axis < 3 else " rad" if mode == "setpoint" else " N/Nm"}')
+    print(f'sweep      : {args.f0} -> {args.f1} Hz over {args.duration} s')
+    print(f'K          : {np.round(K, 1)}')
+    print(f'D          : {np.round(D, 1)}')
+    print(f'f_c        : {np.round(imp.f_c, 2)}')
+
+    n = int(args.duration / dt) + 100
+    L = {k: np.zeros((n, d)) for k, d in (
+        ('q', 6), ('qd', 6), ('pose', 6), ('twist', 6), ('force', 6),
+        ('eq', 6), ('wrench', 6), ('tau', 6))}
+    L['t'] = np.zeros(n)
+    L['drive'] = np.zeros(n)          # the injected signal itself
+    L['dt'] = np.zeros(n)
+
+    torque_cmd = make_torque_fn(ctrl)
+    base = np.array(recv.getActualTCPPose())
+    print(f'base pose  : {np.round(base, 4)}')
+    input('\nenter to start, ctrl-C to abort: ')
+    ctrl.setWatchdog(args.watchdog)      # arm AFTER the prompt, never before
+
+    i = 0
+    abort = None
+    t0 = time.perf_counter()
+    t_prev = t0
+    try:
+        while True:
+            ts = ctrl.initPeriod()
+            now = time.perf_counter()
+            t = now - t0
+            if t > args.duration:
+                break
+
+            q = np.array(recv.getActualQ())
+            qd = np.array(recv.getActualQd())
+            pose = np.array(recv.getActualTCPPose())
+            twist = np.array(recv.getActualTCPSpeed())
+            force = np.array(recv.getActualTCPForce())
+
+            drive = (args.amp * envelope(t, args.duration, args.ramp)
+                     * np.sin(log_chirp_phase(t, args.f0, args.f1, args.duration)))
+
+            if mode == 'setpoint':
+                eq = offset_pose(base, axis, drive)
+                ff = np.zeros(6)
+            else:
+                eq = base
+                ff = np.zeros(6)
+                ff[axis] = drive
+
+            J = kin.jacobian(q)
+            tau, F, _ = imp.compute(q, qd, pose, eq, twist, J)
+            if mode == 'wrench':
+                F = saturate_direction(F + ff, imp.F_sat)
+                tau = saturate_direction(J.T @ F - imp.d_q * qd, imp.tau_sat)
+
+            # ---- abort checks (raw signals; the filtered force is far too slow)
+            if np.max(np.abs(force[:3])) > args.force_max:
+                abort = f'force {np.max(np.abs(force[:3])):.1f} N'
+            elif np.linalg.norm(twist[:3]) > args.speed_max:
+                abort = f'speed {np.linalg.norm(twist[:3]):.2f} m/s'
+            elif np.max(np.abs(pose[:3] - base[:3])) > args.excursion:
+                abort = f'excursion {np.max(np.abs(pose[:3] - base[:3]))*1000:.0f} mm'
+            elif not np.all(np.isfinite(tau)):
+                abort = 'non-finite torque'
+            if abort:
+                break
+
+            for k, v in (('q', q), ('qd', qd), ('pose', pose), ('twist', twist),
+                         ('force', force), ('eq', eq), ('wrench', F), ('tau', tau)):
+                L[k][i] = v
+            L['t'][i] = t
+            L['drive'][i] = drive
+            L['dt'][i] = now - t_prev
+            t_prev = now
+            i += 1
+
+            torque_cmd(tau.tolist())
+            if i % 250 == 0:
+                f_now = args.f0 * (args.f1 / args.f0) ** (t / args.duration)
+                print(f'  t={t:5.1f}s  f={f_now:6.2f}Hz  '
+                      f'|dev|={np.max(np.abs(pose[:3]-base[:3]))*1000:5.1f}mm  '
+                      f'|F|={np.linalg.norm(force[:3]):5.1f}N', end='\r')
+            ctrl.waitPeriod(ts)
+    except KeyboardInterrupt:
+        abort = 'interrupted'
+    finally:
+        for _ in range(5):
+            torque_cmd([0.0] * 6)
+        ctrl.stopJ(2.0)
+        ctrl.stopScript()
+
+    print(f'\n{"ABORTED: " + abort if abort else "complete"}   {i} samples')
+    if i < 100:
+        print('too few samples to be useful')
+        return
+
+    out = {k: v[:i] for k, v in L.items()}
+    out.update(dict(dt_nominal=dt, axis=axis, mode=mode, f0=args.f0, f1=args.f1,
+                    duration=args.duration, amp=args.amp, base=base,
+                    K=K, D=D, f_c=imp.f_c, ref_inertia=ref, tcp=tcp,
+                    aborted=abort or ''))
+    np.savez_compressed(args.out, **out)
+    late = np.sum(out['dt'][1:] > 3 * dt)
+    print(f'rate {i/out["t"][-1]:.0f} Hz, {late} late ticks '
+          f'(worst {out["dt"][1:].max()*1000:.1f} ms)')
+    print(f'saved {args.out}')
+    print(f'\n  python test-impedance2.py analyze {args.out}')
+
+
+# ======================================================================
+# analyze
+# ======================================================================
+def cmd_analyze(args):
+    from scipy import signal
+    d = np.load(args.file, allow_pickle=True)
+    axis = int(d['axis'])
+    mode = str(d['mode'])
+    fs = 1.0 / float(d['dt_nominal'])
+    name = AXES[axis]
+    print(f'{args.file}: mode={mode} axis={name} '
+          f'{float(d["f0"])}-{float(d["f1"])} Hz, {len(d["t"])} samples @ {fs:.0f} Hz')
+    if str(d['aborted']):
+        print(f'  NOTE: run aborted ({d["aborted"]}) -- the sweep is incomplete')
+    print(f'  K = {np.round(d["K"], 1)}')
+    print(f'  D = {np.round(d["D"], 1)}')
+
+    if mode == 'setpoint':
+        u = d['eq'][:, axis] - d['base'][axis] if axis < 3 else d['drive']
+        y = (d['pose'][:, axis] - d['base'][axis]) if axis < 3 else None
+        if y is None:
+            # rotation: project the orientation error onto the driven axis
+            y = np.array([pose_error(d['base'], p)[3:][axis - 3] for p in d['pose']])
+            y = -y
+        label = 'eq -> actual  (closed loop)'
+    else:
+        u = d['wrench'][:, axis]
+        v = d['twist'][:, axis]
+        y = np.gradient(v, d['t'])           # acceleration
+        label = 'wrench -> accel  (plant)'
+
+    nper = min(4096, len(u) // 4)
+    f, Puu = signal.welch(u, fs, nperseg=nper)
+    _, Puy = signal.csd(u, y, fs, nperseg=nper)
+    H = Puy / np.maximum(Puu, 1e-30)
+    _, Pyy = signal.welch(y, fs, nperseg=nper)
+    coh = np.abs(Puy) ** 2 / np.maximum(Puu * Pyy, 1e-30)
+
+    band = (f >= float(d['f0'])) & (f <= float(d['f1'])) & (coh > args.min_coh)
+    if not band.any():
+        print('  no frequency bins with usable coherence; longer run or larger amplitude')
+        return
+
+    print(f'\n{label}      (bins with coherence > {args.min_coh})')
+    print(f'{"f [Hz]":>8} {"|H|":>12} {"dB":>8} {"phase":>8} {"coh":>6}')
+    fb, Hb, cb = f[band], H[band], coh[band]
+    mag = np.abs(Hb)
+    for k in np.unique(np.linspace(0, len(fb) - 1, min(18, len(fb))).astype(int)):
+        print(f'{fb[k]:8.2f} {mag[k]:12.4g} {20*np.log10(max(mag[k],1e-12)):8.1f} '
+              f'{np.degrees(np.angle(Hb[k])):8.0f} {cb[k]:6.2f}')
+
+    pk = np.argmax(mag)
+    print(f'\npeak |H| at {fb[pk]:.2f} Hz  ({fb[pk]*2*np.pi:.1f} rad/s)')
+    if mode == 'setpoint':
+        dc = mag[:max(1, len(mag) // 20)].mean()
+        Q = mag[pk] / max(dc, 1e-12)
+        print(f'  DC gain {dc:.3f}   peak/DC {Q:.2f}')
+        if Q > 1.05:
+            print(f'  => resonant, zeta ~ {1/(2*Q):.2f}   (design assumed '
+                  f'{float(d["D"][axis])/(2*np.sqrt(float(d["K"][axis])*float(d["ref_inertia"][axis]))):.2f})')
+        else:
+            print('  => no resonant peak: overdamped or the drive is too weak')
+        if dc < 0.5:
+            print(f'  WARNING DC gain {dc:.2f} << 1: the loop is not tracking the '
+                  f'setpoint (friction deadband or saturation)')
+    else:
+        lo = mag[:max(1, len(mag) // 10)].mean()
+        print(f'  low-frequency |accel/F| = {lo:.4g}  -> apparent mass {1/max(lo,1e-12):.2f}')
+        print(f'  model says inertia_d[{name}] = {float(d["ref_inertia"][axis]):.3f}')
+
+    late = np.sum(d['dt'][1:] > 3 * float(d['dt_nominal']))
+    print(f'\nloop: {late} late ticks, worst {d["dt"][1:].max()*1000:.1f} ms')
+
+    if args.plot:
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+        ax[0].loglog(f[1:], np.abs(H[1:])); ax[0].set_ylabel('|H|')
+        ax[1].semilogx(f[1:], np.degrees(np.angle(H[1:]))); ax[1].set_ylabel('phase [deg]')
+        ax[2].semilogx(f[1:], coh[1:]); ax[2].set_ylabel('coherence')
+        ax[2].set_xlabel('Hz'); ax[0].set_title(f'{label}  axis {name}')
+        for a in ax:
+            a.grid(True, which='both', alpha=0.3)
+            a.axvline(float(d['f0']), color='k', ls=':'); a.axvline(float(d['f1']), color='k', ls=':')
+        plt.tight_layout(); plt.show()
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest='cmd', required=True)
+
+    c = sub.add_parser('chirp', help='run a frequency sweep and log it')
+    c.add_argument('--mode', choices=('setpoint', 'wrench'), default='setpoint')
+    c.add_argument('--axis', choices=AXES, default='x')
+    c.add_argument('--amp', type=float, default=0.002,
+                   help='m / rad (setpoint) or N / Nm (wrench). Start small.')
+    c.add_argument('--f0', type=float, default=0.2)
+    c.add_argument('--f1', type=float, default=40.0)
+    c.add_argument('--duration', type=float, default=30.0)
+    c.add_argument('--ramp', type=float, default=1.0, help='fade in/out [s]')
+    c.add_argument('--hold-k', type=float, default=200.0,
+                   help='wrench mode: stiffness that holds position while driving')
+    c.add_argument('--zeta', type=float, default=1.0)
+    c.add_argument('--lam-dt-max', type=float, default=4.0,
+                   help='discrete damping bound; raise to test a stiffer loop')
+    c.add_argument('--fc-nm', default=None, help='6 per-joint Coulomb torques [Nm]')
+    c.add_argument('--no-friction', action='store_true',
+                   help='disable friction feedforward (to identify it)')
+    c.add_argument('--force-max', type=float, default=60.0)
+    c.add_argument('--speed-max', type=float, default=0.5)
+    c.add_argument('--excursion', type=float, default=0.05, help='abort beyond [m]')
+    c.add_argument('--watchdog', type=float, default=10.0)
+    c.add_argument('--out', default='chirp.npz')
+
+    a = sub.add_parser('analyze', help='frequency response from a logged sweep')
+    a.add_argument('file')
+    a.add_argument('--min-coh', type=float, default=0.5)
+    a.add_argument('--plot', action='store_true')
+
+    args = p.parse_args()
+    (cmd_chirp if args.cmd == 'chirp' else cmd_analyze)(args)
+
+
+if __name__ == '__main__':
+    main()
