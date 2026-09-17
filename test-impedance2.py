@@ -130,6 +130,11 @@ def cmd_chirp(args):
     q0 = np.array(recv.getActualQ())
     lam = kin.sample_inertia(q0)
     ref = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
+    if args.inertia:
+        meas = np.array([float(v) for v in args.inertia.split(',')])
+        lam = kin.rescale_inertia(lam, ref, meas)
+        print(f'inertia    : MEASURED {np.round(meas, 3)}  (model {np.round(ref, 3)})')
+        ref = meas
     imp.calibrate(ref, zeta=args.zeta, dt=dt, lam_samples=lam,
                   lam_dt_max=args.lam_dt_max)
     if args.fc_nm:
@@ -451,6 +456,9 @@ def main():
     c.add_argument('--hold-k', type=float, default=200.0,
                    help='wrench mode: stiffness that holds position while driving')
     c.add_argument('--zeta', type=float, default=1.0)
+    c.add_argument('--inertia', default=None,
+                   help='6 measured task inertias from `analyze`, comma separated. '
+                        'Overrides the URDF model, which is wrong by 1.5-4x here.')
     c.add_argument('--lam-dt-max', type=float, default=4.0,
                    help='discrete damping bound; raise to test a stiffer loop')
     c.add_argument('--fc-nm', default=None, help='6 per-joint Coulomb torques [Nm]')

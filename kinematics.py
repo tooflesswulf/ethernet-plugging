@@ -81,6 +81,27 @@ class URKin:
         Rb = self.data.oMf[self.f_base].rotation
         return np.block([[Rb.T, np.zeros((3, 3))], [np.zeros((3, 3)), Rb.T]]) @ J
 
+    @staticmethod
+    def rescale_inertia(lam, model_diag, measured_diag):
+        """
+        Rescale sampled task-inertia matrices so their diagonal matches a
+        MEASURED inertia, preserving the coupling structure.
+
+        Chirp identification on this arm found the URDF-derived inertia wrong by
+        1.5-4.2x on five axes and 0.48x on rz -- not a consistent factor, so no
+        single scalar fixes it. Since the discrete damping bound is computed from
+        Lambda^-1, an overestimate makes that bound too PERMISSIVE, which is why
+        settings the model called safe still diverged. Correct it here:
+
+            Lambda' = S Lambda S,   S = diag(sqrt(I_measured / I_model))
+
+        which reproduces the measured diagonal exactly and scales the off-diagonal
+        terms consistently.
+        """
+        s = np.sqrt(np.asarray(measured_diag, float) / np.asarray(model_diag, float))
+        S = np.diag(s)
+        return np.array([S @ L @ S for L in np.asarray(lam)])
+
     def sample_inertia(self, q0, spread=0.5, n=200, seed=0):
         """Full task-inertia matrices sampled around q0. Shape (n, 6, 6)."""
         rng = np.random.default_rng(seed)
