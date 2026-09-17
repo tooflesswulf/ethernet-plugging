@@ -34,6 +34,22 @@ def pose_error(actual, desired):
     return np.r_[desired[:3] - actual[:3], (R_des * R_act.inv()).as_rotvec()]
 
 
+def saturate_direction(v, limit):
+    """
+    Scale v down uniformly until it fits inside `limit`, preserving direction.
+
+    NOT per-axis clipping. Clipping one component of a shaped wrench breaks the
+    Lambda*Lambda_d^-1 combination that makes it decoupled: a pure rotation
+    command clipped only in its rotational component still delivers its full
+    translational component, so the arm translates instead of rotating.
+    """
+    v = np.asarray(v, float)
+    limit = np.asarray(limit, float)
+    over = np.abs(v) / np.maximum(limit, 1e-12)
+    m = float(np.max(over))
+    return v / m if m > 1.0 else v
+
+
 def friction_feedforward(qd, tau_cmd, f_c, v_eps=0.05, t_eps=4.0, assist=0.5):
     """
     Per-joint Coulomb friction compensation. Not optional on this arm: it is the
@@ -69,16 +85,18 @@ class CartesianImpedance:
     """
 
     def __init__(self, f_c=None, tau_rated=None):
-        # Damping from D = 2*zeta*sqrt(K*m) at zeta=1 with the measured task
-        # inertia (8.35 kg, 0.085 kg m^2). The sampled-contact bound
-        # D > K_e*dt/2 (~100 Ns/m at K_e=1e5, dt=2ms) is binding on soft axes --
-        # damping, not stiffness, is what buys contact stability.
-        self.K_free = np.array([1500., 1500., 1500., 30., 30., 30.])
+        # K only; D is DERIVED in calibrate() from the measured task inertia, so
+        # the values below are placeholders that Env overwrites. Rotational K is
+        # sized for bandwidth parity with translation (w_n ~ 10-14 rad/s) -- at
+        # K_rot=30 the ry axis ran at 5.8 rad/s and felt unresponsive.
+        self.K_free = np.array([1500., 1500., 1500., 80., 80., 80.])
         self.D_free = np.array([225., 225., 225., 3.2, 3.2, 3.2])
-        self.K_contact = np.array([800., 800., 400., 20., 20., 30.])
+        self.K_contact = np.array([800., 800., 400., 60., 60., 80.])
         self.D_contact = np.array([165., 165., 120., 2.6, 2.6, 3.2])
 
-        self.F_sat = np.array([40., 40., 40., 5., 5., 5.])
+        # Rotational limit sized to what the joints can actually deliver at the
+        # TCP (13.5 Nm here). The old 5 Nm clipped every shaped rotation.
+        self.F_sat = np.array([40., 40., 40., 12., 12., 12.])
         self.tau_sat = 0.25 * (np.asarray(tau_rated, float)
                                if tau_rated is not None
                                else np.array([330., 330., 150., 54., 54., 54.]))
@@ -101,24 +119,18 @@ class CartesianImpedance:
         # +x force produces 3.5x more ANGULAR than linear acceleration. Without
         # shaping the tool visibly rotates before it translates.
         #
-        # F = Lambda * Lambda_d^-1 * (K e - D xd) decouples it, at ~38 us.
-        # Lambda is an inverse of (J M^-1 J^T), which is ill-conditioned near
-        # singularities (cond up to 2.5e6 here), so shaping is faded out when the
-        # conditioning is bad rather than trusted blindly.
-        # OFF by default. As written this does more harm than good on this arm:
-        # Lambda's translation<->rotation cross terms are ~3.5 kg m, and dividing
-        # them by the rotational inertia_d of 0.085 kg m^2 amplifies them ~41x.
-        # Measured ||Lambda * Lambda_d^-1|| = 43.8, and a pure rotational error at
-        # the leash commanded 207 N of translation -- full-scale force in the
-        # wrong direction, which trips the UR end-effector speed limit.
+        # F = Lambda * Lambda_d^-1 * (K e - D xd) decouples it exactly, at ~38 us.
         #
-        # The mixed units (N vs Nm, m vs rad) are the trap: the normalised
-        # coupling looks like 0.98, but in raw units the cross terms dwarf the
-        # rotational diagonal. shape_max_gain bounds it if re-enabled.
-        # Safe once inertia_d is calibrated to the real TCP: ||S|| drops from a
-        # median of 44.9 to 9.4, and a 10 N x command needs 11 N / 2.9 Nm, well
-        # inside F_sat, while decoupling exactly. shape_max_gain still bounds the
-        # near-singular tail (max ||S|| ~61).
+        # This is only safe when inertia_d is calibrated to the REAL TCP. With a
+        # rotational inertia_d taken at tool0 (0.085 vs a true 0.435-0.896) the
+        # transform amplified 41x: a small orientation error commanded 207 N of
+        # translation and tripped the UR end-effector speed limit. Mixed units are
+        # the trap -- the normalised coupling reads 0.98, but in raw units the
+        # cross terms (~3.5 kg m) dwarf the rotational diagonal. Calibrated,
+        # ||S|| median is 9.4 and a 10 N command needs 11 N / 2.9 Nm.
+        #
+        # Saturation must also be direction-preserving (saturate_direction), or
+        # clipping one component turns a shaped rotation into a translation.
         self.shape_inertia = True
         self.inertia_d = np.array([12.19, 7.51, 7.56, 0.435, 0.896, 0.151])
         self.shape_max_gain = 20.0   # cap on ||Lambda * Lambda_d^-1||
@@ -225,13 +237,13 @@ class CartesianImpedance:
                     S = S * (self.shape_max_gain / g)
                 F = (1 - a) * F + a * (S @ F)
 
-        F = np.clip(F, -self.F_sat, self.F_sat)
+        F = saturate_direction(F, self.F_sat)
 
         tau = J.T @ F - self.d_q * qd
         if np.any(self.f_c > 0):
             tau = tau + ramp * friction_feedforward(
                 qd, tau, self.f_c, self.fc_veps, self.fc_teps, self.fc_assist)
-        tau = np.clip(tau, -self.tau_sat, self.tau_sat)
+        tau = saturate_direction(tau, self.tau_sat)
         return tau, F, e
 
 

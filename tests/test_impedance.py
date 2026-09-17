@@ -329,6 +329,63 @@ def test_shaping_amplification_is_bounded(kin):
     assert np.all(np.abs(F) <= imp.F_sat + 1e-9)
 
 
+def test_saturate_direction_preserves_direction():
+    from impedance import saturate_direction
+    v = np.array([80., 10., -5., 1., 2., -1.])
+    lim = np.array([40., 40., 40., 12., 12., 12.])
+    s = saturate_direction(v, lim)
+    assert np.all(np.abs(s) <= lim + 1e-9)
+    assert np.allclose(s / np.linalg.norm(s), v / np.linalg.norm(v))   # same direction
+    # under the limit it is a no-op
+    small = np.array([1., 1., 1., 0.1, 0.1, 0.1])
+    assert np.allclose(saturate_direction(small, lim), small)
+
+
+def test_saturation_keeps_a_rotation_a_rotation(kin):
+    """
+    Regression: per-axis clipping of a shaped wrench delivered the translational
+    component in full while clipping the rotational one, so a commanded rotation
+    came out as a translation. Direction-preserving scaling keeps it decoupled.
+    """
+    from impedance import saturate_direction
+    imp = _imp()
+    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    Lam = kin.task_inertia(q)
+    imp.calibrate(kin.reference_inertia(q))
+    K, _ = imp.gains(0.0)
+    _, rot = imp.leash(0.0)
+
+    F = (Lam / imp.inertia_d) @ np.r_[0, 0, 0, 0, K[4] * rot, 0]
+    a_scaled = np.linalg.solve(Lam, saturate_direction(F, imp.F_sat))
+    a_clipped = np.linalg.solve(Lam, np.clip(F, -imp.F_sat, imp.F_sat))
+
+    assert np.linalg.norm(a_scaled[:3]) < 1e-9          # no spurious translation
+    assert np.linalg.norm(a_scaled[3:]) > 1.0           # rotation actually happens
+    assert np.linalg.norm(a_clipped[:3]) > 1.0          # clipping leaks translation
+
+
+def test_rotational_authority_matches_the_joints(kin):
+    """F_sat[3:] was 5 Nm while the joints can deliver ~13.5 Nm at the TCP."""
+    imp = _imp()
+    assert np.all(imp.F_sat[3:] >= 10.0)
+    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    J = kin.jacobian(q)
+    for k in range(3):
+        u = np.r_[0, 0, 0, np.eye(3)[k]]
+        reachable = np.min(imp.tau_sat / np.abs(J.T @ u + 1e-12))
+        assert imp.F_sat[3 + k] <= reachable, 'F_sat asks for more moment than tau_sat allows'
+
+
+def test_rotational_bandwidth_is_comparable_to_translation(kin):
+    """At K_rot=30 the ry axis ran at 5.8 rad/s vs ~14 for translation: sluggish."""
+    imp = _imp()
+    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    I = kin.reference_inertia(q)
+    imp.calibrate(I)
+    w = np.sqrt(imp.K_free / I)
+    assert w[3:].min() > 0.5 * w[:3].min()
+
+
 def test_shaping_decouples_a_pure_translation(kin):
     """The point of the whole thing: +x force must not produce off-axis motion."""
     imp = _imp()
