@@ -85,13 +85,18 @@ class CartesianImpedance:
     """
 
     def __init__(self, f_c=None, tau_rated=None):
-        # K only; D is DERIVED in calibrate() from the measured task inertia, so
-        # the values below are placeholders that Env overwrites. Rotational K is
-        # sized for bandwidth parity with translation (w_n ~ 10-14 rad/s) -- at
-        # K_rot=30 the ry axis ran at 5.8 rad/s and felt unresponsive.
-        self.K_free = np.array([1500., 1500., 1500., 50., 50., 50.])
+        # K only; D is DERIVED in calibrate() from the measured inertia.
+        #
+        # K_rot = 200 is measured, not guessed. The TCP sits 12.1 cm from the
+        # payload's centre of mass, so ANY force at the TCP torques the tool --
+        # a 15 N x command makes 1.85 Nm about y. K_rot only decides how far it
+        # tilts before the spring balances. Chirp at K_rot 50 -> 200 (zeta held
+        # at 0.70) cut off-axis ry from 15.07 to 3.77 mrad, a 4x improvement
+        # matching the predicted M/K scaling, and nearly halved peak force
+        # (13.5 -> 7.3 N). rx and z improved too; x was unchanged.
+        self.K_free = np.array([1500., 1500., 1500., 200., 200., 200.])
         self.D_free = np.array([225., 225., 225., 3.2, 3.2, 3.2])
-        self.K_contact = np.array([800., 800., 400., 40., 40., 50.])
+        self.K_contact = np.array([800., 800., 400., 160., 160., 200.])
         self.D_contact = np.array([165., 165., 120., 2.6, 2.6, 3.2])
 
         # Rotational limit sized to what the joints can actually deliver at the

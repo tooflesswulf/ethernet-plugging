@@ -72,7 +72,10 @@ class Env:
         workspace=None,
         watchdog_hz=10.0,
         gain_ramp_time=0.3,
-        damping_zeta=1.0,
+        # 0.7 is measured: it flattened the x resonance (peak/DC 1.75 -> 1.02)
+        # with no late ticks. zeta=1.0 (D=156) trips the 60 N force limit, so the
+        # empirical stability boundary sits between D=109 and D=156.
+        damping_zeta=0.7,
         mode_blend_time=0.2,
         late_window=5.0,
         late_max=25,
