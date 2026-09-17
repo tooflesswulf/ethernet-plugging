@@ -89,9 +89,9 @@ class CartesianImpedance:
         # the values below are placeholders that Env overwrites. Rotational K is
         # sized for bandwidth parity with translation (w_n ~ 10-14 rad/s) -- at
         # K_rot=30 the ry axis ran at 5.8 rad/s and felt unresponsive.
-        self.K_free = np.array([1500., 1500., 1500., 80., 80., 80.])
+        self.K_free = np.array([1500., 1500., 1500., 50., 50., 50.])
         self.D_free = np.array([225., 225., 225., 3.2, 3.2, 3.2])
-        self.K_contact = np.array([800., 800., 400., 60., 60., 80.])
+        self.K_contact = np.array([800., 800., 400., 40., 40., 50.])
         self.D_contact = np.array([165., 165., 120., 2.6, 2.6, 3.2])
 
         # Rotational limit sized to what the joints can actually deliver at the
@@ -113,33 +113,27 @@ class CartesianImpedance:
                                 # phase lag in the damping term is the original bug.
         self._xd_f = np.zeros(6)
 
-        # ---- inertia shaping -------------------------------------------------
-        # The arm's natural task-space inertia is strongly coupled: on this arm
-        # the translation<->rotation terms are near unity (0.98, -0.99), so a pure
-        # +x force produces 3.5x more ANGULAR than linear acceleration. Without
-        # shaping the tool visibly rotates before it translates.
+        # ---- inertia shaping: OFF, and not merely untuned -------------------
+        # The arm's task inertia is strongly coupled, so F = Lambda*Lambda_d^-1*u
+        # decouples it only by near-exact cancellation. Measured here for a pure
+        # ry command: the six wrench components individually contribute ~266 m/s^2
+        # of linear acceleration that must cancel to 0.00. A 1% model error leaves
+        # 2.66 m/s^2; this arm's 5 N friction floor alone maps to 12.6 m/s^2 and
+        # its ~7 N gravity bias to 64.8. The cancellation cannot hold, and what
+        # survives is the large translational component of the shaped wrench --
+        # a rotation command comes out as a big translation.
         #
-        # F = Lambda * Lambda_d^-1 * (K e - D xd) decouples it exactly, at ~38 us.
+        # cond(Lambda) ~ 1.7e4 was the early warning: an inverse that
+        # ill-conditioned will not support a law built on exact cancellation.
+        # Plain J^T impedance commands a pure moment for a pure rotation, so the
+        # coupling shows up only in the RESPONSE, bounded and physical.
         #
-        # This is only safe when inertia_d is calibrated to the REAL TCP. With a
-        # rotational inertia_d taken at tool0 (0.085 vs a true 0.435-0.896) the
-        # transform amplified 41x: a small orientation error commanded 207 N of
-        # translation and tripped the UR end-effector speed limit. Mixed units are
-        # the trap -- the normalised coupling reads 0.98, but in raw units the
-        # cross terms (~3.5 kg m) dwarf the rotational diagonal. Calibrated,
-        # ||S|| median is 9.4 and a 10 N command needs 11 N / 2.9 Nm.
-        #
-        # Saturation must also be direction-preserving (saturate_direction), or
-        # clipping one component turns a shaped rotation into a translation.
-        self.shape_inertia = True
+        # Left in place (disabled) because the measurements above are the reason.
+        self.shape_inertia = False
         self.inertia_d = np.array([12.19, 7.51, 7.56, 0.435, 0.896, 0.151])
-        self.shape_max_gain = 20.0   # cap on ||Lambda * Lambda_d^-1||
-        # Thresholds must sit ABOVE the working region, or the shaping factor
-        # fades in and out with pose and the control law itself keeps changing --
-        # which reads as wiggling. Measured here: cond median 17.5e3, p95 23e3,
-        # up to 2.5e6 only near actual singularities.
-        self.cond_full = 1e5         # full shaping below this
-        self.cond_max = 1e6          # no shaping above this
+        self.shape_max_gain = 20.0
+        self.cond_full = 1e5
+        self.cond_max = 1e6
 
     def calibrate(self, inertia, zeta=1.0, d_min=100.0):
         """
