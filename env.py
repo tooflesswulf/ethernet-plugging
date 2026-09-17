@@ -154,21 +154,21 @@ class Env:
         self.kin = URKin(self.tcp_offset)
         self.imp = CartesianImpedance(f_c=coulomb_friction,
                                       tau_rated=self.kin.tau_rated)
-        # Derive desired inertia and damping from the ACTUAL kinematics, including
-        # whatever TCP offset is configured. Hardcoding these is how the rotational
-        # damping ended up at zeta 0.31 -- the reference was measured at tool0,
-        # without the 154 mm TCP offset that dominates rotational inertia.
-        lam = self.kin.sample_inertia(self.recv.getActualQ())
-        self.ref_inertia = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
-        # dt + lam_samples apply the DISCRETE stability bound on damping. Without
-        # them the loop diverges in ~20 ms on this arm.
-        self.imp.calibrate(self.ref_inertia, zeta=damping_zeta,
-                           dt=self.dt, lam_samples=lam)
-        worst = max(np.abs(np.linalg.eigvals(
-            np.linalg.solve(L, np.diag(self.imp.D_free)))).max() for L in lam)
-        print(f'task inertia: {np.round(self.ref_inertia, 3)}')
-        print(f'D_free      : {np.round(self.imp.D_free, 1)}  '
-              f'(lambda*dt {worst * self.dt:.2f}, must stay well under ~8)')
+        # Apparent inertia is payload + a constant residual -- NOT the arm's task
+        # inertia. The UR firmware compensates its own dynamics inside
+        # direct_torque, so the plant we push on is the tool. Chirp identification
+        # measured 3.58 kg (CV 16% across poses) where the kinematic model
+        # predicted 6.5-13.1, and adding a 1 kg mass moved it ~1:1.
+        #
+        # Because it scales with the payload, swapping the tool now updates the
+        # damping automatically.
+        self.payload_mass = self.recv.getPayload()
+        self.ref_inertia = self.imp.effective_inertia(self.payload_mass,
+                                                      self.tcp_offset)
+        self.imp.calibrate(self.ref_inertia, zeta=damping_zeta)
+        print(f'payload     : {self.payload_mass:.3f} kg')
+        print(f'inertia     : {np.round(self.ref_inertia, 3)}  (payload + residual)')
+        print(f'D_free      : {np.round(self.imp.D_free, 1)}   zeta {damping_zeta}')
 
         self.safety = SafetyMonitor(workspace=workspace, dt=self.dt)
         self.watchdog_hz = watchdog_hz
@@ -591,10 +591,9 @@ class Env:
             elapsed = time.perf_counter() - self._t_start_ctrl
             ramp = min(1.0, elapsed / self.gain_ramp_time) if self.gain_ramp_time > 0 else 1.0
             J = self.kin.jacobian(q)
-            Lam = self.kin.task_inertia(q) if self.imp.shape_inertia else None
             tau, F, _ = self.imp.compute(
                 q, qd, np.asarray(actual_pose, float), np.asarray(eq_pose, float),
-                twist, J, blend=self._mode_blend, ramp=ramp, task_inertia=Lam,
+                twist, J, blend=self._mode_blend, ramp=ramp,
             )
             reason = self.safety.check(q, qd, np.asarray(actual_pose, float),
                                        twist, np.asarray(actual_force, float), tau)

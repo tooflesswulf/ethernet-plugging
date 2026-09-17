@@ -224,73 +224,6 @@ def test_leash_respects_hard_caps():
     assert np.all(pos <= 0.001 + 1e-12) and rot <= 0.001 + 1e-12
 
 
-def test_inertia_shaping_decouples_translation_from_rotation():
-    """
-    Unshaped, a pure +x force on this arm gives 3.5x more angular than linear
-    acceleration -- the tool rotates before it translates.
-    """
-    kin = URKin(TCP)
-    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
-    Lam = kin.task_inertia(q)
-    F = np.r_[1., 0, 0, 0, 0, 0]
-
-    a_un = np.linalg.solve(Lam, F)
-    assert np.linalg.norm(a_un[3:]) / np.linalg.norm(a_un[:3]) > 2.0
-
-    imp = _imp()
-    a_sh = np.linalg.solve(Lam, Lam @ (F / imp.inertia_d))
-    assert np.linalg.norm(a_sh[3:]) / np.linalg.norm(a_sh[:3]) < 1e-6
-
-
-def test_shaping_fades_out_when_ill_conditioned():
-    """cond(Lambda) reaches 2.5e6 near singularities; Lambda^-1 must not be trusted."""
-    imp = _imp()
-    imp.shape_inertia = True
-    assert imp.shaping_factor(np.eye(6)) == 1.0
-    assert imp.shaping_factor(np.diag([1e-9, 1, 1, 1, 1, 1.0])) == 0.0
-    mid = 0.5 * (imp.cond_full + imp.cond_max)
-    assert imp.shaping_factor(np.diag([1 / mid, 1, 1, 1, 1, 1.0])) == pytest.approx(
-        (imp.cond_max - mid) / (imp.cond_max - imp.cond_full))
-
-
-def test_working_region_is_fully_shaped():
-    """
-    Regression: cond_full was 1e4 while the working region's median cond is
-    ~17.5e3, so shaping faded in and out with pose and the control law kept
-    changing -- which shows up as the arm wiggling.
-
-    Fading near an actual singularity is correct; fading across ordinary poses is
-    the bug. With the old thresholds the median factor was 0.82.
-    """
-    kin = URKin(TCP)
-    imp = _imp()
-    imp.shape_inertia = True
-    rng = np.random.default_rng(0)
-    base = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
-    factors = np.array([imp.shaping_factor(kin.task_inertia(base + rng.uniform(-0.6, 0.6, 6)))
-                        for _ in range(400)])
-    assert np.median(factors) == 1.0
-    assert (factors == 1.0).mean() > 0.98, (
-        f'only {(factors == 1.0).mean():.1%} of ordinary poses fully shaped; '
-        'the control law changes with pose')
-
-
-def test_inertia_d_is_tcp_correct_not_tool0():
-    """
-    Regression, and the root cause of several others: the reference inertia was
-    measured at tool0, without the 154 mm TCP offset that dominates rotational
-    terms. tool0 gives ~[0.08, 0.21, 0.03] kg m^2; the real TCP gives
-    ~[0.44, 0.90, 0.15]. The stale value underdamped every rotational axis and
-    made inertia shaping over-amplify 41x.
-    """
-    imp = CartesianImpedance()
-    assert np.all(imp.inertia_d[3:] > 0.1), 'rotational inertia_d looks like tool0'
-
-    kin = URKin(TCP)
-    ref = kin.reference_inertia(np.array([0, -1.4, 1.4, -1.5, -1.5, 0.]))
-    assert np.allclose(imp.inertia_d, ref, rtol=0.25)
-
-
 def test_calibrate_gives_critical_damping():
     """D = 2*zeta*sqrt(K*I) per axis, from MEASURED inertia -- not the table."""
     kin = URKin(TCP)
@@ -301,78 +234,6 @@ def test_calibrate_gives_critical_damping():
         zeta = D / (2 * np.sqrt(K * ref))
         assert np.allclose(zeta[3:], 1.0, atol=1e-9), 'rotational axes must be critically damped'
         assert np.all(zeta[:3] >= 1.0 - 1e-9)          # translational may be raised by d_min
-
-
-def test_calibrate_bounds_damping_for_discrete_stability(kin):
-    """
-    Regression: per-axis zeta=1 is a continuous-time design. At 500 Hz an
-    explicit damper needs lambda(Lambda^-1 D)*dt small, and Lambda has
-    low-inertia directions where zeta=1 gave lambda*dt = 23 -- the discrete loop
-    diverged in ~20 ms and tripped the 60 N force limit.
-    """
-    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
-    lam = kin.sample_inertia(q, n=40)
-    I = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
-
-    unbounded = _imp()
-    unbounded.calibrate(I, zeta=1.0)
-    worst = max(np.abs(np.linalg.eigvals(
-        np.linalg.solve(L, np.diag(unbounded.D_free)))).max() for L in lam)
-    assert worst * 0.002 > 8, 'unbounded damping really is past the stability boundary'
-
-    bounded = _imp()
-    bounded.calibrate(I, zeta=1.0, dt=0.002, lam_samples=lam, lam_dt_max=4.0)
-    worst_b = max(np.abs(np.linalg.eigvals(
-        np.linalg.solve(L, np.diag(bounded.D_free)))).max() for L in lam)
-    assert worst_b * 0.002 <= 4.0 + 1e-6
-    assert np.all(bounded.D_free <= unbounded.D_free + 1e-9)
-
-
-def test_discrete_loop_does_not_diverge(kin):
-    """Simulate the sampled loop -- the only check that catches this class of bug."""
-    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
-    lam = kin.sample_inertia(q, n=20)
-    I = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
-    imp = _imp()
-    imp.calibrate(I, dt=0.002, lam_samples=lam)
-    K, D = imp.gains(0.0)
-    dt, alpha = 0.002, imp.vel_alpha
-    for L in lam[:10]:
-        Li = np.linalg.inv(L)
-        for d in range(6):
-            x = np.zeros(6); x[d] = 1e-4
-            v = np.zeros(6); vf = np.zeros(6)
-            for _ in range(2000):
-                vf = alpha * v + (1 - alpha) * vf
-                v = v + dt * (Li @ (-K * x - D * vf))
-                x = x + dt * v
-            assert np.all(np.isfinite(x)) and np.linalg.norm(x) < 1e-3
-
-
-def test_calibrate_enforces_contact_damping_bound():
-    """D > K_e*dt/2 (~100 Ns/m) on translation, or stiff contact chatters."""
-    imp = _imp()
-    imp.calibrate(np.array([0.5, 0.5, 0.5, 0.01, 0.01, 0.01]), zeta=1.0, d_min=100.0)
-    assert np.all(imp.D_free[:3] >= 100.0)
-    assert np.all(imp.D_contact[:3] >= 100.0)
-
-
-def test_shaping_amplification_is_bounded(kin):
-    """
-    With a TCP-correct inertia_d the transform is usable (||S|| median 9.4 vs
-    44.9 stale), but the near-singular tail still reaches ~61, so it stays capped.
-    """
-    imp = _imp()
-    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
-    Lam = kin.task_inertia(q)
-    assert np.linalg.norm(Lam / imp.inertia_d, 2) < 20
-
-    _, rot = imp.leash(0.0)
-    eq = HOME.copy()
-    eq[3:] = (R.from_rotvec([0, rot, 0]) * R.from_rotvec(HOME[3:])).as_rotvec()
-    _, F, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6),
-                          np.eye(6), task_inertia=Lam)
-    assert np.all(np.abs(F) <= imp.F_sat + 1e-9)
 
 
 def test_saturate_direction_preserves_direction():
@@ -432,39 +293,6 @@ def test_rotational_bandwidth_is_comparable_to_translation(kin):
     assert w[3:].min() > 0.5 * w[:3].min()
 
 
-def test_shaping_decouples_a_pure_translation(kin):
-    """The point of the whole thing: +x force must not produce off-axis motion."""
-    imp = _imp()
-    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
-    Lam = kin.task_inertia(q)
-    F = np.r_[10., 0, 0, 0, 0, 0]
-
-    a_un = np.linalg.solve(Lam, F)
-    a_sh = np.linalg.solve(Lam, (Lam / imp.inertia_d) @ F)
-    assert np.linalg.norm(a_un[1:3]) / abs(a_un[0]) > 0.1      # ~19% unshaped
-    assert np.linalg.norm(a_sh[1:3]) / abs(a_sh[0]) < 1e-9     # decoupled
-    assert np.linalg.norm(a_sh[3:]) < 1e-9
-
-
-def test_shaping_can_be_disabled():
-    imp = _imp()
-    imp.shape_inertia = False
-    assert imp.shaping_factor(np.eye(6)) == 0.0
-
-
-def test_shaping_off_leaves_law_unchanged():
-    imp = _imp()
-    eq = HOME.copy()
-    eq[0] += 0.01
-    _, F_none, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6), np.eye(6))
-    imp.reset()
-    imp.shape_inertia = False
-    _, F_off, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6), np.eye(6),
-                              task_inertia=np.eye(6))
-    assert np.allclose(F_none, F_off)
-
-
-# ------------------------------------------------------------- SafetyMonitor
 def _ok():
     return dict(q=np.zeros(6), qd=np.zeros(6), pose=HOME, twist=np.zeros(6),
                 raw_force=np.zeros(6), tau=np.zeros(6))
@@ -615,3 +443,55 @@ def test_task_inertia_plausible(kin):
     L = kin.task_inertia(np.array([0, -1.4, 1.4, -1.5, -1.5, 0]))
     m = np.diag(L)[:3]
     assert np.all(m > 1.0) and np.all(m < 50.0)
+
+
+# ------------------------------------------- measured plant (chirp identified)
+def test_effective_inertia_is_payload_plus_residual():
+    """
+    The UR firmware compensates its own dynamics inside direct_torque, so the
+    apparent inertia is the TOOL, not the arm. Chirp identification: model
+    predicted 6.5-13.1 kg, measured 3.58 (CV 16% over 2 poses x 3 axes), and a
+    1 kg added mass moved it 4.10 -> 4.98 (~1:1).
+    """
+    imp = CartesianImpedance()
+    I = imp.effective_inertia(1.62, TCP)
+    assert 3.5 < I[0] < 4.5, 'should match the measured ~4.0 kg at this payload'
+    assert np.allclose(I[:3], I[0])            # isotropic: it is the tool
+    # and it must be far below what the kinematic model claims
+    assert I[0] < 0.6 * 8.0
+
+
+def test_effective_inertia_tracks_payload_one_to_one():
+    """Adding 1 kg of payload must add 1 kg of apparent inertia."""
+    imp = CartesianImpedance()
+    a = imp.effective_inertia(1.62, TCP)
+    b = imp.effective_inertia(2.62, TCP)
+    assert b[0] - a[0] == pytest.approx(1.0)
+
+
+def test_calibrate_reproduces_the_measured_good_damping():
+    """
+    D[x] = 110 at zeta=0.7 was measured to flatten the resonance (peak/DC
+    1.75 -> 1.08) with no late ticks. The derivation must land there.
+    """
+    imp = CartesianImpedance()
+    imp.calibrate(imp.effective_inertia(1.62, TCP), zeta=0.7)
+    assert imp.D_free[0] == pytest.approx(110, rel=0.10)
+    assert np.all(imp.D_contact <= imp.D_free)
+
+
+def test_calibrate_is_critically_damped_by_construction():
+    imp = CartesianImpedance()
+    I = imp.effective_inertia(1.62, TCP)
+    for z in (0.5, 0.7, 1.0):
+        imp.calibrate(I, zeta=z)
+        assert np.allclose(imp.D_free / (2 * np.sqrt(imp.K_free * I)), z)
+        assert np.allclose(imp.D_contact / (2 * np.sqrt(imp.K_contact * I)), z)
+
+
+def test_no_model_inertia_in_the_damping_path():
+    """Regression: every damping failure traced to the kinematic Lambda."""
+    import inspect
+    src = inspect.getsource(CartesianImpedance)
+    for gone in ('shape_inertia', 'shaping_factor', 'task_inertia', 'lam_dt_max'):
+        assert gone not in src, f'{gone} should be gone from the control law'

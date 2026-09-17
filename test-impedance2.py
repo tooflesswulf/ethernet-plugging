@@ -127,16 +127,17 @@ def cmd_chirp(args):
     kin = URKin(tcp)
     imp = CartesianImpedance(tau_rated=kin.tau_rated)
 
-    q0 = np.array(recv.getActualQ())
-    lam = kin.sample_inertia(q0)
-    ref = np.median(np.diagonal(lam, axis1=1, axis2=2), axis=0)
+    # Apparent inertia is payload + residual, not the arm's task inertia -- the
+    # firmware compensates its own dynamics. --inertia overrides it for
+    # experiments that want to probe a different value.
+    payload = recv.getPayload()
     if args.inertia:
-        meas = np.array([float(v) for v in args.inertia.split(',')])
-        lam = kin.rescale_inertia(lam, ref, meas)
-        print(f'inertia    : MEASURED {np.round(meas, 3)}  (model {np.round(ref, 3)})')
-        ref = meas
-    imp.calibrate(ref, zeta=args.zeta, dt=dt, lam_samples=lam,
-                  lam_dt_max=args.lam_dt_max)
+        ref = np.array([float(v) for v in args.inertia.split(',')])
+        print(f'inertia    : OVERRIDE {np.round(ref, 3)}')
+    else:
+        ref = imp.effective_inertia(payload, tcp)
+        print(f'inertia    : {np.round(ref, 3)}  (payload {payload:.3f} kg + residual)')
+    imp.calibrate(ref, zeta=args.zeta)
     if args.fc_nm:
         imp.f_c = np.array([float(x) for x in args.fc_nm.split(',')])
     if args.no_friction:
@@ -153,8 +154,7 @@ def cmd_chirp(args):
         # Hold position weakly so it cannot drift, and inject the wrench on top.
         k = args.hold_k
         imp.K_free = np.array([k, k, k, k / 20, k / 20, k / 20], float)
-        imp.calibrate(ref, zeta=args.zeta, dt=dt, lam_samples=lam,
-                      lam_dt_max=args.lam_dt_max)
+        imp.calibrate(ref, zeta=args.zeta)
 
     K, D = imp.gains(0.0)
     print(f'\nmode       : {mode}')
@@ -457,10 +457,8 @@ def main():
                    help='wrench mode: stiffness that holds position while driving')
     c.add_argument('--zeta', type=float, default=1.0)
     c.add_argument('--inertia', default=None,
-                   help='6 measured task inertias from `analyze`, comma separated. '
-                        'Overrides the URDF model, which is wrong by 1.5-4x here.')
-    c.add_argument('--lam-dt-max', type=float, default=4.0,
-                   help='discrete damping bound; raise to test a stiffer loop')
+                   help='6 task inertias, comma separated. Overrides the '
+                        'payload+residual estimate, for probing other values.')
     c.add_argument('--fc-nm', default=None, help='6 per-joint Coulomb torques [Nm]')
     c.add_argument('--no-friction', action='store_true',
                    help='disable friction feedforward (to identify it)')

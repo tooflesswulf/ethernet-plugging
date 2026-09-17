@@ -113,66 +113,65 @@ class CartesianImpedance:
                                 # phase lag in the damping term is the original bug.
         self._xd_f = np.zeros(6)
 
-        # ---- inertia shaping: OFF, and not merely untuned -------------------
-        # The arm's task inertia is strongly coupled, so F = Lambda*Lambda_d^-1*u
-        # decouples it only by near-exact cancellation. Measured here for a pure
-        # ry command: the six wrench components individually contribute ~266 m/s^2
-        # of linear acceleration that must cancel to 0.00. A 1% model error leaves
-        # 2.66 m/s^2; this arm's 5 N friction floor alone maps to 12.6 m/s^2 and
-        # its ~7 N gravity bias to 64.8. The cancellation cannot hold, and what
-        # survives is the large translational component of the shaped wrench --
-        # a rotation command comes out as a big translation.
-        #
-        # cond(Lambda) ~ 1.7e4 was the early warning: an inverse that
-        # ill-conditioned will not support a law built on exact cancellation.
-        # Plain J^T impedance commands a pure moment for a pure rotation, so the
-        # coupling shows up only in the RESPONSE, bounded and physical.
-        #
-        # Left in place (disabled) because the measurements above are the reason.
-        self.shape_inertia = False
-        self.inertia_d = np.array([12.19, 7.51, 7.56, 0.435, 0.896, 0.151])
-        self.shape_max_gain = 20.0
-        self.cond_full = 1e5
-        self.cond_max = 1e6
+        # Inertia shaping was removed. It tried to decouple Lambda by commanding
+        # F = Lambda*Lambda_d^-1*u, which needs near-exact cancellation (266 m/s^2
+        # of individual contributions summing to 0 for a pure rotation) against a
+        # 5 N friction floor -- impossible here, and it turned rotation commands
+        # into large translations. It was also modelling a plant the UR firmware
+        # already compensates. See git history if it ever needs revisiting.
 
-    def calibrate(self, inertia, zeta=1.0, d_min=0.0,
-                  dt=None, lam_samples=None, lam_dt_max=4.0):
+    # Residual apparent inertia beyond the payload, measured by chirp
+    # identification (test-impedance2.py). See effective_inertia().
+    RESIDUAL_MASS = 2.4          # kg
+    RESIDUAL_INERTIA = 0.25      # kg m^2
+
+    @staticmethod
+    def effective_inertia(payload_mass, tcp_offset=None):
         """
-        Set the desired inertia and derive damping from the MEASURED task inertia
-        (kinematics.URKin.reference_inertia), rather than trusting the table.
+        Apparent task-space inertia at the TCP = payload + a constant residual.
 
-        D = 2*zeta*sqrt(K*I) per axis. The table's rotational damping was computed
-        from an inertia measured at tool0, without the TCP offset -- 5-11x too
-        small -- which left the rotational axes at zeta 0.31-0.75 instead of 1.0.
-        Underdamped rotation is felt as the tool wiggling.
+        This is NOT the arm's rigid-body task inertia, and deliberately so: the
+        UR firmware compensates its own dynamics inside direct_torque, so what the
+        controller actually pushes on is the tool, not the arm. Measured by chirp:
 
-        CRITICAL, and not optional: zeta=1 per axis is a CONTINUOUS-time design.
-        An explicitly integrated damper at 500 Hz is only stable while
-        lambda(Lambda^-1 D) * dt stays small, and Lambda has directions with very
-        little apparent inertia, where even modest D violates that. Measured here:
-        per-axis zeta=1 gave lambda*dt = 23 and the discrete loop diverged in
-        ~20 ms. Simulated over 40 poses x 6 excitation directions, the boundary
-        sits near lambda*dt ~ 8, so lam_dt_max = 4 keeps ~2x margin.
+          * model (pinocchio Lambda) predicted 6.5-13.1 kg; MEASURED 3.58 kg
+          * measured inertia is near configuration-invariant (CV 16% over two
+            poses x three axes) whereas arm inertia is strongly pose-dependent
+          * adding a 1 kg mass moved it 4.10 -> 4.98 kg, i.e. ~1:1, so the plant
+            is payload-dominated
+          * the URDF mass is right (31.3 kg vs 33.1 on the sticker), which rules
+            out bad link data as the explanation
 
-        Pass dt and lam_samples (URKin.sample_inertia) to apply the bound. Without
-        them the damping is continuous-time only and WILL diverge on this arm.
+        Every damping problem in this controller traced back to using the model
+        here: D = 2 zeta sqrt(K I) with I ~ 11 instead of ~3.6 is 1.75x too high,
+        and the old discrete bound was built on Lambda^-1, so it erred permissive.
 
-        Note the conflict this exposes: the sampled-contact guideline wants
-        D > K_e*dt/2 (~100 Ns/m at K_e = 1e5), while discrete stability here caps
-        translational D near 70. At 500 Hz with this arm you cannot have both, and
-        divergence is the harder constraint -- so d_min defaults to 0.
+        Rotational residual is the weaker number -- payload contributes only
+        m*r^2 ~ 0.04 kg m^2, so the 0.25 is almost entirely residual, from one or
+        two usable measurements per axis. Treat it as provisional.
+        """
+        m = float(payload_mass) + CartesianImpedance.RESIDUAL_MASS
+        rot = CartesianImpedance.RESIDUAL_INERTIA
+        if tcp_offset is not None:
+            r = float(np.linalg.norm(np.asarray(tcp_offset, float)[:3]))
+            rot += float(payload_mass) * r ** 2
+        return np.array([m, m, m, rot, rot, rot])
+
+    def calibrate(self, inertia, zeta=1.0):
+        """
+        Set the desired inertia and derive D = 2 zeta sqrt(K I) per axis.
+
+        `inertia` should come from effective_inertia(), not from a kinematic
+        model. There is no discrete-stability bound here any more: the one that
+        used to live here scored the measured-stable configuration at
+        lambda*dt = 13.6 and the measured-diverging one at 24.9 -- overlapping, so
+        it never discriminated, and it was computed from the wrong plant besides.
+        Verify damping with a chirp sweep (test-impedance2.py), not a model.
         """
         I = np.asarray(inertia, float)
         self.inertia_d = I.copy()
-        for K, name in ((self.K_free, 'D_free'), (self.K_contact, 'D_contact')):
-            D = 2.0 * zeta * np.sqrt(K * I)
-            D[:3] = np.maximum(D[:3], d_min)
-            if dt is not None and lam_samples is not None:
-                worst = max(np.abs(np.linalg.eigvals(np.linalg.solve(L, np.diag(D)))).max()
-                            for L in np.asarray(lam_samples))
-                if worst * dt > lam_dt_max:
-                    D = D * (lam_dt_max / (worst * dt))
-            setattr(self, name, D)
+        self.D_free = 2.0 * zeta * np.sqrt(self.K_free * I)
+        self.D_contact = 2.0 * zeta * np.sqrt(self.K_contact * I)
         return I
 
     def reset(self):
@@ -207,19 +206,7 @@ class CartesianImpedance:
             rot = min(rot, max_rot)
         return pos, rot
 
-    def shaping_factor(self, Lam):
-        """0 = no shaping, 1 = full. Faded out where Lambda is ill-conditioned."""
-        if not self.shape_inertia:
-            return 0.0
-        c = np.linalg.cond(Lam)
-        if not np.isfinite(c) or c >= self.cond_max:
-            return 0.0
-        if c <= self.cond_full:
-            return 1.0
-        return float((self.cond_max - c) / (self.cond_max - self.cond_full))
-
-    def compute(self, q, qd, actual_pose, eq_pose, xd, J, blend=0.0, ramp=1.0,
-                task_inertia=None):
+    def compute(self, q, qd, actual_pose, eq_pose, xd, J, blend=0.0, ramp=1.0):
         """
         Returns (tau, F, e). Takes everything as arguments -- no RTDE access --
         which is what makes this testable without hardware.
@@ -237,17 +224,6 @@ class CartesianImpedance:
 
         xd_f = self.filter_velocity(xd)
         F = ramp * (K * e - D * xd_f)
-
-        if task_inertia is not None:
-            a = self.shaping_factor(task_inertia)
-            if a > 0:
-                S = task_inertia / self.inertia_d          # Lambda * Lambda_d^-1
-                # Bound the amplification. Unbounded, S turns a small orientation
-                # error into a full-scale translational force command.
-                g = np.linalg.norm(S, 2)
-                if g > self.shape_max_gain:
-                    S = S * (self.shape_max_gain / g)
-                F = (1 - a) * F + a * (S @ F)
 
         F = saturate_direction(F, self.F_sat)
 
