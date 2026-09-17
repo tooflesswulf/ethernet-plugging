@@ -92,6 +92,23 @@ def envelope(t, T, ramp=0.5):
     return min(a, b)
 
 
+def amp_at(f, amp, v_max, axis):
+    """
+    Displacement amplitude, tapered so peak velocity stays under v_max.
+
+    A constant-displacement sweep is unusable across a wide band: the amplitude
+    needed to push past this arm's ~5 N friction floor (13 mm at K=1500) implies
+    2*pi*40*0.013 = 3 m/s at the top of a 40 Hz sweep. Tapering as v_max/(2 pi f)
+    keeps it safe -- but note the consequence: above a few Hz the commanded force
+    drops back under the friction floor, so the honestly measurable band on this
+    arm is low frequency. That is where the closed-loop poles are anyway
+    (w_n ~ 11 rad/s = 1.8 Hz).
+    """
+    if axis >= 3:
+        return amp                      # rotations: rad, velocity limit n/a here
+    return min(amp, v_max / max(2 * np.pi * f, 1e-9))
+
+
 def offset_pose(base, axis, delta):
     """Apply a scalar displacement along one of the 6 task axes."""
     p = np.array(base, float)
@@ -137,6 +154,18 @@ def cmd_chirp(args):
     print(f'K          : {np.round(K, 1)}')
     print(f'D          : {np.round(D, 1)}')
     print(f'f_c        : {np.round(imp.f_c, 2)}')
+    if mode == 'setpoint' and axis < 3:
+        f_lo = K[axis] * amp_at(args.f0, args.amp, args.v_max, axis)
+        f_hi = K[axis] * amp_at(args.f1, args.amp, args.v_max, axis)
+        print(f'drive force: {f_lo:.1f} N at {args.f0} Hz -> {f_hi:.1f} N at {args.f1} Hz')
+        if f_lo < 3 * args.friction_floor:
+            print(f'\n!! drive force {f_lo:.1f} N is not >> the ~{args.friction_floor} N '
+                  f'friction floor.\n!! The sweep will sit inside the deadband and '
+                  f'measure stiction, not dynamics.\n!! Raise --amp (or lower K).\n')
+        if f_hi < args.friction_floor:
+            print(f'   note: above ~{args.v_max/(2*np.pi*args.friction_floor/K[axis]):.1f} Hz the '
+                  f'velocity limit forces the drive under the friction floor;\n'
+                  f'   data above that is not meaningful.')
 
     n = int(args.duration / dt) + 100
     L = {k: np.zeros((n, d)) for k, d in (
@@ -170,7 +199,9 @@ def cmd_chirp(args):
             twist = np.array(recv.getActualTCPSpeed())
             force = np.array(recv.getActualTCPForce())
 
-            drive = (args.amp * envelope(t, args.duration, args.ramp)
+            f_now = args.f0 * (args.f1 / args.f0) ** (t / args.duration)
+            a_now = amp_at(f_now, args.amp, args.v_max, axis)
+            drive = (a_now * envelope(t, args.duration, args.ramp)
                      * np.sin(log_chirp_phase(t, args.f0, args.f1, args.duration)))
 
             if mode == 'setpoint':
@@ -210,7 +241,6 @@ def cmd_chirp(args):
 
             torque_cmd(tau.tolist())
             if i % 250 == 0:
-                f_now = args.f0 * (args.f1 / args.f0) ** (t / args.duration)
                 print(f'  t={t:5.1f}s  f={f_now:6.2f}Hz  '
                       f'|dev|={np.max(np.abs(pose[:3]-base[:3]))*1000:5.1f}mm  '
                       f'|F|={np.linalg.norm(force[:3]):5.1f}N', end='\r')
@@ -230,7 +260,7 @@ def cmd_chirp(args):
 
     out = {k: v[:i] for k, v in L.items()}
     out.update(dict(dt_nominal=dt, axis=axis, mode=mode, f0=args.f0, f1=args.f1,
-                    duration=args.duration, amp=args.amp, base=base,
+                    duration=args.duration, amp=args.amp, base=base, ramp=args.ramp,
                     K=K, D=D, f_c=imp.f_c, ref_inertia=ref, tcp=tcp,
                     aborted=abort or ''))
     np.savez_compressed(args.out, **out)
@@ -258,6 +288,18 @@ def cmd_analyze(args):
     print(f'  K = {np.round(d["K"], 1)}')
     print(f'  D = {np.round(d["D"], 1)}')
 
+    # Exclude the fade windows. On a LOG sweep the fade-out spans a huge
+    # frequency range at the top (1 s of a 0.2-40 Hz sweep covers 33-40 Hz), so
+    # including it manufactures a fake resonance right at f1.
+    ramp = float(d['ramp']) if 'ramp' in d.files else 1.0
+    T = float(d['duration'])
+    keep = (d['t'] > ramp * 1.2) & (d['t'] < T - ramp * 1.5)
+    if keep.sum() < 500:
+        keep = np.ones(len(d['t']), bool)
+    f_top = float(d['f0']) * (float(d['f1']) / float(d['f0'])) ** (d['t'][keep].max() / T)
+    print(f'  usable window: {d["t"][keep].min():.1f}-{d["t"][keep].max():.1f} s '
+          f'-> up to {f_top:.1f} Hz (fade windows excluded)')
+
     if mode == 'setpoint':
         u = d['eq'][:, axis] - d['base'][axis] if axis < 3 else d['drive']
         y = (d['pose'][:, axis] - d['base'][axis]) if axis < 3 else None
@@ -266,11 +308,13 @@ def cmd_analyze(args):
             y = np.array([pose_error(d['base'], p)[3:][axis - 3] for p in d['pose']])
             y = -y
         label = 'eq -> actual  (closed loop)'
+        u, y = u[keep], y[keep]
     else:
         u = d['wrench'][:, axis]
         v = d['twist'][:, axis]
         y = np.gradient(v, d['t'])           # acceleration
         label = 'wrench -> accel  (plant)'
+        u, y = u[keep], y[keep]
 
     nper = min(4096, len(u) // 4)
     f, Puu = signal.welch(u, fs, nperseg=nper)
@@ -279,7 +323,7 @@ def cmd_analyze(args):
     _, Pyy = signal.welch(y, fs, nperseg=nper)
     coh = np.abs(Puy) ** 2 / np.maximum(Puu * Pyy, 1e-30)
 
-    band = (f >= float(d['f0'])) & (f <= float(d['f1'])) & (coh > args.min_coh)
+    band = (f >= float(d['f0'])) & (f <= f_top) & (coh > args.min_coh)
     if not band.any():
         print('  no frequency bins with usable coherence; longer run or larger amplitude')
         return
@@ -304,8 +348,13 @@ def cmd_analyze(args):
         else:
             print('  => no resonant peak: overdamped or the drive is too weak')
         if dc < 0.5:
-            print(f'  WARNING DC gain {dc:.2f} << 1: the loop is not tracking the '
-                  f'setpoint (friction deadband or saturation)')
+            cmd = np.abs(d['eq'][:, axis] - d['base'][axis]).max()
+            act = np.abs(d['pose'][:, axis] - d['base'][axis]).max()
+            print(f'\n  ** NOT TRACKING: DC gain {dc:.3f}. Commanded {cmd*1000:.2f} mm, '
+                  f'moved {act*1000:.2f} mm ({act/max(cmd,1e-12)*100:.0f}%).')
+            print(f'  ** Drive force was {float(d["K"][axis])*cmd:.1f} N. If that is not well')
+            print(f'  ** above the friction floor (~5 N) the sweep measured stiction,')
+            print(f'  ** not dynamics. Re-run with a larger --amp.')
     else:
         lo = mag[:max(1, len(mag) // 10)].mean()
         print(f'  low-frequency |accel/F| = {lo:.4g}  -> apparent mass {1/max(lo,1e-12):.2f}')
@@ -335,12 +384,16 @@ def main():
     c = sub.add_parser('chirp', help='run a frequency sweep and log it')
     c.add_argument('--mode', choices=('setpoint', 'wrench'), default='setpoint')
     c.add_argument('--axis', choices=AXES, default='x')
-    c.add_argument('--amp', type=float, default=0.002,
+    c.add_argument('--amp', type=float, default=0.015,
                    help='m / rad (setpoint) or N / Nm (wrench). Start small.')
     c.add_argument('--f0', type=float, default=0.2)
-    c.add_argument('--f1', type=float, default=40.0)
-    c.add_argument('--duration', type=float, default=30.0)
+    c.add_argument('--f1', type=float, default=10.0)
+    c.add_argument('--duration', type=float, default=40.0)
     c.add_argument('--ramp', type=float, default=1.0, help='fade in/out [s]')
+    c.add_argument('--v-max', type=float, default=0.15,
+                   help='taper amplitude to keep peak TCP speed under this [m/s]')
+    c.add_argument('--friction-floor', type=float, default=5.0,
+                   help='measured friction floor [N], used only to warn')
     c.add_argument('--hold-k', type=float, default=200.0,
                    help='wrench mode: stiffness that holds position while driving')
     c.add_argument('--zeta', type=float, default=1.0)
