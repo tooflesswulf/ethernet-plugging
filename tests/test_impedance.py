@@ -245,6 +245,7 @@ def test_inertia_shaping_decouples_translation_from_rotation():
 def test_shaping_fades_out_when_ill_conditioned():
     """cond(Lambda) reaches 2.5e6 near singularities; Lambda^-1 must not be trusted."""
     imp = _imp()
+    imp.shape_inertia = True
     assert imp.shaping_factor(np.eye(6)) == 1.0
     assert imp.shaping_factor(np.diag([1e-9, 1, 1, 1, 1, 1.0])) == 0.0
     mid = 0.5 * (imp.cond_full + imp.cond_max)
@@ -263,6 +264,7 @@ def test_working_region_is_fully_shaped():
     """
     kin = URKin(TCP)
     imp = _imp()
+    imp.shape_inertia = True
     rng = np.random.default_rng(0)
     base = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
     factors = np.array([imp.shaping_factor(kin.task_inertia(base + rng.uniform(-0.6, 0.6, 6)))
@@ -271,6 +273,37 @@ def test_working_region_is_fully_shaped():
     assert (factors == 1.0).mean() > 0.98, (
         f'only {(factors == 1.0).mean():.1%} of ordinary poses fully shaped; '
         'the control law changes with pose')
+
+
+def test_shaping_is_off_by_default():
+    """
+    Regression: enabled, a pure rotational error at the leash commanded 207 N of
+    translation (||Lambda*Lambda_d^-1|| = 43.8), which trips the UR end-effector
+    speed limit. Mixed units are the trap -- the normalised coupling reads 0.98,
+    but in raw units the cross terms dwarf the rotational diagonal.
+    """
+    assert CartesianImpedance().shape_inertia is False
+
+
+def test_shaping_amplification_is_bounded(kin):
+    """If re-enabled, S must not turn a small rotation error into a huge force."""
+    imp = _imp()
+    imp.shape_inertia = True
+    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    Lam = kin.task_inertia(q)
+    assert np.linalg.norm(Lam / imp.inertia_d, 2) > 10, 'raw transform really is huge'
+
+    K, _ = imp.gains(0.0)
+    _, rot = imp.leash(0.0)
+    eq = HOME.copy()
+    eq[3:] = (R.from_rotvec([0, rot, 0]) * R.from_rotvec(HOME[3:])).as_rotvec()
+    _, F, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6),
+                          np.eye(6), task_inertia=Lam)
+    # bounded by the cap, and still inside F_sat
+    assert np.all(np.abs(F) <= imp.F_sat + 1e-9)
+    imp.reset()
+    _, F_un, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6), np.eye(6))
+    assert np.linalg.norm(F) <= imp.shape_max_gain * np.linalg.norm(F_un) + 1e-6
 
 
 def test_shaping_can_be_disabled():

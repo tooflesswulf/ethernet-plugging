@@ -105,8 +105,19 @@ class CartesianImpedance:
         # Lambda is an inverse of (J M^-1 J^T), which is ill-conditioned near
         # singularities (cond up to 2.5e6 here), so shaping is faded out when the
         # conditioning is bad rather than trusted blindly.
-        self.shape_inertia = True
+        # OFF by default. As written this does more harm than good on this arm:
+        # Lambda's translation<->rotation cross terms are ~3.5 kg m, and dividing
+        # them by the rotational inertia_d of 0.085 kg m^2 amplifies them ~41x.
+        # Measured ||Lambda * Lambda_d^-1|| = 43.8, and a pure rotational error at
+        # the leash commanded 207 N of translation -- full-scale force in the
+        # wrong direction, which trips the UR end-effector speed limit.
+        #
+        # The mixed units (N vs Nm, m vs rad) are the trap: the normalised
+        # coupling looks like 0.98, but in raw units the cross terms dwarf the
+        # rotational diagonal. shape_max_gain bounds it if re-enabled.
+        self.shape_inertia = False
         self.inertia_d = np.array([8.35, 8.35, 8.35, 0.085, 0.085, 0.085])
+        self.shape_max_gain = 3.0    # cap on ||Lambda * Lambda_d^-1||
         # Thresholds must sit ABOVE the working region, or the shaping factor
         # fades in and out with pose and the control law itself keeps changing --
         # which reads as wiggling. Measured here: cond median 17.5e3, p95 23e3,
@@ -180,8 +191,13 @@ class CartesianImpedance:
         if task_inertia is not None:
             a = self.shaping_factor(task_inertia)
             if a > 0:
-                shaped = task_inertia @ (F / self.inertia_d)
-                F = (1 - a) * F + a * shaped
+                S = task_inertia / self.inertia_d          # Lambda * Lambda_d^-1
+                # Bound the amplification. Unbounded, S turns a small orientation
+                # error into a full-scale translational force command.
+                g = np.linalg.norm(S, 2)
+                if g > self.shape_max_gain:
+                    S = S * (self.shape_max_gain / g)
+                F = (1 - a) * F + a * (S @ F)
 
         F = np.clip(F, -self.F_sat, self.F_sat)
 
