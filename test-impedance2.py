@@ -316,8 +316,9 @@ def cmd_analyze(args):
         y = (d['pose'][:, axis] - d['base'][axis]) if axis < 3 else None
         if y is None:
             # rotation: project the orientation error onto the driven axis
+            # pose_error(base, pose) already gives the rotation of pose wrt base.
+            # Negating it here inverted every rotational DC gain.
             y = np.array([pose_error(d['base'], p)[3:][axis - 3] for p in d['pose']])
-            y = -y
         label = 'eq -> actual  (closed loop)'
         u, y = u[keep], y[keep]
     else:
@@ -352,15 +353,32 @@ def cmd_analyze(args):
 
     if mode == 'setpoint' and cb.mean() > 0.6:
         # Fit a real second-order model rather than eyeballing a Q factor.
+        # Bounded, because an unbounded fit on a response with no resonant peak
+        # runs away (one axis returned zeta=361, inertia=3e5).
         from scipy import optimize
         w = 2 * np.pi * fb
         def mdl(p_, w_):
             s_ = 1j * w_
             return p_[0] * p_[1] ** 2 / (s_ ** 2 + 2 * p_[2] * p_[1] * s_ + p_[1] ** 2)
-        p_, _ = optimize.leastsq(
+        dc0 = float(np.mean(mag[:max(1, len(mag) // 20)]))
+        # seed w_n where |H| falls to dc0/sqrt(2) -- works with or without a peak
+        below = np.nonzero(mag < dc0 / np.sqrt(2))[0]
+        w0 = 2 * np.pi * (fb[below[0]] if len(below) else fb[pk])
+        r = optimize.least_squares(
             lambda p_: np.r_[(mdl(p_, w) - Hb).real, (mdl(p_, w) - Hb).imag],
-            [float(np.mean(mag[:3])), 2 * np.pi * fb[pk], 0.3])
-        g_, wn_, z_ = p_[0], abs(p_[1]), abs(p_[2])
+            [max(dc0, 1e-3), w0, 0.5],
+            bounds=([1e-4, 2 * np.pi * fb[0], 0.02],
+                    [5.0, 2 * np.pi * fb[-1], 3.0]))
+        g_, wn_, z_ = r.x[0], abs(r.x[1]), abs(r.x[2])
+
+        resonant = mag.max() > 1.05 * dc0
+        at_bound = (wn_ < 2 * np.pi * fb[0] * 1.05) or (wn_ > 2 * np.pi * fb[-1] * 0.95)
+        if at_bound or not resonant:
+            print(f'\n  ** fit is NOT reliable for this axis: '
+                  f'{"no resonant peak in band" if not resonant else "w_n pinned at a band edge"}.')
+            print(f'  ** |H| falls monotonically from DC, so w_n and zeta are not')
+            print(f'  ** separately identifiable here. Treat the numbers below as a')
+            print(f'  ** lower bound on w_n, and widen the sweep to see the corner.')
         Kx = float(d['K'][axis]); Dx = float(d['D'][axis])
         Im = float(d['ref_inertia'][axis]); Ie = Kx / wn_ ** 2
         print(f'\nfitted 2nd-order:  w_n {wn_:.2f} rad/s ({wn_/2/np.pi:.2f} Hz)   '
