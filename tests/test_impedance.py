@@ -12,6 +12,15 @@ from impedance import (pose_error, friction_feedforward, CartesianImpedance,
                        SafetyMonitor, MAX_ORIENTATION_ERROR)
 from kinematics import URKin
 
+import sys, types
+for _n in ('rtde_control','rtde_receive','cv2','wsg','camera','h5py'):
+    sys.modules.setdefault(_n, types.ModuleType(_n))
+sys.modules['rtde_control'].RTDEControlInterface = object
+sys.modules['rtde_receive'].RTDEReceiveInterface = object
+sys.modules['camera'].Camera = object
+sys.modules['wsg'].WSG = object
+sys.modules['wsg'].GripperState = types.SimpleNamespace(IDLE=types.SimpleNamespace(value=0))
+
 # The real home pose. Its rotvec norm is 3.512 > pi -- a valid non-canonical
 # rotation vector, and the reason pose_error must not subtract components.
 HOME = np.array([-0.125, 0.545, 0.305, 2.44, 2.44, 0.653])
@@ -175,6 +184,19 @@ def test_velocity_filter_is_fast_not_force_alpha():
     assert CartesianImpedance().vel_alpha >= 0.3
 
 
+def test_env_defaults_do_not_cap_the_leash():
+    """
+    Regression: leash() computed the correct 0.167 rad and Env then capped it with
+    max_orientation_step=0.05 (servoL's old value), so the restoring moment stayed
+    at 1.5 Nm and the tool could not hold orientation. The caps default to None.
+    """
+    import inspect
+    import env as env_mod
+    sig = inspect.signature(env_mod.Env.__init__)
+    assert sig.parameters['max_orientation_step'].default is None
+    assert sig.parameters['max_position_step'].default is None
+
+
 def test_leash_is_derived_from_F_sat_over_K():
     """
     Regression: max_orientation_step was left at servoL's 0.05 while the position
@@ -224,10 +246,31 @@ def test_shaping_fades_out_when_ill_conditioned():
     """cond(Lambda) reaches 2.5e6 near singularities; Lambda^-1 must not be trusted."""
     imp = _imp()
     assert imp.shaping_factor(np.eye(6)) == 1.0
-    bad = np.diag([1e-9, 1, 1, 1, 1, 1.0])
-    assert imp.shaping_factor(bad) == 0.0
-    assert imp.shaping_factor(np.diag([1 / 2e4, 1, 1, 1, 1, 1.0])) == pytest.approx(
-        (imp.cond_max - 2e4) / (imp.cond_max - imp.cond_full))
+    assert imp.shaping_factor(np.diag([1e-9, 1, 1, 1, 1, 1.0])) == 0.0
+    mid = 0.5 * (imp.cond_full + imp.cond_max)
+    assert imp.shaping_factor(np.diag([1 / mid, 1, 1, 1, 1, 1.0])) == pytest.approx(
+        (imp.cond_max - mid) / (imp.cond_max - imp.cond_full))
+
+
+def test_working_region_is_fully_shaped():
+    """
+    Regression: cond_full was 1e4 while the working region's median cond is
+    ~17.5e3, so shaping faded in and out with pose and the control law kept
+    changing -- which shows up as the arm wiggling.
+
+    Fading near an actual singularity is correct; fading across ordinary poses is
+    the bug. With the old thresholds the median factor was 0.82.
+    """
+    kin = URKin(TCP)
+    imp = _imp()
+    rng = np.random.default_rng(0)
+    base = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    factors = np.array([imp.shaping_factor(kin.task_inertia(base + rng.uniform(-0.6, 0.6, 6)))
+                        for _ in range(400)])
+    assert np.median(factors) == 1.0
+    assert (factors == 1.0).mean() > 0.98, (
+        f'only {(factors == 1.0).mean():.1%} of ordinary poses fully shaped; '
+        'the control law changes with pose')
 
 
 def test_shaping_can_be_disabled():

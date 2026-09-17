@@ -63,8 +63,11 @@ class Env:
         control_frequency=20,
         servo_frequency=500,
         gripper_query_frequency=250,
-        max_position_step=(0.03, 0.03, 0.03),
-        max_orientation_step=0.05,
+        # Hard caps ON TOP of the F_sat/K leash; None = no extra cap. Do not set
+        # max_orientation_step back to servoL's 0.05 -- that caps the restoring
+        # moment at 1.5 Nm instead of 5 and the tool cannot hold orientation.
+        max_position_step=None,
+        max_orientation_step=None,
         coulomb_friction=None,
         workspace=None,
         watchdog_hz=10.0,
@@ -133,7 +136,8 @@ class Env:
         # Under impedance control these are the equilibrium-error LEASH, not a
         # speed limit: the spring force is bounded by K * max_position_step, so
         # size them per gain set as F_sat / K.
-        self.max_position_step = np.array(max_position_step)
+        self.max_position_step = (None if max_position_step is None
+                                  else np.array(max_position_step))
         self.max_orientation_step = max_orientation_step
 
         # ============================================================

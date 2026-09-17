@@ -34,7 +34,7 @@ def pose_error(actual, desired):
     return np.r_[desired[:3] - actual[:3], (R_des * R_act.inv()).as_rotvec()]
 
 
-def friction_feedforward(qd, tau_cmd, f_c, v_eps=0.02, t_eps=2.0):
+def friction_feedforward(qd, tau_cmd, f_c, v_eps=0.05, t_eps=4.0, assist=0.5):
     """
     Per-joint Coulomb friction compensation. Not optional on this arm: it is the
     difference between a 20 N and a 5 N contact-force floor.
@@ -48,10 +48,15 @@ def friction_feedforward(qd, tau_cmd, f_c, v_eps=0.02, t_eps=2.0):
     while leaving others in deadband. Use ~80% of the WEAKER direction, never the
     mean: on this arm joint 1 measured 11.90/21.87 Nm, and the mean would
     over-compensate the weak direction.
+
+    v_eps sets how sharply the term flips with velocity sign. Too small and it is
+    effectively f_c*sign(qd), so every direction reversal swings the torque by
+    2*f_c (up to 20 Nm here) -- which chatters. `assist` (0..1) weights only the
+    standstill term; lowering it trades breakaway crispness for calm.
     """
     s_v = np.tanh(np.asarray(qd, float) / v_eps)
     s_t = np.tanh(np.asarray(tau_cmd, float) / t_eps)
-    return np.asarray(f_c, float) * (s_v + (1.0 - np.abs(s_v)) * s_t)
+    return np.asarray(f_c, float) * (s_v + assist * (1.0 - np.abs(s_v)) * s_t)
 
 
 class CartesianImpedance:
@@ -81,8 +86,9 @@ class CartesianImpedance:
         # Measured on this arm at 80% of the weaker direction.
         self.f_c = (np.asarray(f_c, float) if f_c is not None
                     else np.array([10.34, 9.52, 6.96, 2.78, 2.94, 2.07]))
-        self.fc_veps = 0.02
-        self.fc_teps = 2.0
+        self.fc_veps = 0.05
+        self.fc_teps = 4.0
+        self.fc_assist = 0.5
 
         self.d_q = 0.5          # joint damping floor, unconditionally passive
         self.vel_alpha = 0.4    # ~40 Hz. NOT force_alpha (0.03, ~2.4 Hz):
@@ -101,8 +107,12 @@ class CartesianImpedance:
         # conditioning is bad rather than trusted blindly.
         self.shape_inertia = True
         self.inertia_d = np.array([8.35, 8.35, 8.35, 0.085, 0.085, 0.085])
-        self.cond_max = 5e4          # fade shaping out above this
-        self.cond_full = 1e4         # full shaping below this
+        # Thresholds must sit ABOVE the working region, or the shaping factor
+        # fades in and out with pose and the control law itself keeps changing --
+        # which reads as wiggling. Measured here: cond median 17.5e3, p95 23e3,
+        # up to 2.5e6 only near actual singularities.
+        self.cond_full = 1e5         # full shaping below this
+        self.cond_max = 1e6          # no shaping above this
 
     def reset(self):
         self._xd_f = np.zeros(6)
@@ -178,7 +188,7 @@ class CartesianImpedance:
         tau = J.T @ F - self.d_q * qd
         if np.any(self.f_c > 0):
             tau = tau + ramp * friction_feedforward(
-                qd, tau, self.f_c, self.fc_veps, self.fc_teps)
+                qd, tau, self.f_c, self.fc_veps, self.fc_teps, self.fc_assist)
         tau = np.clip(tau, -self.tau_sat, self.tau_sat)
         return tau, F, e
 
