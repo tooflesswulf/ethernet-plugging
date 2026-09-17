@@ -139,6 +139,11 @@ def cmd_chirp(args):
 
     axis = AXES.index(args.axis)
     mode = args.mode
+    if args.amp is None:
+        # Different units AND different gains: 0.015 is 15 mm (22 N at K=1500,
+        # well clear of the 5 N floor) but only 0.015 rad (0.75 Nm at K_rot=50,
+        # BELOW the ~0.9 Nm rotational floor). One default cannot serve both.
+        args.amp = 0.015 if axis < 3 else 0.15
     if mode == 'wrench':
         # Hold position weakly so it cannot drift, and inject the wrench on top.
         k = args.hold_k
@@ -154,18 +159,24 @@ def cmd_chirp(args):
     print(f'K          : {np.round(K, 1)}')
     print(f'D          : {np.round(D, 1)}')
     print(f'f_c        : {np.round(imp.f_c, 2)}')
-    if mode == 'setpoint' and axis < 3:
+    if mode == 'setpoint':
+        floor = args.friction_floor if axis < 3 else args.friction_floor_rot
+        unit = 'N' if axis < 3 else 'Nm'
         f_lo = K[axis] * amp_at(args.f0, args.amp, args.v_max, axis)
         f_hi = K[axis] * amp_at(args.f1, args.amp, args.v_max, axis)
-        print(f'drive force: {f_lo:.1f} N at {args.f0} Hz -> {f_hi:.1f} N at {args.f1} Hz')
-        if f_lo < 3 * args.friction_floor:
-            print(f'\n!! drive force {f_lo:.1f} N is not >> the ~{args.friction_floor} N '
-                  f'friction floor.\n!! The sweep will sit inside the deadband and '
-                  f'measure stiction, not dynamics.\n!! Raise --amp (or lower K).\n')
-        if f_hi < args.friction_floor:
-            print(f'   note: above ~{args.v_max/(2*np.pi*args.friction_floor/K[axis]):.1f} Hz the '
-                  f'velocity limit forces the drive under the friction floor;\n'
-                  f'   data above that is not meaningful.')
+        print(f'drive      : {f_lo:.2f} {unit} at {args.f0} Hz -> {f_hi:.2f} {unit} at {args.f1} Hz'
+              f'   (friction floor ~{floor} {unit})')
+        if f_lo < 3 * floor:
+            print(f'\n!! drive {f_lo:.2f} {unit} is not >> the ~{floor} {unit} friction floor.'
+                  f'\n!! The sweep will sit inside the deadband and measure stiction,'
+                  f'\n!! not dynamics. Raise --amp to at least '
+                  f'{3*floor/K[axis]:.3f} ({"m" if axis < 3 else "rad"}).\n')
+        if f_hi < floor:
+            print(f'   note: the velocity taper pushes the drive under the friction floor'
+                  f'\n   toward the top of the sweep; data up there is not meaningful.')
+        if axis >= 3 and args.amp > 0.2:
+            print(f'   note: amp {args.amp} rad exceeds MAX_ORIENTATION_ERROR (0.2), so the'
+                  f'\n   error clamps and the drive flattens. Keep amp <= 0.2 rad.')
 
     n = int(args.duration / dt) + 100
     L = {k: np.zeros((n, d)) for k, d in (
@@ -407,8 +418,8 @@ def main():
     c = sub.add_parser('chirp', help='run a frequency sweep and log it')
     c.add_argument('--mode', choices=('setpoint', 'wrench'), default='setpoint')
     c.add_argument('--axis', choices=AXES, default='x')
-    c.add_argument('--amp', type=float, default=0.015,
-                   help='m / rad (setpoint) or N / Nm (wrench). Start small.')
+    c.add_argument('--amp', type=float, default=None,
+                   help='m (translation) or rad (rotation). Default 0.015 m / 0.15 rad.')
     c.add_argument('--f0', type=float, default=0.2)
     c.add_argument('--f1', type=float, default=10.0)
     c.add_argument('--duration', type=float, default=40.0)
@@ -416,7 +427,9 @@ def main():
     c.add_argument('--v-max', type=float, default=0.15,
                    help='taper amplitude to keep peak TCP speed under this [m/s]')
     c.add_argument('--friction-floor', type=float, default=5.0,
-                   help='measured friction floor [N], used only to warn')
+                   help='measured translational friction floor [N], used to warn')
+    c.add_argument('--friction-floor-rot', type=float, default=0.9,
+                   help='measured rotational friction floor [Nm], used to warn')
     c.add_argument('--hold-k', type=float, default=200.0,
                    help='wrench mode: stiffness that holds position while driving')
     c.add_argument('--zeta', type=float, default=1.0)
