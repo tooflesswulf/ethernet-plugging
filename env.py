@@ -72,6 +72,7 @@ class Env:
         workspace=None,
         watchdog_hz=10.0,
         gain_ramp_time=0.3,
+        damping_zeta=1.0,
         mode_blend_time=0.2,
         late_window=5.0,
         late_max=25,
@@ -153,6 +154,15 @@ class Env:
         self.kin = URKin(self.tcp_offset)
         self.imp = CartesianImpedance(f_c=coulomb_friction,
                                       tau_rated=self.kin.tau_rated)
+        # Derive desired inertia and damping from the ACTUAL kinematics, including
+        # whatever TCP offset is configured. Hardcoding these is how the rotational
+        # damping ended up at zeta 0.31 -- the reference was measured at tool0,
+        # without the 154 mm TCP offset that dominates rotational inertia.
+        self.ref_inertia = self.kin.reference_inertia(self.recv.getActualQ())
+        self.imp.calibrate(self.ref_inertia, zeta=damping_zeta)
+        print(f'task inertia: {np.round(self.ref_inertia, 3)}')
+        print(f'D_free      : {np.round(self.imp.D_free, 1)}')
+
         self.safety = SafetyMonitor(workspace=workspace, dt=self.dt)
         self.watchdog_hz = watchdog_hz
         self.gain_ramp_time = gain_ramp_time

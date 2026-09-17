@@ -81,6 +81,23 @@ class URKin:
         Rb = self.data.oMf[self.f_base].rotation
         return np.block([[Rb.T, np.zeros((3, 3))], [np.zeros((3, 3)), Rb.T]]) @ J
 
+    def reference_inertia(self, q0, spread=0.5, n=200, seed=0):
+        """
+        Median per-axis task inertia around configuration q0, in the `base` frame
+        at the TCP. Used to set the desired inertia and to derive damping.
+
+        Compute this, never hardcode it. The TCP offset dominates the rotational
+        terms -- at tool0 they are ~[0.08, 0.21, 0.03] kg m^2, but 154 mm out at
+        the real TCP they are ~[0.44, 0.90, 0.15], a factor of 5-11. A stale value
+        here silently underdamps every rotational axis and makes any inertia
+        shaping wildly over-amplify.
+        """
+        rng = np.random.default_rng(seed)
+        q0 = np.asarray(q0, float)
+        diag = np.array([np.diag(self.task_inertia(q0 + rng.uniform(-spread, spread, 6)))
+                         for _ in range(n)])
+        return np.median(diag, axis=0)
+
     def task_inertia(self, q):
         """
         Task-space inertia (J M^-1 J^T)^-1 in the base frame. Not used in the

@@ -115,15 +115,41 @@ class CartesianImpedance:
         # The mixed units (N vs Nm, m vs rad) are the trap: the normalised
         # coupling looks like 0.98, but in raw units the cross terms dwarf the
         # rotational diagonal. shape_max_gain bounds it if re-enabled.
-        self.shape_inertia = False
-        self.inertia_d = np.array([8.35, 8.35, 8.35, 0.085, 0.085, 0.085])
-        self.shape_max_gain = 3.0    # cap on ||Lambda * Lambda_d^-1||
+        # Safe once inertia_d is calibrated to the real TCP: ||S|| drops from a
+        # median of 44.9 to 9.4, and a 10 N x command needs 11 N / 2.9 Nm, well
+        # inside F_sat, while decoupling exactly. shape_max_gain still bounds the
+        # near-singular tail (max ||S|| ~61).
+        self.shape_inertia = True
+        self.inertia_d = np.array([12.19, 7.51, 7.56, 0.435, 0.896, 0.151])
+        self.shape_max_gain = 20.0   # cap on ||Lambda * Lambda_d^-1||
         # Thresholds must sit ABOVE the working region, or the shaping factor
         # fades in and out with pose and the control law itself keeps changing --
         # which reads as wiggling. Measured here: cond median 17.5e3, p95 23e3,
         # up to 2.5e6 only near actual singularities.
         self.cond_full = 1e5         # full shaping below this
         self.cond_max = 1e6          # no shaping above this
+
+    def calibrate(self, inertia, zeta=1.0, d_min=100.0):
+        """
+        Set the desired inertia and derive damping from the MEASURED task inertia
+        (kinematics.URKin.reference_inertia), rather than trusting the table.
+
+        D = 2*zeta*sqrt(K*I) per axis. The table's rotational damping was computed
+        from an inertia measured at tool0, without the TCP offset -- 5-11x too
+        small -- which left the rotational axes at zeta 0.31-0.75 instead of 1.0.
+        Underdamped rotation is felt as the tool wiggling.
+
+        d_min enforces the sampled-contact bound D > K_e*dt/2 (~100 Ns/m at
+        K_e = 1e5, dt = 2 ms) on the translational axes, where damping rather than
+        stiffness is what buys contact stability.
+        """
+        I = np.asarray(inertia, float)
+        self.inertia_d = I.copy()
+        for K, name in ((self.K_free, 'D_free'), (self.K_contact, 'D_contact')):
+            D = 2.0 * zeta * np.sqrt(K * I)
+            D[:3] = np.maximum(D[:3], d_min)
+            setattr(self, name, D)
+        return I
 
     def reset(self):
         self._xd_f = np.zeros(6)

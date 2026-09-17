@@ -275,35 +275,72 @@ def test_working_region_is_fully_shaped():
         'the control law changes with pose')
 
 
-def test_shaping_is_off_by_default():
+def test_inertia_d_is_tcp_correct_not_tool0():
     """
-    Regression: enabled, a pure rotational error at the leash commanded 207 N of
-    translation (||Lambda*Lambda_d^-1|| = 43.8), which trips the UR end-effector
-    speed limit. Mixed units are the trap -- the normalised coupling reads 0.98,
-    but in raw units the cross terms dwarf the rotational diagonal.
+    Regression, and the root cause of several others: the reference inertia was
+    measured at tool0, without the 154 mm TCP offset that dominates rotational
+    terms. tool0 gives ~[0.08, 0.21, 0.03] kg m^2; the real TCP gives
+    ~[0.44, 0.90, 0.15]. The stale value underdamped every rotational axis and
+    made inertia shaping over-amplify 41x.
     """
-    assert CartesianImpedance().shape_inertia is False
+    imp = CartesianImpedance()
+    assert np.all(imp.inertia_d[3:] > 0.1), 'rotational inertia_d looks like tool0'
+
+    kin = URKin(TCP)
+    ref = kin.reference_inertia(np.array([0, -1.4, 1.4, -1.5, -1.5, 0.]))
+    assert np.allclose(imp.inertia_d, ref, rtol=0.25)
+
+
+def test_calibrate_gives_critical_damping():
+    """D = 2*zeta*sqrt(K*I) per axis, from MEASURED inertia -- not the table."""
+    kin = URKin(TCP)
+    ref = kin.reference_inertia(np.array([0, -1.4, 1.4, -1.5, -1.5, 0.]))
+    imp = _imp()
+    imp.calibrate(ref, zeta=1.0)
+    for K, D in ((imp.K_free, imp.D_free), (imp.K_contact, imp.D_contact)):
+        zeta = D / (2 * np.sqrt(K * ref))
+        assert np.allclose(zeta[3:], 1.0, atol=1e-9), 'rotational axes must be critically damped'
+        assert np.all(zeta[:3] >= 1.0 - 1e-9)          # translational may be raised by d_min
+
+
+def test_calibrate_enforces_contact_damping_bound():
+    """D > K_e*dt/2 (~100 Ns/m) on translation, or stiff contact chatters."""
+    imp = _imp()
+    imp.calibrate(np.array([0.5, 0.5, 0.5, 0.01, 0.01, 0.01]), zeta=1.0, d_min=100.0)
+    assert np.all(imp.D_free[:3] >= 100.0)
+    assert np.all(imp.D_contact[:3] >= 100.0)
 
 
 def test_shaping_amplification_is_bounded(kin):
-    """If re-enabled, S must not turn a small rotation error into a huge force."""
+    """
+    With a TCP-correct inertia_d the transform is usable (||S|| median 9.4 vs
+    44.9 stale), but the near-singular tail still reaches ~61, so it stays capped.
+    """
     imp = _imp()
-    imp.shape_inertia = True
     q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
     Lam = kin.task_inertia(q)
-    assert np.linalg.norm(Lam / imp.inertia_d, 2) > 10, 'raw transform really is huge'
+    assert np.linalg.norm(Lam / imp.inertia_d, 2) < 20
 
-    K, _ = imp.gains(0.0)
     _, rot = imp.leash(0.0)
     eq = HOME.copy()
     eq[3:] = (R.from_rotvec([0, rot, 0]) * R.from_rotvec(HOME[3:])).as_rotvec()
     _, F, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6),
                           np.eye(6), task_inertia=Lam)
-    # bounded by the cap, and still inside F_sat
     assert np.all(np.abs(F) <= imp.F_sat + 1e-9)
-    imp.reset()
-    _, F_un, _ = imp.compute(np.zeros(6), np.zeros(6), HOME, eq, np.zeros(6), np.eye(6))
-    assert np.linalg.norm(F) <= imp.shape_max_gain * np.linalg.norm(F_un) + 1e-6
+
+
+def test_shaping_decouples_a_pure_translation(kin):
+    """The point of the whole thing: +x force must not produce off-axis motion."""
+    imp = _imp()
+    q = np.array([0, -1.4, 1.4, -1.5, -1.5, 0.])
+    Lam = kin.task_inertia(q)
+    F = np.r_[10., 0, 0, 0, 0, 0]
+
+    a_un = np.linalg.solve(Lam, F)
+    a_sh = np.linalg.solve(Lam, (Lam / imp.inertia_d) @ F)
+    assert np.linalg.norm(a_un[1:3]) / abs(a_un[0]) > 0.1      # ~19% unshaped
+    assert np.linalg.norm(a_sh[1:3]) / abs(a_sh[0]) < 1e-9     # decoupled
+    assert np.linalg.norm(a_sh[3:]) < 1e-9
 
 
 def test_shaping_can_be_disabled():
