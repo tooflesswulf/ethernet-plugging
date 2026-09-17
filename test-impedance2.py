@@ -137,6 +137,13 @@ def cmd_chirp(args):
     else:
         ref = imp.effective_inertia(payload, tcp)
         print(f'inertia    : {np.round(ref, 3)}  (payload {payload:.3f} kg + residual)')
+    # Override K BEFORE calibrate, so D is derived from the K actually used.
+    # Setting K_free afterwards silently halves zeta for every 4x of K -- that
+    # is how a K_rot=200 run ended up at zeta_rot=0.35 instead of 0.70.
+    if args.k_trans is not None:
+        imp.K_free = np.r_[np.full(3, args.k_trans), imp.K_free[3:]]
+    if args.k_rot is not None:
+        imp.K_free = np.r_[imp.K_free[:3], np.full(3, args.k_rot)]
     imp.calibrate(ref, zeta=args.zeta)
     if args.fc_nm:
         imp.f_c = np.array([float(x) for x in args.fc_nm.split(',')])
@@ -456,6 +463,10 @@ def main():
     c.add_argument('--hold-k', type=float, default=200.0,
                    help='wrench mode: stiffness that holds position while driving')
     c.add_argument('--zeta', type=float, default=1.0)
+    c.add_argument('--k-trans', type=float, default=None,
+                   help='override translational stiffness [N/m]; D follows')
+    c.add_argument('--k-rot', type=float, default=None,
+                   help='override rotational stiffness [Nm/rad]; D follows')
     c.add_argument('--inertia', default=None,
                    help='6 task inertias, comma separated. Overrides the '
                         'payload+residual estimate, for probing other values.')
