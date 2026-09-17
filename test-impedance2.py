@@ -338,6 +338,29 @@ def cmd_analyze(args):
 
     pk = np.argmax(mag)
     print(f'\npeak |H| at {fb[pk]:.2f} Hz  ({fb[pk]*2*np.pi:.1f} rad/s)')
+
+    if mode == 'setpoint' and cb.mean() > 0.6:
+        # Fit a real second-order model rather than eyeballing a Q factor.
+        from scipy import optimize
+        w = 2 * np.pi * fb
+        def mdl(p_, w_):
+            s_ = 1j * w_
+            return p_[0] * p_[1] ** 2 / (s_ ** 2 + 2 * p_[2] * p_[1] * s_ + p_[1] ** 2)
+        p_, _ = optimize.leastsq(
+            lambda p_: np.r_[(mdl(p_, w) - Hb).real, (mdl(p_, w) - Hb).imag],
+            [float(np.mean(mag[:3])), 2 * np.pi * fb[pk], 0.3])
+        g_, wn_, z_ = p_[0], abs(p_[1]), abs(p_[2])
+        Kx = float(d['K'][axis]); Dx = float(d['D'][axis])
+        Im = float(d['ref_inertia'][axis]); Ie = Kx / wn_ ** 2
+        print(f'\nfitted 2nd-order:  w_n {wn_:.2f} rad/s ({wn_/2/np.pi:.2f} Hz)   '
+              f'zeta {z_:.3f}   DC {g_:.3f}')
+        print(f'  effective inertia K/w_n^2 = {Ie:.2f}   model says {Im:.2f}   '
+              f'({Im/max(Ie,1e-9):.2f}x off)')
+        print(f'  zeta predicted from measured inertia: {Dx/(2*np.sqrt(Kx*Ie)):.3f}')
+        print(f'  measured zeta is higher if friction is adding dissipation')
+        print(f'\n  to reach zeta=0.7 at this K, using the MEASURED inertia:')
+        print(f'    D[{name}] = {2*0.7*np.sqrt(Kx*Ie):.0f}   (currently {Dx:.0f})')
+        print(f'    verify by re-running the sweep -- do not trust the model bound')
     if mode == 'setpoint':
         dc = mag[:max(1, len(mag) // 20)].mean()
         Q = mag[pk] / max(dc, 1e-12)
