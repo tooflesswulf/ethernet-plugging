@@ -127,7 +127,14 @@ class CartesianImpedance:
 
     # Residual apparent inertia beyond the payload, measured by chirp
     # identification (test-impedance2.py). See effective_inertia().
-    RESIDUAL_MASS = 2.4          # kg
+    #
+    # 2.519, not 2.4, because the chirp measured the TOTAL apparent inertia
+    # (4.07 kg) while the payload was declared 1.670 kg. The tool was later
+    # weighed at 1.551 kg and the pendant corrected, so getPayload() now returns
+    # 0.119 kg less. The total did not change -- only its split -- so the
+    # residual absorbs the difference and D stays where the chirp put it.
+    # Re-derive both numbers together if the payload is ever re-declared again.
+    RESIDUAL_MASS = 2.519        # kg
     RESIDUAL_INERTIA = 0.25      # kg m^2
 
     @staticmethod
@@ -153,7 +160,10 @@ class CartesianImpedance:
 
         Rotational residual is the weaker number -- payload contributes only
         m*r^2 ~ 0.04 kg m^2, so the 0.25 is almost entirely residual, from one or
-        two usable measurements per axis. Treat it as provisional.
+        two usable measurements per axis. Treat it as provisional. The 0.119 kg
+        payload correction moves m*r^2 by 0.003 kg m^2 (~1%), far inside that
+        uncertainty, so RESIDUAL_INERTIA is deliberately left alone rather than
+        given a digit it has not earned.
         """
         m = float(payload_mass) + CartesianImpedance.RESIDUAL_MASS
         rot = CartesianImpedance.RESIDUAL_INERTIA

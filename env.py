@@ -68,6 +68,13 @@ class Env:
         # moment at 1.5 Nm instead of 5 and the tool cannot hold orientation.
         max_position_step=None,
         max_orientation_step=None,
+        # Firmware friction compensation, via the patched control script. These
+        # are the scales hand-tuned in brr.py. coulomb_friction now defaults to
+        # ZERO: the firmware does the compensating, and stacking our own
+        # feedforward on top of it over-compensates into a limit cycle.
+        script_file='rtde_control-1.6.5-frictionfix.script',
+        viscous_scale=(0.9, 0.9, 0.8, 0.9, 0.9, 0.9),
+        coulomb_scale=(0.9, 0.8, 0.8, 0.7, 0.8, 1.0),
         coulomb_friction=None,
         workspace=None,
         watchdog_hz=10.0,
@@ -124,6 +131,19 @@ class Env:
         # this controller. It is only needed for getJacobian()/getMassMatrix(),
         # and the Jacobian is computed locally (kinematics.URKin, ~16 us).
         self.ctrl = rtde_control.RTDEControlInterface(robot_ip)
+        # ur_rtde 1.6.5's stock script passes ZERO friction scales to
+        # direct_torque (it reads them into viscous_scale/couloumb_scale and
+        # then passes viscous_scaling/coulomb_scaling). The patched copy fixes
+        # those two lines; without it every scale below is silently discarded.
+        if script_file:
+            self.ctrl.setCustomScriptFile(script_file)
+            self._wait_for_control_script()
+        # Scales are passed EXPLICITLY on every directTorque call. The pybind
+        # defaults are non-zero (0.9 / 0.8), so a bare call silently enables
+        # compensation -- which is not what the stop paths want.
+        self.viscous_scale = list(viscous_scale)
+        self.coulomb_scale = list(coulomb_scale)
+        self._scale_off = [0.0] * 6
         self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
         self.gripper = wsg.WSG(ip=gripper_ip)
         self.gripper_query_frequency = gripper_query_frequency
@@ -155,8 +175,12 @@ class Env:
         self.dt = step
         self.tcp_offset = self.ctrl.getTCPOffset()
         self.kin = URKin(self.tcp_offset)
-        self.imp = CartesianImpedance(f_c=coulomb_friction,
-                                      tau_rated=self.kin.tau_rated)
+        # f_c = 0 unless explicitly overridden: the firmware compensates now.
+        # See RECALIBRATION-PLAN.md step 2 -- the standstill `assist` term may
+        # still earn its keep, but it has to be re-measured, not inherited.
+        self.imp = CartesianImpedance(
+            f_c=np.zeros(6) if coulomb_friction is None else coulomb_friction,
+            tau_rated=self.kin.tau_rated)
         # Apparent inertia is payload + a constant residual -- NOT the arm's task
         # inertia. The UR firmware compensates its own dynamics inside
         # direct_torque, so the plant we push on is the tool. Chirp identification
@@ -439,6 +463,32 @@ class Env:
         self._mode = IDLE
         print('Fault cleared.')
 
+    def _wait_for_control_script(self, timeout=5.0, poll=0.01):
+        """
+        setCustomScriptFile() -> reuploadScript() -> sendScript() returns as soon
+        as the bytes are written. Unlike the constructor's own upload path and
+        sendCustomScript(), it never calls waitForProgramRunning(), so the next
+        RTDE call races the program start and fails.
+
+        isProgramRunning() only says the program launched; readiness for commands
+        is signalled separately inside the script and is not exposed, so confirm
+        with a real round trip.
+        """
+        deadline = time.monotonic() + timeout
+        while not self.ctrl.isProgramRunning():
+            if time.monotonic() > deadline:
+                raise RuntimeError('control script did not start within '
+                                   f'{timeout:.1f} s')
+            time.sleep(poll)
+        while True:
+            try:
+                self.ctrl.getTCPOffset()
+                return
+            except RuntimeError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(poll)
+
     def _safe_stop_torque(self):
         """
         directTorque is re-applied by the controller every cycle while the command
@@ -446,10 +496,16 @@ class Env:
         stale torque does NOT decay on its own. Zero it, then stopJ -- which is
         non-realtime, so it changes the register away from 66 and decelerates
         under the controller's own position control.
+
+        Order matters now that friction compensation is live: zero torque is NOT
+        a stop, because the firmware keeps pushing a MOVING joint regardless of
+        what we command. Zero the SCALES first -- that restores full natural
+        stiction, which helps arrest the joint -- then the torque, then stopJ.
         """
         try:
             for _ in range(5):
-                self.ctrl.directTorque([0.0] * 6)
+                self.ctrl.directTorque([0.0] * 6, self._scale_off,
+                                       self._scale_off)
             self.ctrl.stopJ(2.0)
         except Exception as e:
             print(f'safe stop failed: {e}')
@@ -497,7 +553,8 @@ class Env:
                     # tick that sends nothing leaves the controller re-applying
                     # the previous torque forever. Always command zero here.
                     try:
-                        self.ctrl.directTorque([0.0] * 6)
+                        self.ctrl.directTorque([0.0] * 6, self._scale_off,
+                                               self._scale_off)
                     except Exception:
                         pass
                 self.ctrl.waitPeriod(t_start)
@@ -614,7 +671,8 @@ class Env:
                               filtered_force=filtered_force,
                               actual_q=q, actual_qd=qd,
                               tau_cmd=tau, cmd_wrench=F))
-        if self.ctrl.directTorque(tau.tolist()) is False:
+        if self.ctrl.directTorque(tau.tolist(), self.viscous_scale,
+                                  self.coulomb_scale) is False:
             self._trip('directTorque() returned False')
 
     def _check_robot_state(self):
