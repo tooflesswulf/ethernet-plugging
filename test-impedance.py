@@ -176,7 +176,10 @@ def connect(kin=True):
     # NOTE: do NOT pass FLAG_UPPER_RANGE_REGISTERS -- it hangs construction on
     # this controller. It is only needed for getJacobian()/getMassMatrix(), and
     # we compute the Jacobian locally anyway.
-    ctrl = rtde_control.RTDEControlInterface(ROBOT_IP)
+    F = rtde_control.RTDEControlInterface.Flags
+    ctrl = rtde_control.RTDEControlInterface(ROBOT_IP, flags=F.FLAG_UPLOAD_SCRIPT)
+    ctrl.setCustomScriptFile('rtde_control-1.6.5-frictionfix.script')
+
     recv = rtde_receive.RTDEReceiveInterface(ROBOT_IP)
     tcp_offset = ctrl.getTCPOffset()
     step = ctrl.getStepTime()
