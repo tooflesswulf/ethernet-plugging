@@ -1,3 +1,4 @@
+def rtde_control():
 # HEADER_BEGIN
     global reg_offset_float = # float register offset
     global reg_offset_int = # int register offset
@@ -1305,3 +1306,4 @@ $3.5    force_mode_set_damping(0.025)
         end
         textmsg("RTDE Control Script Terminated")
 # NODE_CONTROL_LOOP_ENDS
+end
