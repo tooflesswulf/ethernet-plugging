@@ -9,7 +9,6 @@ recv = rtde_receive.RTDEReceiveInterface('192.168.0.100')
 
 VIS = [.9, .9, .8, .9, .9, .9]
 COU = [.8, .8, .7, .8, .8, .8]
-COU[1] = 0
 
 stamps = []
 joints = []
