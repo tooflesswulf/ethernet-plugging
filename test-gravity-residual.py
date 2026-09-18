@@ -68,8 +68,12 @@ OFF = [0.0] * 6
 
 RATE = 1.0          # Nm/s ramp. Slow: breakaway torque is read off the ramp, so
                     # rate sets the quantisation of the answer.
-TAU_CAP = 8.0       # Nm. Predicted breakaways are ~3 Nm; this is 2.5x headroom
-                    # and far below joint 1's rating.
+TAU_CAP = 16.0      # Nm. Sized from MEASURED static breakaway, not from the
+                    # bracket-implied friction: the brackets measure friction
+                    # while MOVING (compensation active, ~0.4 Nm), while
+                    # breaking away from rest fights near-full stiction. The
+                    # first run capped at 8 Nm and lost 3 of 6 ramps. Still well
+                    # under joint 1's uncompensated 11.9-21.9 Nm range plus margin.
 QD_DETECT = 0.02    # rad/s -- breakaway
 DQ_DETECT = 0.0087  # rad (0.5 deg) -- breakaway by displacement
 QD_ABORT = 0.15     # rad/s on ANY joint -- hard abort
@@ -124,17 +128,17 @@ def wait_for_control_script(ctrl, timeout=5.0, poll=0.01):
             time.sleep(poll)
 
 
-def ramp(ctrl, recv, sgn, q_start, dt, log, dq_abort):
+def ramp(ctrl, recv, sgn, q_start, dt, log, dq_abort, tau_cap):
     """
     Ramp joint-1 torque at RATE until the joint moves. Returns breakaway torque
-    or None if it reached TAU_CAP. Any abort condition raises.
+    or None if it reached tau_cap. Any abort condition raises.
     """
     tau = np.zeros(6)
     t0 = time.perf_counter()
     while True:
         ts = ctrl.initPeriod()
         mag = RATE * (time.perf_counter() - t0)
-        if mag > TAU_CAP:
+        if mag > tau_cap:
             return None
         tau[1] = sgn * mag
         ctrl.directTorque(tau.tolist(), VISCOUS, COULOMB)
@@ -167,20 +171,25 @@ def main():
     ap.add_argument('--out', default='gravity-residual.npz')
     ap.add_argument('--max-travel', type=float, default=np.degrees(DQ_ABORT),
                     help='joint-1 travel [deg] that aborts a ramp')
+    ap.add_argument('--cap', type=float, default=TAU_CAP,
+                    help='max ramp torque [Nm]')
     ap.add_argument('--dry-run', action='store_true',
                     help='print the plan and predicted torques, move nothing')
     args = ap.parse_args()
     angles = [float(a) for a in args.angles.split(',')]
     dq_abort = np.radians(args.max_travel)
+    tau_cap = args.cap
 
     kin = URKin(np.zeros(6))
     print(f'error mass position p = {P_ERR} m (tool0)\n')
-    print('  q1 [deg]   tau_hat [Nm/kg]   expected tau+ / tau- at dm=1kg, f=0.6')
+    print('  q1 [deg]   tau_hat [Nm/kg]   expected tau+ / tau- at mu=0.66kg, f=5.6')
     for a in angles:
         q = np.radians(BASE_POSE_DEG.copy())
         q[1] = np.radians(a)
         th = tau_hat(kin, q)
-        print(f'  {a:8.2f}   {th:+9.4f}        {0.6 - th:+7.3f} / {-0.6 - th:+7.3f}')
+        # tau_d = -mu*tau_hat, so tau+/- = +/-f + mu*tau_hat
+        print(f'  {a:8.2f}   {th:+9.4f}        '
+              f'{5.6 + 0.66 * th:+7.3f} / {-5.6 + 0.66 * th:+7.3f}')
     if args.dry_run:
         return
 
@@ -188,7 +197,7 @@ def main():
     import rtde_control
     import rtde_receive
 
-    print(f'\nramp {RATE} Nm/s, cap {TAU_CAP} Nm, abort at {QD_ABORT} rad/s '
+    print(f'\nramp {RATE} Nm/s, cap {tau_cap} Nm, abort at {QD_ABORT} rad/s '
           f'or {np.degrees(dq_abort):.1f} deg of joint-1 travel')
     print('The arm WILL move at each breakaway and the gravity residual keeps')
     print('pushing afterwards. Clear space, hand on the e-stop.')
@@ -214,11 +223,12 @@ def main():
                 q_start = np.array(recv.getActualQ())
                 ctrl.setWatchdog(0.05)
                 try:
-                    b = ramp(ctrl, recv, sgn, q_start, dt, log, dq_abort)
+                    b = ramp(ctrl, recv, sgn, q_start, dt, log, dq_abort,
+                             tau_cap)
                 finally:
                     safe_stop(ctrl)
                 if b is None:
-                    print(f'  {name}: no breakaway below {TAU_CAP} Nm')
+                    print(f'  {name}: NO BREAKAWAY below {tau_cap} Nm -- raise --cap')
                 else:
                     pair[name] = sgn * b
                     print(f'  {name}: breakaway {sgn * b:+7.3f} Nm')
