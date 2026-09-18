@@ -179,6 +179,8 @@ def connect(kin=True):
     F = rtde_control.RTDEControlInterface.Flags
     ctrl = rtde_control.RTDEControlInterface(ROBOT_IP, flags=F.FLAG_UPLOAD_SCRIPT)
     ctrl.setCustomScriptFile('rtde_control-1.6.5-frictionfix.script')
+    while not ctrl.isProgramRunning():
+        time.sleep(.05)
 
     recv = rtde_receive.RTDEReceiveInterface(ROBOT_IP)
     tcp_offset = ctrl.getTCPOffset()
