@@ -85,7 +85,14 @@ class CartesianImpedance:
     """
 
     def __init__(self, f_c=None, tau_rated=None):
-        # K only; D is DERIVED in calibrate() from the measured inertia.
+        # K and D are both EXPLICIT. D used to be derived in calibrate() from an
+        # apparent-inertia model (payload + a measured residual); that model was
+        # identified while joint friction was uncompensated, so it described a
+        # plant that no longer exists now that the firmware does the friction.
+        # These D are the values that model produced at zeta = 0.7 and that the
+        # chirp campaign actually validated -- kept as measurements, without the
+        # model that used to regenerate them. Re-measure by chirp before trusting
+        # them under the new plant (RECALIBRATION-PLAN.md step 3).
         #
         # K_rot = 200 is measured, not guessed. The TCP sits 12.1 cm from the
         # payload's centre of mass, so ANY force at the TCP torques the tool --
@@ -95,9 +102,9 @@ class CartesianImpedance:
         # matching the predicted M/K scaling, and nearly halved peak force
         # (13.5 -> 7.3 N). rx and z improved too; x was unchanged.
         self.K_free = np.array([1500., 1500., 1500., 200., 200., 200.])
-        self.D_free = np.array([225., 225., 225., 3.2, 3.2, 3.2])
+        self.D_free = np.array([109.39, 109.39, 109.39, 10.60, 10.60, 10.60])
         self.K_contact = np.array([800., 800., 400., 160., 160., 200.])
-        self.D_contact = np.array([165., 165., 120., 2.6, 2.6, 3.2])
+        self.D_contact = np.array([79.89, 79.89, 56.49, 9.48, 9.48, 10.60])
 
         # Rotational limit sized to what the joints can actually deliver at the
         # TCP (13.5 Nm here). The old 5 Nm clipped every shaped rotation.
@@ -125,63 +132,21 @@ class CartesianImpedance:
         # into large translations. It was also modelling a plant the UR firmware
         # already compensates. See git history if it ever needs revisiting.
 
-    # Residual apparent inertia beyond the payload, measured by chirp
-    # identification (test-impedance2.py). See effective_inertia().
-    #
-    # 2.519, not 2.4, because the chirp measured the TOTAL apparent inertia
-    # (4.07 kg) while the payload was declared 1.670 kg. The tool was later
-    # weighed at 1.551 kg and the pendant corrected, so getPayload() now returns
-    # 0.119 kg less. The total did not change -- only its split -- so the
-    # residual absorbs the difference and D stays where the chirp put it.
-    # Re-derive both numbers together if the payload is ever re-declared again.
-    RESIDUAL_MASS = 2.519        # kg
-    RESIDUAL_INERTIA = 0.25      # kg m^2
-
-    @staticmethod
-    def effective_inertia(payload_mass, tcp_offset=None):
-        """
-        Apparent task-space inertia at the TCP = payload + a constant residual.
-
-        This is NOT the arm's rigid-body task inertia, and deliberately so: the
-        UR firmware compensates its own dynamics inside direct_torque, so what the
-        controller actually pushes on is the tool, not the arm. Measured by chirp:
-
-          * model (pinocchio Lambda) predicted 6.5-13.1 kg; MEASURED 3.58 kg
-          * measured inertia is near configuration-invariant (CV 16% over two
-            poses x three axes) whereas arm inertia is strongly pose-dependent
-          * adding a 1 kg mass moved it 4.10 -> 4.98 kg, i.e. ~1:1, so the plant
-            is payload-dominated
-          * the URDF mass is right (31.3 kg vs 33.1 on the sticker), which rules
-            out bad link data as the explanation
-
-        Every damping problem in this controller traced back to using the model
-        here: D = 2 zeta sqrt(K I) with I ~ 11 instead of ~3.6 is 1.75x too high,
-        and the old discrete bound was built on Lambda^-1, so it erred permissive.
-
-        Rotational residual is the weaker number -- payload contributes only
-        m*r^2 ~ 0.04 kg m^2, so the 0.25 is almost entirely residual, from one or
-        two usable measurements per axis. Treat it as provisional. The 0.119 kg
-        payload correction moves m*r^2 by 0.003 kg m^2 (~1%), far inside that
-        uncertainty, so RESIDUAL_INERTIA is deliberately left alone rather than
-        given a digit it has not earned.
-        """
-        m = float(payload_mass) + CartesianImpedance.RESIDUAL_MASS
-        rot = CartesianImpedance.RESIDUAL_INERTIA
-        if tcp_offset is not None:
-            r = float(np.linalg.norm(np.asarray(tcp_offset, float)[:3]))
-            rot += float(payload_mass) * r ** 2
-        return np.array([m, m, m, rot, rot, rot])
-
     def calibrate(self, inertia, zeta=1.0):
         """
-        Set the desired inertia and derive D = 2 zeta sqrt(K I) per axis.
+        Derive D = 2 zeta sqrt(K I) per axis from an EXPLICIT inertia.
 
-        `inertia` should come from effective_inertia(), not from a kinematic
-        model. There is no discrete-stability bound here any more: the one that
-        used to live here scored the measured-stable configuration at
-        lambda*dt = 13.6 and the measured-diverging one at 24.9 -- overlapping, so
-        it never discriminated, and it was computed from the wrong plant besides.
-        Verify damping with a chirp sweep (test-impedance2.py), not a model.
+        No longer called in the control path -- D_free/D_contact are set directly
+        above. This stays as a tool for chirp experiments that want to sweep a
+        damping hypothesis (test-impedance2.py --inertia). Whatever you pass must
+        be a number you measured; there is no apparent-inertia model here any
+        more to hand you one.
+
+        There is no discrete-stability bound here either: the one that used to
+        live here scored the measured-stable configuration at lambda*dt = 13.6
+        and the measured-diverging one at 24.9 -- overlapping, so it never
+        discriminated, and it was computed from the wrong plant besides. Verify
+        damping with a chirp sweep (test-impedance2.py), not a model.
         """
         I = np.asarray(inertia, float)
         self.inertia_d = I.copy()

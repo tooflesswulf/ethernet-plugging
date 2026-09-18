@@ -79,10 +79,13 @@ class Env:
         workspace=None,
         watchdog_hz=10.0,
         gain_ramp_time=0.3,
-        # 0.7 is measured: it flattened the x resonance (peak/DC 1.75 -> 1.02)
-        # with no late ticks. zeta=1.0 (D=156) trips the 60 N force limit, so the
-        # empirical stability boundary sits between D=109 and D=156.
-        damping_zeta=0.7,
+        # Scalar on the chirp-validated D in impedance.py; 1.0 = as measured.
+        # Those D came from zeta=0.7, which flattened the x resonance (peak/DC
+        # 1.75 -> 1.02) with no late ticks. zeta=1.0 (D=156, i.e. scale 1.43)
+        # tripped the 60 N force limit, so the empirical stability boundary is
+        # between scale 1.0 and 1.43. Both numbers predate firmware friction
+        # compensation -- re-chirp before pushing it up.
+        damping_scale=1.0,
         mode_blend_time=0.2,
         late_window=5.0,
         late_max=25,
@@ -181,21 +184,20 @@ class Env:
         self.imp = CartesianImpedance(
             f_c=np.zeros(6) if coulomb_friction is None else coulomb_friction,
             tau_rated=self.kin.tau_rated)
-        # Apparent inertia is payload + a constant residual -- NOT the arm's task
-        # inertia. The UR firmware compensates its own dynamics inside
-        # direct_torque, so the plant we push on is the tool. Chirp identification
-        # measured 3.58 kg (CV 16% across poses) where the kinematic model
-        # predicted 6.5-13.1, and adding a 1 kg mass moved it ~1:1.
-        #
-        # Because it scales with the payload, swapping the tool now updates the
-        # damping automatically.
+        # D is no longer derived from an apparent-inertia model. That model
+        # (payload + a measured residual) was identified while joint friction
+        # was uncompensated, and the firmware now does the friction -- so it
+        # described a plant that no longer exists, and scaling damping with the
+        # declared payload was inheriting a stale measurement automatically.
+        # impedance.py carries the chirp-validated D directly; damping_scale is
+        # the tuning knob, 1.0 = as measured.
         self.payload_mass = self.recv.getPayload()
-        self.ref_inertia = self.imp.effective_inertia(self.payload_mass,
-                                                      self.tcp_offset)
-        self.imp.calibrate(self.ref_inertia, zeta=damping_zeta)
-        print(f'payload     : {self.payload_mass:.3f} kg')
-        print(f'inertia     : {np.round(self.ref_inertia, 3)}  (payload + residual)')
-        print(f'D_free      : {np.round(self.imp.D_free, 1)}   zeta {damping_zeta}')
+        self.imp.D_free = damping_scale * self.imp.D_free
+        self.imp.D_contact = damping_scale * self.imp.D_contact
+        print(f'payload     : {self.payload_mass:.3f} kg  (logged only; '
+              f'no longer sets damping)')
+        print(f'D_free      : {np.round(self.imp.D_free, 1)}   '
+              f'scale {damping_scale}')
 
         self.safety = SafetyMonitor(workspace=workspace, dt=self.dt)
         self.watchdog_hz = watchdog_hz
