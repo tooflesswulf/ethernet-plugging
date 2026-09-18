@@ -1,10 +1,28 @@
 import rtde_control
+import rtde_receive
+import numpy as np
+import time
 
 ctrl = rtde_control.RTDEControlInterface('192.168.0.100')
 ctrl.setCustomScriptFile('rtde_control-1.6.5-frictionfix.script')
+recv = rtde_receive.RTDEReceiveInterface('192.168.0.100')
 
-while True:
-    t0 = ctrl.initPeriod()
-    ctrl.directTorque([0, 0, 0, 0, 0, 0])
-    ctrl.waitPeriod(t0)
+VIS = [.9, .9, .8, .9, .9, .9]
+COU = [.8, .8, .7, .8, .8, .8]
+COU[1] = 0
 
+stamps = []
+joints = []
+
+try:
+    while True:
+        t0 = ctrl.initPeriod()
+        ctrl.directTorque([0, 0, 0, 0, 0, 0])
+        q = recv.getActualQ()
+        print(q, end='\r')
+        stamps.append(time.perf_counter())
+        joints.append(q)
+        ctrl.waitPeriod(t0)
+except KeyboardInterrupt:
+    print('saving...')
+    np.savez('brr-log.npz', times=stamps, joints=joints)
