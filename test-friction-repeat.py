@@ -132,6 +132,8 @@ QD_QUIET = 0.006     # rad/s -- "stopped" for the torque-mode settle
 # looser than DQ_ABORT (some sag on entry is normal and expected) but far
 # tighter than "unbounded", which is what the first version of settle() had.
 DQ_SETTLE = 0.035    # rad (2.0 deg) on ANY joint during torque-mode entry
+SETTLE_GRACE = 0.15  # s before the settle's velocity abort arms (mode switch)
+SETTLE_HOT = 5       # consecutive ticks over QD_ABORT before it is a runaway
 
 QD_DETECT = 0.02     # rad/s  -- breakaway
 DQ_DETECT = 0.0087   # rad (0.5 deg) -- breakaway by displacement
@@ -281,6 +283,8 @@ def settle(ctrl, recv, j, isolate, dwell, qd_quiet=QD_QUIET, timeout=8.0):
     t0 = time.perf_counter()
     quiet_since = None
     worst = np.zeros(6)
+    peak = np.zeros(6)
+    hot = 0                      # consecutive ticks over QD_ABORT
     while True:
         ts = ctrl.initPeriod()
         ctrl.directTorque(zeros, vis, cou)
@@ -292,11 +296,23 @@ def settle(ctrl, recv, j, isolate, dwell, qd_quiet=QD_QUIET, timeout=8.0):
         # residual drives the arm. This loop had no limits in its first version
         # and let joint 1 raise the arm at pose 3. Same limits as the ramp.
         dq_s = np.array(recv.getActualQ()) - q0
-        if np.max(qd) > QD_ABORT:
-            k = int(np.argmax(qd))
-            raise RuntimeError(f'settle: joint {k} at {qd[k]:.3f} rad/s '
-                               f'(limit {QD_ABORT}) -- torque-mode entry is '
-                               f'driving the arm, not settling')
+        peak = np.maximum(peak, qd)
+
+        # The velocity abort is debounced and does not arm until SETTLE_GRACE
+        # has passed. moveJ returns with residual velocity, and the first
+        # readings across a control-mode switch can spike -- a single bad
+        # sample must not end a 1.5 h campaign. SETTLE_HOT consecutive ticks
+        # over the limit is 10 ms and ~1.5 mrad, so nothing real is missed,
+        # and DQ_SETTLE still bounds total travel throughout.
+        if time.perf_counter() - t0 > SETTLE_GRACE:
+            hot = hot + 1 if np.max(qd) > QD_ABORT else 0
+            if hot >= SETTLE_HOT:
+                k = int(np.argmax(qd))
+                raise RuntimeError(
+                    f'settle: joint {k} at {qd[k]:.3f} rad/s for {hot} ticks '
+                    f'(limit {QD_ABORT}) -- torque-mode entry is driving the '
+                    f'arm, not settling. peak qd = {np.round(peak, 3)}, '
+                    f'travel = {np.round(np.degrees(dq_s), 2)} deg')
         if np.max(np.abs(dq_s)) > DQ_SETTLE:
             # Crept to the limit at low speed: this pose will not hold under
             # these scales. That is a fact about the pose, not a runaway, so
@@ -562,6 +578,13 @@ def report_probe(rows, joints):
     print('  pose   scales OFF      test joint ON     read as')
     bad_off, bad_on = [], []
     for r in rows:
+        if 'runaway' in r:
+            print(f'  {r["pose"]:4d}   RUNAWAY -- probe stopped here')
+            print(f'         {r["runaway"]}')
+            continue
+        if 'scales OFF' not in r or f'joint {joints[0]} ON' not in r:
+            print(f'  {r["pose"]:4d}   incomplete')
+            continue
         o_ok, o_sag = r['scales OFF']
         n_ok, n_sag = r[f'joint {joints[0]} ON']
         if not o_ok:
@@ -612,22 +635,42 @@ def probe_poses(ctrl, recv, poses, joints, dwell, qd_quiet):
     for pi, q in enumerate(poses):
         print(f'  pose {pi}:')
         row = {'pose': pi}
-        for label, j_comp in (('scales OFF', None), (f'joint {joints[0]} ON',
-                                                     joints[0])):
-            ctrl.moveJ(q.tolist(), 0.3, 0.3)
-            ctrl.setWatchdog(0.05)
-            jj = joints[0] if j_comp is None else j_comp
-            _, sag, ok = settle(ctrl, recv, jj, j_comp is not None, dwell,
-                                qd_quiet=qd_quiet)
-            safe_stop(ctrl)
-            k = int(np.argmax(np.abs(sag)))
-            print(f'    {label:12s}: {"held " if ok else "MOVED"}  '
-                  f'worst joint {k} {np.degrees(sag[k]):+6.2f} deg   '
-                  f'all {np.round(np.degrees(sag), 2)}')
-            row[label] = (ok, sag.copy())
-            time.sleep(0.5)
+        try:
+            _probe_one(ctrl, recv, q, joints, dwell, qd_quiet, row)
+        except RuntimeError as e:
+            # A runaway ends the probe -- same doctrine as everywhere else: if
+            # the arm got away once, do not immediately try it again. But the
+            # poses already surveyed are the whole point, so keep them.
+            print(f'    ABORT at pose {pi}: {e}')
+            row['runaway'] = str(e)
+            rows.append(row)
+            print(f'\n  probe stopped at pose {pi}; reporting the '
+                  f'{len(rows) - 1} pose(s) completed before it.')
+            return rows
         rows.append(row)
     return rows
+
+
+def _probe_one(ctrl, recv, q, joints, dwell, qd_quiet, row):
+    """Settle once with all scales off, once with the test joint compensated."""
+    for label, j_comp in (('scales OFF', None),
+                          (f'joint {joints[0]} ON', joints[0])):
+        ctrl.moveJ(q.tolist(), 0.3, 0.3)
+        ctrl.setWatchdog(0.05)
+        jj = joints[0] if j_comp is None else j_comp
+        try:
+            _, sag, ok = settle(ctrl, recv, jj, j_comp is not None, dwell,
+                                qd_quiet=qd_quiet)
+        finally:
+            # Must run even when settle raises -- that is the case where the
+            # arm is moving and stopping it matters most.
+            safe_stop(ctrl)
+        k = int(np.argmax(np.abs(sag)))
+        print(f'    {label:12s}: {"held " if ok else "MOVED"}  '
+              f'worst joint {k} {np.degrees(sag[k]):+6.2f} deg   '
+              f'all {np.round(np.degrees(sag), 2)}')
+        row[label] = (ok, sag.copy())
+        time.sleep(0.5)
 
 
 def load_poses(path):
