@@ -114,8 +114,19 @@ BASE_POSE = np.array([2.00014732, -1.56678207, -0.18544123,
 ACROSS_POSE_F = np.array([8.767, 8.742, 5.192])
 ACROSS_POSE_Q1 = np.array([-1.83259571, -1.56678207, -1.34390352])   # rad
 
-TAU_CAP = np.array([17.0, 16.0, 14.0, 5.0, 6.0, 5.0])
+# 1.2x the largest UNCOMPENSATED breakaway per joint, as in
+# test-friction-recal.py. Joint 1 is 26, NOT the 16 of test-gravity-residual.py
+# -- that 16 was sized for its single tau_hat = 0 bracket pose, and a campaign
+# spanning 4-68 Nm of gravity load runs far past it. A cap hit at the high-load
+# poses is the cap being wrong, not the joint being stiff.
+TAU_CAP = np.array([17.0, 26.0, 14.0, 5.0, 6.0, 5.0])
 RATE_DEFAULT = np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])   # Nm/s
+
+# Measured from brr-log-old.npz over its genuinely still stretches (that log is
+# hand-guiding, not drift, but the stationary noise floor in it is the real one):
+# p50 0.0004 rad/s across joints, p95 0.0012, joint 1 the noisiest at 0.0038.
+# 0.006 clears joint 1's p95 with margin and is still 3x tighter than QD_DETECT.
+QD_QUIET = 0.006     # rad/s -- "stopped" for the torque-mode settle
 
 QD_DETECT = 0.02     # rad/s  -- breakaway
 DQ_DETECT = 0.0087   # rad (0.5 deg) -- breakaway by displacement
@@ -241,6 +252,53 @@ def temperatures(recv):
         return np.array(recv.getJointTemperatures(), float)
     except Exception:
         return np.full(6, np.nan)
+
+
+def settle(ctrl, recv, j, isolate, dwell, qd_quiet=QD_QUIET, timeout=8.0):
+    """
+    Enter torque mode at ZERO torque and wait for the arm to stop moving.
+    Returns (q_start, sag [rad, 6], settled).
+
+    This has to happen before q_start is read. moveJ leaves the joint under
+    position control; the first directTorque call is what releases it, and the
+    arm then sags into its torque-mode equilibrium. Capturing q_start before
+    that transient makes the sag look like breakaway -- which is where the
+    0.06 Nm readings came from: 60 ms into a 1 Nm/s ramp, roughly 30 ticks,
+    the arm settling rather than the joint breaking loose.
+
+    Waiting here also makes `dwell` mean what it should. Stiction grows with
+    time at rest, and the state that matters is at rest IN TORQUE MODE, not
+    held by the position controller.
+    """
+    vis, cou = scales_for(j, isolate)
+    q0 = np.array(recv.getActualQ())
+    zeros = [0.0] * 6
+    t0 = time.perf_counter()
+    quiet_since = None
+    worst = np.zeros(6)
+    while True:
+        ts = ctrl.initPeriod()
+        ctrl.directTorque(zeros, vis, cou)
+        qd = np.abs(np.array(recv.getActualQd()))
+        now = time.perf_counter()
+        if quiet_since is None:
+            worst = np.maximum(worst, qd)
+        if np.max(qd) < qd_quiet:
+            quiet_since = quiet_since if quiet_since is not None else now
+            if now - quiet_since >= dwell:
+                q = np.array(recv.getActualQ())
+                return q, q - q0, True
+        else:
+            quiet_since = None
+            worst = qd.copy()
+        if now - t0 > timeout:
+            q = np.array(recv.getActualQ())
+            k = int(np.argmax(worst))
+            print(f'      settle timed out after {timeout:.0f} s: joint {k} '
+                  f'still at {worst[k]:.4f} rad/s (need < {qd_quiet:.4f} on all) '
+                  f'-- raise --qd-quiet if this is the noise floor')
+            return q, q - q0, False
+        ctrl.waitPeriod(ts)
 
 
 def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, log, rep, dq_abort,
@@ -624,6 +682,9 @@ def main():
     # silently overwrites the previous one; the pooled analysis wants them all.
     ap.add_argument('--out', default=None,
                     help='default: friction-repeat-<YYYYmmdd-HHMMSS>.npz')
+    ap.add_argument('--qd-quiet', type=float, default=QD_QUIET,
+                    help=f'rad/s counting as stopped for the torque-mode settle '
+                         f'(default {QD_QUIET}; noise floor is ~0.001-0.004)')
     ap.add_argument('--compensate-all', action='store_true',
                     help='apply the friction scales to ALL joints during a '
                          'ramp, not just the one under test. The old behaviour; '
@@ -735,7 +796,7 @@ def main():
                   'block then assumes\n  the scatter here also holds there.')
     print()
 
-    res, temps, t_start, jcol, pcol, log = [], [], [], [], [], []
+    res, temps, t_start, jcol, pcol, log, sags = [], [], [], [], [], [], []
     t_run = time.perf_counter()
 
     # Campaign mode: PASSES over the whole pose set, reshuffled each pass, so
@@ -762,9 +823,21 @@ def main():
                 pcol.append(-1 if pi is None else pi)
                 for sgn, k in order:
                     ctrl.moveJ(here.tolist(), 0.3, 0.3)
-                    time.sleep(args.dwell)
-                    q_start = np.array(recv.getActualQ())
                     ctrl.setWatchdog(0.05)
+                    q_start, sag, ok_settle = settle(
+                        ctrl, recv, j, not args.compensate_all, args.dwell,
+                        qd_quiet=args.qd_quiet)
+                    sags.append(sag)
+                    if not ok_settle:
+                        print(f'    j{j} {"+-"[k]} : did NOT settle in torque '
+                              f'mode (sag {np.round(np.degrees(sag), 2)} deg) '
+                              f'-- discarding')
+                        safe_stop(ctrl)
+                        time.sleep(0.6)
+                        continue
+                    if np.max(np.abs(sag)) > np.radians(0.5):
+                        print(f'      (sag on entry '
+                              f'{np.round(np.degrees(sag), 2)} deg)')
                     try:
                         b_ = ramp(ctrl, recv, j, sgn, q_start, rates[j], caps[j],
                                   log, pas, dq_abort,
@@ -772,8 +845,13 @@ def main():
                     finally:
                         safe_stop(ctrl)
                     if b_ is None:
+                        extra = ('' if pi is None else
+                                 f'  (gravity load {gravity_torque(here)[j]:.0f} Nm)')
                         print(f'    j{j} {"+-"[k]} : NO breakaway below '
-                              f'{caps[j]:.1f} Nm')
+                              f'{caps[j]:.1f} Nm{extra}')
+                    elif b_ < 0.5:
+                        print(f'    j{j} {"+-"[k]} : {b_:6.3f} Nm  -- IMPLAUSIBLE, '
+                              f'discarding (settle transient?)')
                     else:
                         pair[k] = b_
                         print(f'    j{j} {"+-"[k]} : {b_:6.3f} Nm')
@@ -805,6 +883,7 @@ def main():
                  poses=(np.zeros((0, 6)) if POSES is None else POSES),
                  plan=np.array([[a_, b_] for a_, b_ in plan
                                 if b_ is not None], dtype=int).reshape(-1, 2),
+                 sag=np.array(sags, float).reshape(-1, 6),
                  seed=args.seed, pose=home, joints=np.array(joints),
                  dwell=args.dwell,
                  rate=np.array([rates.get(j, np.nan) for j in range(6)]),
