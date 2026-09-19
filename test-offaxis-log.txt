@@ -1,0 +1,87 @@
+OFF-AXIS AMPLITUDE SWEEP, axis 0
+  amplitudes [2.0, 4.0, 8.0, 12.0, 16.0, 20.0] mm, both directions, 2 reps
+  equilibrium ramped in over 1.0 s, then held to rest
+  f_c [0. 0. 0. 0. 0. 0.]   (OFF -- as env.py runs today)
+  firmware scales 0 on every joint (coulomb 0.8 is past the over-compensation
+    threshold; see test-scale-sweep.py)
+
+  24 steps, ~1 min
+
+The arm moves by the commanded amplitude on each step. Clear space.
+enter to start, ctrl-C to abort: 
+
+base pose  : [-0.8163  0.1289  0.3269 -0.2362 -3.0376  0.1525]
+K          : [1500. 1500. 1500.  200.  200.  200.]
+leash      : 26.7 mm
+
+  rep 0   +2.0 mm -> on  -0.01  off_t   0.02  off_r   0.07 mrad
+  rep 0   -2.0 mm -> on  -0.00  off_t   0.03  off_r   0.07 mrad
+  rep 0   +4.0 mm -> on  -0.01  off_t   0.02  off_r   0.04 mrad
+  rep 0   -4.0 mm -> on  -0.03  off_t   0.03  off_r   0.12 mrad
+  rep 0   +8.0 mm -> on   0.18  off_t   0.10  off_r   0.68 mrad
+  rep 0   -8.0 mm -> on  -0.33  off_t   0.16  off_r   1.25 mrad
+  rep 0  +12.0 mm -> on   0.64  off_t   0.36  off_r   2.50 mrad
+  rep 0  -12.0 mm -> on  -1.36  off_t   0.74  off_r   5.27 mrad
+  rep 0  +16.0 mm -> on   2.53  off_t   1.49  off_r   9.98 mrad
+  rep 0  -16.0 mm -> on  -2.40  off_t   1.43  off_r   9.48 mrad
+  rep 0  +20.0 mm -> on   3.93  off_t   2.21  off_r  15.33 mrad
+  rep 0  -20.0 mm -> on  -3.83  off_t   2.24  off_r  15.08 mrad
+  rep 1   +2.0 mm -> on  -1.88  off_t   1.04  off_r   7.39 mrad
+  rep 1   -2.0 mm -> on  -1.90  off_t   1.05  off_r   7.40 mrad
+  rep 1   +4.0 mm -> on  -1.28  off_t   0.69  off_r   5.03 mrad
+  rep 1   -4.0 mm -> on  -1.29  off_t   0.71  off_r   5.07 mrad
+  rep 1   +8.0 mm -> on  -0.11  off_t   0.03  off_r   0.37 mrad
+  rep 1   -8.0 mm -> on  -0.69  off_t   0.35  off_r   2.67 mrad
+  rep 1  +12.0 mm -> on   1.26  off_t   0.75  off_r   4.95 mrad
+  rep 1  -12.0 mm -> on  -1.70  off_t   0.94  off_r   6.66 mrad
+  rep 1  +16.0 mm -> on   2.41  off_t   1.43  off_r   9.47 mrad
+  rep 1  -16.0 mm -> on  -2.56  off_t   1.54  off_r  10.14 mrad
+  rep 1  +20.0 mm -> on   3.76  off_t   2.11  off_r  14.64 mrad
+  rep 1  -20.0 mm -> on  -3.31  off_t   1.93  off_r  12.99 mrad
+
+wrote offaxis-20260919-162550.npz
+
+==============================================================================
+  OFF-AXIS RESPONSE to a commanded +/-x step
+==============================================================================
+  amp[mm]  dir  on[mm]  off-trans[mm]  off-rot[mrad]  peak-trans[mm]  resid[mm]
+      2.0   +   -0.01         0.02          0.07           0.08      2.01
+     -2.0   -   -0.00         0.03          0.07           0.08      2.00
+      4.0   +   -0.01         0.02          0.04           0.09      4.01
+     -4.0   -   -0.03         0.03          0.12           0.09      3.97
+      8.0   +    0.18         0.10          0.68           0.18      7.82
+     -8.0   -   -0.33         0.16          1.25           0.25      7.68
+     12.0   +    0.64         0.36          2.50           0.44     11.36
+    -12.0   -   -1.36         0.74          5.27           0.84     10.67
+     16.0   +    2.53         1.49          9.98           1.52     13.55
+    -16.0   -   -2.40         1.43          9.48           1.46     13.68
+     20.0   +    3.93         2.21         15.33           2.29     16.22
+    -20.0   -   -3.83         2.24         15.08           2.31     16.33
+      2.0   +   -1.88         1.04          7.39           1.12      4.02
+     -2.0   -   -1.90         1.05          7.40           1.12      1.05
+      4.0   +   -1.28         0.69          5.03           0.86      5.33
+     -4.0   -   -1.29         0.71          5.07           0.80      2.80
+      8.0   +   -0.11         0.03          0.37           0.28      8.11
+     -8.0   -   -0.69         0.35          2.67           0.42      7.32
+     12.0   +    1.26         0.75          4.95           0.81     10.77
+    -12.0   -   -1.70         0.94          6.66           1.02     10.34
+     16.0   +    2.41         1.43          9.47           1.44     13.67
+    -16.0   -   -2.56         1.54         10.14           1.54     13.53
+     20.0   +    3.76         2.11         14.64           2.19     16.38
+    -20.0   -   -3.31         1.93         12.99           1.99     16.81
+
+  settled off-axis translation: mean   0.89 mm,  R^2(prop)  0.65  ->  proportional to amplitude
+  settled off-axis rotation   : mean   6.11 mrad,  R^2(prop)  0.64  ->  proportional to amplitude
+  PEAK off-axis translation   : mean   0.97 mm,  R^2(prop)  0.65  ->  proportional to amplitude
+
+  settled / peak off-axis translation: 0.76
+
+------------------------------------------------------------------------------
+  READ AS
+------------------------------------------------------------------------------
+  Settled off-axis error scales WITH the command and persists at rest. That
+  is a linear coupling, not friction -- the TCP-CoM lever arm (mechanism 2).
+  f_c will not touch it. K_rot, or moving the TCP nearer the payload CoM, is
+  where the effort goes.
+
+  (settled: proportional to amplitude;  peak: proportional to amplitude)
