@@ -95,6 +95,14 @@ import numpy as np
 # with: residual breakaway is a property of the joint AND the compensation.
 VISCOUS = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
 COULOMB = [0.8, 0.8, 0.7, 0.8, 0.8, 0.8]
+
+# What brr.py and env.py actually run. It differs from COULOMB above on joints
+# 0, 2, 3 and 5 (joint 1 is 0.8 in both). COULOMB came from
+# test-friction-recal.py / test-gravity-residual.py; this set is the one
+# hand-tuned in brr.py, and it is the one the arm is observed to HOLD under.
+# If you are reproducing that, pass --scales brr.
+BRR_VISCOUS = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
+BRR_COULOMB = [0.9, 0.8, 0.8, 0.7, 0.8, 1.0]
 OFF = [0.0] * 6
 
 # Default pose: the bracket-D configuration at q1 = -1.5668 rad, from
@@ -193,35 +201,84 @@ def preflight_campaign(poses, joints, dq_abort):
     print(f'  worst across the campaign: {worst:.1f} mm')
 
 
-def scales_for(j, isolate=True):
+def scales_for(j, mode, coulomb=None, viscous=None):
     """
-    (viscous, coulomb) 6-vectors to send during a ramp on joint j.
+    (viscous, coulomb) 6-vectors for a given compensation mode.
 
-    The firmware applies these PER JOINT (see rtde_control-1.6.5-frictionfix
-    .script line 1102), so compensation can be enabled on the joint under test
-    and left OFF everywhere else. That is the default, and it matters:
+      'off'  every joint at scale 0 -- full natural stiction everywhere.
+      'one'  only joint j compensated.
+      'all'  every joint compensated. This is what brr.py and env.py run.
 
-    Torque mode is gravity-compensated float, so a joint at rest is only
-    fighting the gravity MODEL error -- but at coulomb 0.8 joint 1's residual
-    stiction is just 5-9 Nm, which is not always enough to hold it. It creeps,
-    which is the "drifts to an attractor" behaviour in test-gravity-residual.py.
-    During a ramp on some other joint that creep is not a nuisance, it is
-    corruption: the pose moves, so the gravity load on the joint being measured
-    moves with it, and the campaign's whole premise is that load is fixed per
-    pose. Zeroing the other joints' scales restores their full natural stiction
-    (11.9-21.9 Nm on joint 1) and pins the pose.
+    Fewer compensated joints hold BETTER, not worse. Measured by hand: with
+    every coulomb scale at 0 the arm cannot be pushed into rising at all; with
+    them populated a very gentle push starts it rising and it keeps going.
+    Compensation cancels friction, so at nonzero velocity it pushes ALONG the
+    motion -- and if it over-estimates, the net torque drives the joint instead
+    of freeing it. Runaway rather than the limit cycle impedance.py:63 warns
+    about, because nothing arrests it.
 
-    This does not change what is measured. UR's compensation is a per-joint
-    feedforward on that joint's own velocity, so joint j's breakaway does not
-    depend on joint k's scale except through the pose -- which is exactly what
-    this is protecting. --compensate-all restores the old all-joints behaviour
-    if you want to A/B it.
+    At true zero velocity there is no velocity signal to act on, so the residual
+    static friction still holds. That is why the arm holds under brr.py if it is
+    brought to rest first. It also means entering torque mode with ANY residual
+    velocity is the hazard -- see `predwell`.
     """
-    if not isolate:
-        return list(VISCOUS), list(COULOMB)
+    cj = COULOMB[j] if coulomb is None else float(coulomb)
+    vj = VISCOUS[j] if viscous is None else float(viscous)
+    if mode == 'all':
+        v, c = list(VISCOUS), list(COULOMB)
+        v[j], c[j] = vj, cj
+        return v, c
     v, c = [0.0] * 6, [0.0] * 6
-    v[j], c[j] = VISCOUS[j], COULOMB[j]
+    if mode == 'one':
+        v[j], c[j] = vj, cj
+    elif mode != 'off':
+        raise ValueError(f'unknown compensation mode {mode!r}')
     return v, c
+
+
+COAST_WINDOW = 0.30      # s to watch after zeroing torque at breakaway
+COAST_BUDGET = 0.017     # rad (1.0 deg) of travel allowed during that window
+
+
+def coast(ctrl, recv, j, vis, cou, q_at_break):
+    """
+    The actual stability test: at breakaway, ZERO the commanded torque and
+    watch for COAST_WINDOW.
+
+    A joint whose friction is merely cancelled decelerates and stops once the
+    driving torque is removed. A joint whose friction is OVER-cancelled keeps
+    going, because the compensation pushes along the velocity it now has. That
+    is the difference between "compensation freed the joint" and "compensation
+    is driving it", and it cannot be read off the breakaway torque alone.
+
+    Deliberately observing motion after breakaway cuts against the
+    detection-is-an-abort doctrine everywhere else in this file, so the budget
+    is tight: 0.3 s and 1.0 deg, hard abort on either, torque already at zero
+    throughout. Nothing here commands motion -- it only declines to stop it for
+    a third of a second.
+    """
+    zeros = [0.0] * 6
+    t0 = time.perf_counter()
+    qd0 = abs(np.array(recv.getActualQd())[j])
+    peak, last = qd0, qd0
+    while time.perf_counter() - t0 < COAST_WINDOW:
+        ts = ctrl.initPeriod()
+        ctrl.directTorque(zeros, vis, cou)
+        qd = np.array(recv.getActualQd())
+        dq = np.array(recv.getActualQ()) - q_at_break
+        last = abs(qd[j])
+        peak = max(peak, last)
+        if np.max(np.abs(qd)) > QD_ABORT or abs(dq[j]) > COAST_BUDGET:
+            return qd0, last, peak, float(dq[j]), 'RUNAWAY'
+        ctrl.waitPeriod(ts)
+    dq = float((np.array(recv.getActualQ()) - q_at_break)[j])
+    if last < 0.2 * max(qd0, 1e-6):
+        verdict = 'decelerates'
+    elif last < 1.2 * max(qd0, 1e-6):
+        verdict = 'sustains'
+    else:
+        verdict = 'accelerates'
+    return qd0, last, peak, dq, verdict
 
 
 def safe_stop(ctrl, why=''):
@@ -261,7 +318,8 @@ def temperatures(recv):
         return np.full(6, np.nan)
 
 
-def settle(ctrl, recv, j, isolate, dwell, qd_quiet=QD_QUIET, timeout=8.0):
+def settle(ctrl, recv, j, mode, dwell, qd_quiet=QD_QUIET, timeout=8.0,
+           coulomb=None):
     """
     Enter torque mode at ZERO torque and wait for the arm to stop moving.
     Returns (q_start, sag [rad, 6], settled).
@@ -277,7 +335,7 @@ def settle(ctrl, recv, j, isolate, dwell, qd_quiet=QD_QUIET, timeout=8.0):
     time at rest, and the state that matters is at rest IN TORQUE MODE, not
     held by the position controller.
     """
-    vis, cou = scales_for(j, isolate)
+    vis, cou = scales_for(j, mode, coulomb)
     q0 = np.array(recv.getActualQ())
     zeros = [0.0] * 6
     t0 = time.perf_counter()
@@ -345,10 +403,10 @@ def settle(ctrl, recv, j, isolate, dwell, qd_quiet=QD_QUIET, timeout=8.0):
 
 
 def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, log, rep, dq_abort,
-         isolate=True):
+         mode='one', coulomb=None):
     """Ramp joint j until it moves. Returns breakaway [Nm], or None at the cap."""
     tau = np.zeros(6)
-    vis, cou = scales_for(j, isolate)
+    vis, cou = scales_for(j, mode, coulomb)
     t0 = time.perf_counter()
     while True:
         ts = ctrl.initPeriod()
@@ -571,106 +629,237 @@ def report(res, temps, t_start, joint, on_ref=True):
 
 
 def report_probe(rows, joints):
-    """Render the probe table. Split out so it can be tested off-robot."""
-    print('\n' + '=' * 66)
-    print('  POSE PROBE -- which poses hold in torque mode')
-    print('=' * 66)
-    print('  pose   scales OFF      test joint ON     read as')
-    bad_off, bad_on = [], []
+    """
+    Continuous creep first, verdict second.
+
+    The first version printed a pass/fail at DQ_SETTLE and nothing else, which
+    made marginal poses look categorical and flip between runs. What matters is
+    how far the joint creeps and whether that is repeatable.
+    """
+    print('\n' + '=' * 74)
+    print('  POSE PROBE -- creep on torque-mode entry, deg (median [min-max])')
+    print('=' * 74)
+    print(f'  limit {np.degrees(DQ_SETTLE):.1f} deg\n')
+    print('  pose    scales OFF            joint ON              ALL on'
+          '               read as')
+    bad_off, bad_on, contra, marginal, all_only = [], [], [], [], []
     for r in rows:
         if 'runaway' in r:
-            print(f'  {r["pose"]:4d}   RUNAWAY -- probe stopped here')
-            print(f'         {r["runaway"]}')
+            print(f'  {r["pose"]:4d}    RUNAWAY -- probe stopped here')
+            print(f'          {r["runaway"]}')
             continue
-        if 'scales OFF' not in r or f'joint {joints[0]} ON' not in r:
-            print(f'  {r["pose"]:4d}   incomplete')
+        off, on, alls = r.get('off', []), r.get('on', []), r.get('all', [])
+        if not off or not on or not alls:
+            print(f'  {r["pose"]:4d}    incomplete')
             continue
-        o_ok, o_sag = r['scales OFF']
-        n_ok, n_sag = r[f'joint {joints[0]} ON']
-        if not o_ok:
-            verdict = 'GRAVITY residual exceeds friction'
+
+        def col(v):
+            w = np.degrees([x[1] for x in v])
+            nmoved = sum(1 for x in v if not x[0])
+            return (f'{np.median(w):5.2f} [{w.min():4.2f}-{w.max():4.2f}] '
+                    f'{nmoved}/{len(v)}'), nmoved, len(v)
+
+        so, no_, to = col(off); sn, nn, tn = col(on); sa, na, ta = col(alls)
+        # Scales ON halves stiction, so it can only creep MORE, never less.
+        # If OFF moves and ON does not, the two measurements disagree about
+        # something other than the scales -- do not label it, flag it.
+        if na and not no_:
+            # Drifts with everything compensated, holds with nothing. That is
+            # over-compensation driving the joint, not a gravity residual:
+            # cancelling friction removes what was holding it.
+            verdict = 'OVER-COMPENSATION (drifts only with scales up)'
+            all_only.append(r['pose'])
+        elif no_ and not nn:
+            verdict = 'CONTRADICTORY -- see below'
+            contra.append(r['pose'])
+        elif no_ == to:
+            verdict = 'gravity residual > full stiction'
             bad_off.append(r['pose'])
-        elif not n_ok:
-            verdict = 'friction COMPENSATION drives it'
+        elif no_:
+            verdict = 'MARGINAL (inconsistent across reps)'
+            marginal.append(r['pose'])
+        elif nn == tn:
+            verdict = 'compensation drives it'
             bad_on.append(r['pose'])
+        elif nn:
+            verdict = 'MARGINAL with scales on'
+            marginal.append(r['pose'])
         else:
             verdict = 'usable'
-        print(f'  {r["pose"]:4d}   {np.degrees(np.abs(o_sag)).max():6.2f} deg'
-              f'      {np.degrees(np.abs(n_sag)).max():6.2f} deg      '
-              f'{verdict}')
+        print(f'  {r["pose"]:4d}   {so}   {sn}   {sa}   {verdict}')
+
     print()
+    if all_only:
+        print(f'  poses {all_only}: hold with NO compensation, drift with it. '
+              f'The scales are\n  over-compensating -- friction is what was '
+              f'holding the joint and the\n  compensation cancels it. Not a '
+              f'gravity residual. Lower coulomb for\n  joint 1 and re-probe, '
+              f'and run the campaign with --comp-mode one.')
+    if contra:
+        print(f'  poses {contra}: creep with scales OFF but not ON. Scales ON '
+              f'HALVES the\n  stiction, so it cannot hold better -- these are '
+              f'not a gravity result.\n  Something other than the scales '
+              f'differs between the two passes.')
+    if marginal:
+        print(f'  poses {marginal}: creep past the limit on some reps and not '
+              f'others. They sit\n  ON the threshold; a pass/fail here means '
+              f'nothing. Judge them by the\n  creep numbers, or raise '
+              f'--probe-reps.')
     if bad_off:
-        print(f'  poses {bad_off} move with NO compensation at all -- that is '
-              f'the\n  controller\'s gravity model, not our scales. Drop them, '
-              f'or fix the model\n  first; a friction number measured there '
-              f'sits on a moving pose.')
+        print(f'  poses {bad_off}: creep past the limit on EVERY rep with no '
+              f'compensation at\n  all. Joint 1 has its full 11.9-21.9 Nm '
+              f'there, so the standing torque\n  beats it. That is the '
+              f'controller\'s gravity model, and it is far larger\n  than the '
+              f'phantom-mass fit predicts.')
     if bad_on:
-        print(f'  poses {bad_on} hold until the scales go on -- the '
-              f'compensation is\n  injecting torque at standstill. Lower the '
-              f'coulomb scale for that joint\n  and re-probe; this is '
-              f'over-compensation, not gravity.')
-    if not bad_off and not bad_on:
-        print('  all poses hold both ways -- the campaign can run as planned.')
+        print(f'  poses {bad_on}: hold with scales off, creep with them on -- '
+              f'over-compensation.\n  Lower the coulomb scale for that joint '
+              f'and re-probe.')
+    if not any((contra, marginal, bad_off, bad_on, all_only)):
+        print('  every pose holds both ways on every rep -- campaign can run.')
 
 
-def probe_poses(ctrl, recv, poses, joints, dwell, qd_quiet):
+def approach(ctrl, q, joint):
     """
-    Reconnaissance: no torque ramps at all. At every pose, enter torque mode
-    twice -- once with ALL scales at zero, once with the test joint compensated
-    -- and record how far the arm moves.
+    Arrive at q the SAME way every time: back off 2 deg on the joint of
+    interest, then come in.
 
-    This separates the two candidate causes of a pose that will not hold:
+    Friction state depends on how a joint was last moved -- approach direction
+    and distance set where it sits inside its presliding band. Without this the
+    first settle at a pose follows a long transit from the previous pose and
+    the second follows a few-degree correction, so the two conditions are not
+    comparable. That confound is why the first probe reported pose 0 moving
+    with scales OFF and holding with them ON, which is backwards: scales ON
+    HALVES the stiction, so it cannot hold better.
+    """
+    back = np.asarray(q, float).copy()
+    back[joint] += APPROACH_BACKOFF
+    ctrl.moveJ(back.tolist(), 0.3, 0.3)
+    ctrl.moveJ(np.asarray(q, float).tolist(), 0.3, 0.3)
 
-      * moves with scales OFF  -> the controller's gravity compensation is
-        wrong; the residual drives the joint and friction alone has to hold it.
-      * holds with scales OFF, moves with them ON -> the friction compensation
-        itself is driving the joint at standstill. That is over-compensation,
-        the failure impedance.py:63 warns about, and it is a scale problem
-        rather than a gravity problem.
 
-    Costs a couple of minutes for 14 poses and tells you which are usable
-    before committing to a campaign.
+def _probe_one(ctrl, recv, q, joints, dwell, qd_quiet, row, reps, predwell):
+    """
+    Settle with scales off and with the test joint compensated, `reps` times
+    each, alternating which condition goes first so order is not confounded
+    with condition. Records every repeat: the useful output is the CONTINUOUS
+    creep, not a pass/fail at a threshold that marginal poses flip across.
+    """
+    j = joints[0]
+    # 'all' is brr.py's configuration -- zero torque, every joint compensated --
+    # which is empirically known to hold at poses this probe otherwise rejects.
+    # It is the control condition; if it holds and the others do not, the
+    # campaign should run that way.
+    base = [('off', 'off'), ('on', 'one'), ('all', 'all')]
+    for r in range(reps):
+        conds = base[r % 3:] + base[:r % 3]          # rotate, not fixed order
+        for tag, mode in conds:
+            approach(ctrl, q, j)
+            if predwell > 0:
+                time.sleep(predwell)   # settle UNDER POSITION CONTROL first;
+                                       # moveJ returns on trajectory completion,
+                                       # not on the servo having converged
+            ctrl.setWatchdog(0.05)
+            try:
+                _, sag, ok = settle(ctrl, recv, j, mode, dwell,
+                                    qd_quiet=qd_quiet)
+            finally:
+                safe_stop(ctrl)
+            worst = float(np.max(np.abs(sag)))
+            k = int(np.argmax(np.abs(sag)))
+            print(f'    rep {r} scales {tag:3s}: {"held " if ok else "MOVED"}  '
+                  f'joint {k} {np.degrees(sag[k]):+6.2f} deg')
+            row.setdefault(tag, []).append((ok, worst, k))
+            time.sleep(0.5)
+
+
+def sweep_scales(ctrl, recv, q, j, values, rate, cap, dwell, predwell,
+                 qd_quiet, dq_abort, mode, log):
+    """
+    Sweep joint j's coulomb scale and, at each value, measure both the
+    breakaway torque and what the joint does once the torque is removed.
+
+    Breakaway alone cannot tell over-compensation from good compensation --
+    both lower it. The coast verdict is what separates them, and the scale
+    where it turns from `decelerates` to `sustains`/`accelerates` is the
+    operating limit. test-friction-recal.py measures f_c at 0.8 without ever
+    checking that 0.8 is on the right side of it.
     """
     rows = []
-    for pi, q in enumerate(poses):
-        print(f'  pose {pi}:')
-        row = {'pose': pi}
-        try:
-            _probe_one(ctrl, recv, q, joints, dwell, qd_quiet, row)
-        except RuntimeError as e:
-            # A runaway ends the probe -- same doctrine as everywhere else: if
-            # the arm got away once, do not immediately try it again. But the
-            # poses already surveyed are the whole point, so keep them.
-            print(f'    ABORT at pose {pi}: {e}')
-            row['runaway'] = str(e)
-            rows.append(row)
-            print(f'\n  probe stopped at pose {pi}; reporting the '
-                  f'{len(rows) - 1} pose(s) completed before it.')
-            return rows
-        rows.append(row)
+    for cj in values:
+        print(f'  coulomb {cj:.2f}:')
+        got = {}
+        for sgn, name in ((1.0, '+'), (-1.0, '-')):
+            approach(ctrl, q, j)
+            if predwell > 0:
+                time.sleep(predwell)
+            ctrl.setWatchdog(0.05)
+            try:
+                q_start, _, ok = settle(ctrl, recv, j, mode, dwell,
+                                        qd_quiet=qd_quiet, coulomb=cj)
+                if not ok:
+                    print(f'    {name}: would not settle -- skipped')
+                    got[name] = None
+                    continue
+                b = ramp(ctrl, recv, j, sgn, q_start, rate, cap, log, 0,
+                         dq_abort, mode=mode, coulomb=cj)
+                if b is None:
+                    print(f'    {name}: no breakaway below {cap:.1f} Nm')
+                    got[name] = None
+                    continue
+                vis, cou = scales_for(j, mode, cj)
+                qb = np.array(recv.getActualQ())
+                qd0, qd1, peak, dq, verdict = coast(ctrl, recv, j, vis, cou, qb)
+                print(f'    {name}: breakaway {b:6.3f} Nm   coast '
+                      f'{qd0:.4f} -> {qd1:.4f} rad/s (peak {peak:.4f}, '
+                      f'{np.degrees(dq):+.2f} deg)   {verdict}')
+                got[name] = (b, qd0, qd1, peak, dq, verdict)
+            finally:
+                safe_stop(ctrl)
+            time.sleep(0.6)
+        rows.append({'coulomb': cj, **got})
     return rows
 
 
-def _probe_one(ctrl, recv, q, joints, dwell, qd_quiet, row):
-    """Settle once with all scales off, once with the test joint compensated."""
-    for label, j_comp in (('scales OFF', None),
-                          (f'joint {joints[0]} ON', joints[0])):
-        ctrl.moveJ(q.tolist(), 0.3, 0.3)
-        ctrl.setWatchdog(0.05)
-        jj = joints[0] if j_comp is None else j_comp
-        try:
-            _, sag, ok = settle(ctrl, recv, jj, j_comp is not None, dwell,
-                                qd_quiet=qd_quiet)
-        finally:
-            # Must run even when settle raises -- that is the case where the
-            # arm is moving and stopping it matters most.
-            safe_stop(ctrl)
-        k = int(np.argmax(np.abs(sag)))
-        print(f'    {label:12s}: {"held " if ok else "MOVED"}  '
-              f'worst joint {k} {np.degrees(sag[k]):+6.2f} deg   '
-              f'all {np.round(np.degrees(sag), 2)}')
-        row[label] = (ok, sag.copy())
-        time.sleep(0.5)
+def report_sweep(rows, j):
+    print('\n' + '=' * 74)
+    print(f'  COULOMB SCALE SWEEP -- joint {j}')
+    print('=' * 74)
+    print('  coulomb   breakaway +/-        coast + / -           ')
+    limit = None
+    for r in rows:
+        p_, m_ = r.get('+'), r.get('-')
+        bp = f'{p_[0]:6.2f}' if p_ else '   n/a'
+        bm = f'{m_[0]:6.2f}' if m_ else '   n/a'
+        vp = p_[5] if p_ else 'n/a'
+        vm = m_[5] if m_ else 'n/a'
+        bad = [v for v in (vp, vm) if v in ('sustains', 'accelerates', 'RUNAWAY')]
+        if bad and limit is None:
+            limit = r['coulomb']
+        print(f'   {r["coulomb"]:5.2f}   {bp} / {bm} Nm     '
+              f'{vp:12s} / {vm:12s}' + ('   <-- first unstable' if bad and
+                                        limit == r['coulomb'] else ''))
+    print()
+    if limit is None:
+        print('  every scale tested decelerates after breakaway -- no '
+              'over-compensation\n  found in this range. The rise is not '
+              'coming from the coulomb scale.')
+    else:
+        safe = [r['coulomb'] for r in rows if r['coulomb'] < limit]
+        print(f'  over-compensation starts at coulomb {limit:.2f}.')
+        if safe:
+            print(f'  highest scale that still decelerates: {max(safe):.2f}. '
+                  f'Run the campaign\n  at or below it, and re-measure f_c '
+                  f'there -- a breakaway read above this\n  threshold is not '
+                  f'a friction number, it is the scale driving the joint.')
+        else:
+            print('  even the lowest scale tested is unstable; extend the '
+                  'sweep downward.')
+        if any(r['coulomb'] >= 0.8 and r is rows[-1] for r in rows) or limit <= 0.8:
+            print(f'\n  NOTE: 0.8 is what test-friction-recal.py, '
+                  f'test-gravity-residual.py and\n  this script all use by '
+                  f'default. If the limit is at or below it, every f_c\n  '
+                  f'measured at 0.8 needs redoing.')
 
 
 def load_poses(path):
@@ -822,8 +1011,12 @@ def main():
                     help='seconds at rest before each ramp; stiction grows with it')
     ap.add_argument('--max-travel', type=float, default=DQ_ABORT,
                     help='rad on the joint under test')
-    ap.add_argument('--coulomb', default=','.join(str(c) for c in COULOMB))
-    ap.add_argument('--viscous', default=','.join(str(v) for v in VISCOUS))
+    ap.add_argument('--scales', choices=('recal', 'brr'), default='recal',
+                    help="'recal' = the test-friction-recal set (default); "
+                         "'brr' = the set brr.py/env.py run, which differs on "
+                         "joints 0/2/3/5 and is the one observed to hold")
+    ap.add_argument('--coulomb', default=None)
+    ap.add_argument('--viscous', default=None)
     # Timestamped by default. A campaign is many invocations and a fixed name
     # silently overwrites the previous one; the pooled analysis wants them all.
     ap.add_argument('--out', default=None,
@@ -835,34 +1028,56 @@ def main():
                     help='no torque ramps: just visit every pose and report '
                          'whether it holds in torque mode, with scales off and '
                          'on. Use this before committing to a campaign.')
-    ap.add_argument('--compensate-all', action='store_true',
-                    help='apply the friction scales to ALL joints during a '
-                         'ramp, not just the one under test. The old behaviour; '
-                         'lets the other joints creep and moves the pose.')
+    ap.add_argument('--sweep', action='store_true',
+                    help='sweep the coulomb scale on the test joint at ONE '
+                         'pose, measuring breakaway and post-breakaway coast '
+                         'at each. Finds the over-compensation threshold.')
+    ap.add_argument('--sweep-values', default='0.0,0.2,0.4,0.6,0.8',
+                    help='coulomb scales to sweep (default 0.0,0.2,0.4,0.6,0.8)')
+    ap.add_argument('--probe-reps', type=int, default=3,
+                    help='repeats per condition per pose in --probe-only '
+                         '(default 3; marginal poses flip at 1)')
+    ap.add_argument('--comp-mode', choices=('off', 'one', 'all'), default='one',
+                    help="compensation during ramps: 'one' = test joint only "
+                         "(default -- every other joint keeps full stiction and "
+                         "pins the pose), 'all' = every joint, which is what "
+                         "makes the arm rise on a gentle push.")
+    ap.add_argument('--predwell', type=float, default=1.0,
+                    help='seconds to wait UNDER POSITION CONTROL after moveJ '
+                         'before entering torque mode. moveJ returns on '
+                         'trajectory completion, not on the servo settling.')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
 
     out = args.out or time.strftime('friction-repeat-%Y%m%d-%H%M%S.npz')
     if args.poses and (args.here or args.pose):
         ap.error('--poses is exclusive with --here / --pose')
+    comp_mode = args.comp_mode
     joints = [int(x) for x in args.joints.split(',')]
     dq_abort = args.max_travel
-    COULOMB[:] = [float(x) for x in args.coulomb.split(',')]
-    VISCOUS[:] = [float(x) for x in args.viscous.split(',')]
+    if args.scales == 'brr':
+        COULOMB[:], VISCOUS[:] = list(BRR_COULOMB), list(BRR_VISCOUS)
+    if args.coulomb:
+        COULOMB[:] = [float(x) for x in args.coulomb.split(',')]
+    if args.viscous:
+        VISCOUS[:] = [float(x) for x in args.viscous.split(',')]
     rates = {j: (RATE_DEFAULT[j] if args.rate is None else args.rate)
              for j in joints}
     caps = {j: (TAU_CAP[j] if args.cap is None else args.cap) for j in joints}
 
     print(f'breakaway REPEATABILITY: joints {joints}, {args.repeats} '
           + ('passes over the pose set' if args.poses else 'repeats at one pose'))
-    if args.compensate_all:
-        print(f'  viscous {VISCOUS}\n  coulomb {COULOMB}   (ALL joints)')
-        print('  !! other joints will creep and move the pose -- see scales_for()')
-    else:
-        print('  scales applied to the joint under test ONLY; every other joint '
-              'is left\n  at scale 0 so its natural stiction pins the pose:')
-        for j in joints:
-            print(f'    joint {j}: viscous {VISCOUS[j]}  coulomb {COULOMB[j]}')
+    _lbl = {'off': 'NO compensation on any joint (stickiest; holds best)',
+            'one': 'test joint only (every other joint at scale 0)',
+            'all': 'ALL joints -- brr.py config; arm rises on a gentle push'}[comp_mode]
+    print(f'  compensation: {_lbl}   (--scales {args.scales})')
+    if comp_mode == 'all' and COULOMB != BRR_COULOMB:
+        print(f'  !! coulomb {COULOMB} differs from brr.py\'s {BRR_COULOMB} on '
+              f'joints\n     {[i for i in range(6) if COULOMB[i] != BRR_COULOMB[i]]}'
+              f' -- pass --scales brr to reproduce what you saw hold')
+    v_, c_ = scales_for(joints[0], comp_mode)
+    print(f'    viscous {v_}\n    coulomb {c_}   (shown for joint {joints[0]})')
+    print(f'  predwell {args.predwell} s under position control before torque mode')
     for j in joints:
         print(f'  joint {j}: rate {rates[j]} Nm/s   cap {caps[j]} Nm')
     print(f'  dwell {args.dwell} s')
@@ -946,6 +1161,39 @@ def main():
                   'block then assumes\n  the scatter here also holds there.')
     print()
 
+    if args.sweep:
+        j = joints[0]
+        vals = [float(x) for x in args.sweep_values.split(',')]
+        q_sweep = POSES[0] if POSES is not None else home
+        print(f'\nsweeping joint {j} coulomb over {vals}')
+        print(f'  pose (rad): {np.round(q_sweep, 6)}')
+        print(f'  at breakaway the torque is ZEROED and the joint watched for '
+              f'{COAST_WINDOW:.2f} s\n  (budget {np.degrees(COAST_BUDGET):.1f} '
+              f'deg, hard abort on either)\n')
+        log = []
+        rows = []
+        try:
+            rows = sweep_scales(ctrl, recv, q_sweep, j, vals, rates[j], caps[j],
+                                args.dwell, args.predwell, args.qd_quiet,
+                                dq_abort, comp_mode, log)
+        except (RuntimeError, KeyboardInterrupt) as e:
+            print(f'\nABORT: {e}')
+        finally:
+            safe_stop(ctrl, 'end of sweep')
+            try:
+                ctrl.stopScript()
+            except Exception:
+                pass
+        if log:
+            L = np.array(log)
+            np.savez(out, t=L[:, 0], tau=L[:, 3], q=L[:, 4:10], qd=L[:, 10:16],
+                     sweep_values=np.array(vals), pose=q_sweep, joint=j,
+                     viscous=VISCOUS, coulomb=COULOMB)
+            print(f'\nwrote {out}')
+        if rows:
+            report_sweep(rows, j)
+        return
+
     if args.probe_only:
         if POSES is None:
             POSES_P = np.array([home])
@@ -953,7 +1201,7 @@ def main():
             POSES_P = POSES
         try:
             rows = probe_poses(ctrl, recv, POSES_P, joints, args.dwell,
-                               args.qd_quiet)
+                               args.qd_quiet, args.probe_reps, args.predwell)
         finally:
             safe_stop(ctrl, 'end of probe')
             try:
@@ -991,8 +1239,11 @@ def main():
                 for sgn, k in order:
                     ctrl.moveJ(here.tolist(), 0.3, 0.3)
                     ctrl.setWatchdog(0.05)
+                    ctrl.setWatchdog(0.05)
+                    if args.predwell > 0:
+                        time.sleep(args.predwell)
                     q_start, sag, ok_settle = settle(
-                        ctrl, recv, j, not args.compensate_all, args.dwell,
+                        ctrl, recv, j, comp_mode, args.dwell,
                         qd_quiet=args.qd_quiet)
                     sags.append(sag)
                     if not ok_settle:
@@ -1008,7 +1259,7 @@ def main():
                     try:
                         b_ = ramp(ctrl, recv, j, sgn, q_start, rates[j], caps[j],
                                   log, pas, dq_abort,
-                                  isolate=not args.compensate_all)
+                                  mode=comp_mode)
                     finally:
                         safe_stop(ctrl)
                     if b_ is None:
