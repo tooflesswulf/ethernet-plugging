@@ -1,45 +1,21 @@
 """
-=============================================================================
-RUN THIS NEXT  (temporary -- delete this block once it has been run)
-=============================================================================
-
-    python test-offaxis.py --f-sat 80 --amps 10,20,30,40,50 \
-        --fc-assist 1.0 --f-c 10.34,9.52,6.96,2.78,2.94,2.07
-
-WHY: every f_c test so far ran at HALF strength. At standstill
-friction_feedforward returns f_c * assist * tanh(tau/t_eps), and fc_assist
-defaults to 0.5 -- so f_c[1] = 9.52 Nm delivered only 4.76 Nm against an
-11.8-24.1 Nm measured breakaway. At assist 1.0 it delivers 9.52 Nm, which is
-81% of the weaker direction and the value the doctrine in impedance.py:63
-actually intends. --f-sat 80 lifts the force cap, which is what limits the
-command, not K.
-
-READ IT IN THIS ORDER:
-
-  1. realised / commanded displacement, printed just above the verdict.
-     Every run so far topped out at 0.43, which is why none of them could
-     answer anything -- the arm never left its deadband. If this is still
-     below ~0.9, stop there: the compensation is still too weak and the
-     off-axis numbers mean nothing.
-
-  2. If it clears ~0.9, then the off-axis error:
-       collapses  -> friction was the whole story. f_c + fc_assist is the fix
-                     and the teleop coupling is solved.
-       persists   -> friction is RULED OUT as the cause. Something outside
-                     the three mechanisms below is holding it, and that is
-                     new information.
-
-  3. The q trace is logged now, so which joints actually broke loose can be
-     read off directly instead of inferred from the Jacobian span.
-
-WATCH FOR: a limit cycle at fc_assist 1.0. 81% of breakaway is close to the
-line and over-compensation is the failure mode -- impedance.py:63 warns that
-it turns a deadband into a limit cycle. If the arm buzzes at rest, back it to
-0.8 and re-run.
-
-=============================================================================
-
 Why does a +x teleop command move y, z and the rotations?
+
+ANSWERED, 2026-09-19 (offaxis-20260919-165630.npz): FRICTION, via stopping
+short. At +50 mm the arm reached its commanded equilibrium (realised/commanded
+0.98-1.00) and the off-axis error collapsed -- settled off_r 0.86 and 2.33 mrad
+against a PEAK of 41.0 and 44.5 mrad during transit. It tilts on the way and
+unwinds completely once it arrives. Every stuck step (realised < 0.6) kept
+26.6 mrad on average. The coupling is not a property of the command; it is
+where the arm happens to freeze.
+
+Joint travel confirms the subspace: at +50 mm joints 1/2/3 moved 12.7/19.4/12.1
+deg and joints 0/4/5 moved 0.05/0.009/0.018 deg. Only the parallel-axis
+sub-chain moves, which is why the symptom is z and ry and never y, rx, rz.
+
+Still open: the MINUS direction never converges (plateaus at 0.5 even at 50 mm),
+because f_c is symmetric and joint 1 breaks away at 11.8 Nm one way and 24.1 Nm
+the other. See the note at the end.
 
 Three mechanisms can do it and they need different fixes, so measure before
 modelling:
