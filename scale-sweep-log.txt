@@ -1,0 +1,64 @@
+COULOMB SCALE SWEEP, joint 1
+  values [0.0, 0.2, 0.4, 0.6, 0.8]
+  viscous 0.9 held fixed on joint 1; every other joint at scale 0
+  rate 1.0 Nm/s   cap 26.0 Nm   dwell 2.0 s   predwell 1.0 s
+  at breakaway the torque is ZEROED and the joint watched for 0.30 s
+    budget 1.0 deg, hard abort on that or 0.15 rad/s
+
+  ~3 min if nothing aborts.
+
+This one deliberately lets the joint move after breakaway.
+Put the arm where you want it measured. Hand on the e-stop.
+enter to start, ctrl-C to abort: 
+
+sweeping at the CURRENT configuration
+  pose (rad): [ 3.169265 -2.308839 -0.775508 -1.567335 -4.624177 -1.385009]
+  pendant (deg): [ 181.585 -132.287  -44.433  -89.802 -264.946  -79.355]
+  joint 1 gravity torque (links only, no payload): 70.4 Nm
+
+  coulomb 0.00:
+    +: breakaway 11.829 Nm   coast 0.0200 -> 0.0000 rad/s (peak 0.0203, +0.01 deg)   decelerates
+    -: breakaway 24.080 Nm   coast 0.0204 -> 0.0004 rad/s (peak 0.0211, +0.02 deg)   decelerates
+  coulomb 0.20:
+    +: breakaway 11.628 Nm   coast 0.0204 -> 0.0000 rad/s (peak 0.0228, +0.02 deg)   decelerates
+    -: breakaway 23.695 Nm   coast 0.0203 -> 0.0001 rad/s (peak 0.0215, +0.01 deg)   decelerates
+  coulomb 0.40:
+    +: breakaway 11.499 Nm   coast 0.0207 -> 0.0000 rad/s (peak 0.0223, +0.03 deg)   decelerates
+    -: breakaway 23.954 Nm   coast 0.0206 -> 0.0001 rad/s (peak 0.0233, +0.02 deg)   decelerates
+  coulomb 0.60:
+    +: breakaway  8.232 Nm   coast 0.0201 -> 0.0003 rad/s (peak 0.0207, +0.05 deg)   decelerates
+    -: breakaway 23.850 Nm   coast 0.0216 -> 0.0002 rad/s (peak 0.0259, +0.04 deg)   decelerates
+  coulomb 0.80:
+    +: breakaway 10.240 Nm   coast 0.0201 -> 0.0403 rad/s (peak 0.0403, +0.47 deg)   accelerates
+      will not hold: joint 1 crept +2.01 deg on entry
+    -: would not settle -- skipped
+      STOP: end of sweep
+
+wrote scale-sweep-20260919-154619.npz
+
+============================================================================
+  COULOMB SCALE SWEEP -- joint 1
+============================================================================
+  pose (rad): [ 3.169265 -2.308839 -0.775508 -1.567335 -4.624177 -1.385009]
+  pendant (deg): [ 181.585 -132.287  -44.433  -89.802 -264.946  -79.355]
+
+  coulomb   breakaway + / -         coast +        coast -
+    0.00    11.83 /  24.08 Nm      decelerates   decelerates 
+    0.20    11.63 /  23.70 Nm      decelerates   decelerates 
+    0.40    11.50 /  23.95 Nm      decelerates   decelerates 
+    0.60     8.23 /  23.85 Nm      decelerates   decelerates 
+    0.80    10.24 /    n/a Nm      accelerates   n/a            <-- first unstable
+
+  over-compensation starts at coulomb 0.80.
+  highest scale that still decelerates: 0.60
+
+  Run below that, and re-measure f_c there. A breakaway read at or above
+  0.80 is not a friction number -- part of it is the scale driving the joint.
+
+  NOTE: 0.8 is the default in test-friction-recal.py, test-gravity-residual.py
+  and test-friction-repeat.py. The limit is at or below it, so every f_c
+  measured at 0.8 -- including the 5.19-8.77 Nm spread in
+  RECALIBRATION-PLAN.md -- needs redoing.
+
+  This is for the pose above. The threshold is load dependent; re-run it
+  somewhere else before generalising.
