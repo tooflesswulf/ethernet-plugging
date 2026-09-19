@@ -51,6 +51,16 @@ as the joint warms, and nothing in this repo has ever recorded it; if the
 scatter is really a warm-up transient it will show as a trend against
 temperature, which is a missing model input rather than noise.
 
+COMPENSATION IS APPLIED TO THE TEST JOINT ONLY
+----------------------------------------------
+The firmware takes per-joint scale vectors, so only the joint being ramped gets
+compensated; the rest stay at scale 0 and keep full natural stiction. Without
+this, joint 1 creeps during a ramp on any other joint -- at coulomb 0.8 its
+residual stiction is 5-9 Nm, which does not reliably hold it against the gravity
+model error. That creep moves the pose, and with it the gravity load on the
+joint being measured, which is the one thing a per-pose campaign must hold
+fixed. See scales_for(). --compensate-all restores the old behaviour.
+
 SAFETY
 ------
 Same doctrine as test-friction-recal.py and test-gravity-residual.py:
@@ -165,6 +175,37 @@ def preflight_campaign(poses, joints, dq_abort):
     print(f'  worst across the campaign: {worst:.1f} mm')
 
 
+def scales_for(j, isolate=True):
+    """
+    (viscous, coulomb) 6-vectors to send during a ramp on joint j.
+
+    The firmware applies these PER JOINT (see rtde_control-1.6.5-frictionfix
+    .script line 1102), so compensation can be enabled on the joint under test
+    and left OFF everywhere else. That is the default, and it matters:
+
+    Torque mode is gravity-compensated float, so a joint at rest is only
+    fighting the gravity MODEL error -- but at coulomb 0.8 joint 1's residual
+    stiction is just 5-9 Nm, which is not always enough to hold it. It creeps,
+    which is the "drifts to an attractor" behaviour in test-gravity-residual.py.
+    During a ramp on some other joint that creep is not a nuisance, it is
+    corruption: the pose moves, so the gravity load on the joint being measured
+    moves with it, and the campaign's whole premise is that load is fixed per
+    pose. Zeroing the other joints' scales restores their full natural stiction
+    (11.9-21.9 Nm on joint 1) and pins the pose.
+
+    This does not change what is measured. UR's compensation is a per-joint
+    feedforward on that joint's own velocity, so joint j's breakaway does not
+    depend on joint k's scale except through the pose -- which is exactly what
+    this is protecting. --compensate-all restores the old all-joints behaviour
+    if you want to A/B it.
+    """
+    if not isolate:
+        return list(VISCOUS), list(COULOMB)
+    v, c = [0.0] * 6, [0.0] * 6
+    v[j], c[j] = VISCOUS[j], COULOMB[j]
+    return v, c
+
+
 def safe_stop(ctrl, why=''):
     """Scales first, then torque, then leave torque mode. Order matters."""
     if why:
@@ -202,9 +243,11 @@ def temperatures(recv):
         return np.full(6, np.nan)
 
 
-def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, log, rep, dq_abort):
+def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, log, rep, dq_abort,
+         isolate=True):
     """Ramp joint j until it moves. Returns breakaway [Nm], or None at the cap."""
     tau = np.zeros(6)
+    vis, cou = scales_for(j, isolate)
     t0 = time.perf_counter()
     while True:
         ts = ctrl.initPeriod()
@@ -212,7 +255,7 @@ def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, log, rep, dq_abort):
         if mag > tau_cap:
             return None
         tau[j] = sgn * mag
-        ctrl.directTorque(tau.tolist(), VISCOUS, COULOMB)
+        ctrl.directTorque(tau.tolist(), vis, cou)
 
         q = np.array(recv.getActualQ())
         qd = np.array(recv.getActualQd())
@@ -223,9 +266,14 @@ def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, log, rep, dq_abort):
             raise RuntimeError(f'joint speed {np.max(np.abs(qd)):.3f} rad/s')
         if abs(dq[j]) > dq_abort:
             raise RuntimeError(f'joint {j} travelled {np.degrees(dq[j]):.1f} deg')
-        other = np.max(np.abs(np.delete(dq, j)))
-        if other > DQ_OTHER:
-            raise RuntimeError(f'another joint moved {np.degrees(other):.1f} deg')
+        oth = np.abs(dq).copy()
+        oth[j] = 0.0
+        k = int(np.argmax(oth))
+        if oth[k] > DQ_OTHER:
+            raise RuntimeError(
+                f'joint {k} moved {np.degrees(dq[k]):+.2f} deg while joint {j} '
+                f'was under test (limit {np.degrees(DQ_OTHER):.1f}); '
+                f'all dq = {np.round(np.degrees(dq), 2)}')
 
         if abs(qd[j]) > QD_DETECT or abs(dq[j]) > DQ_DETECT:
             return mag
@@ -576,6 +624,10 @@ def main():
     # silently overwrites the previous one; the pooled analysis wants them all.
     ap.add_argument('--out', default=None,
                     help='default: friction-repeat-<YYYYmmdd-HHMMSS>.npz')
+    ap.add_argument('--compensate-all', action='store_true',
+                    help='apply the friction scales to ALL joints during a '
+                         'ramp, not just the one under test. The old behaviour; '
+                         'lets the other joints creep and moves the pose.')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
 
@@ -592,7 +644,14 @@ def main():
 
     print(f'breakaway REPEATABILITY: joints {joints}, {args.repeats} '
           + ('passes over the pose set' if args.poses else 'repeats at one pose'))
-    print(f'  viscous {VISCOUS}\n  coulomb {COULOMB}')
+    if args.compensate_all:
+        print(f'  viscous {VISCOUS}\n  coulomb {COULOMB}   (ALL joints)')
+        print('  !! other joints will creep and move the pose -- see scales_for()')
+    else:
+        print('  scales applied to the joint under test ONLY; every other joint '
+              'is left\n  at scale 0 so its natural stiction pins the pose:')
+        for j in joints:
+            print(f'    joint {j}: viscous {VISCOUS[j]}  coulomb {COULOMB[j]}')
     for j in joints:
         print(f'  joint {j}: rate {rates[j]} Nm/s   cap {caps[j]} Nm')
     print(f'  dwell {args.dwell} s')
@@ -708,7 +767,8 @@ def main():
                     ctrl.setWatchdog(0.05)
                     try:
                         b_ = ramp(ctrl, recv, j, sgn, q_start, rates[j], caps[j],
-                                  log, pas, dq_abort)
+                                  log, pas, dq_abort,
+                                  isolate=not args.compensate_all)
                     finally:
                         safe_stop(ctrl)
                     if b_ is None:
