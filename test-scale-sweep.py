@@ -1,0 +1,481 @@
+"""
+Find the coulomb scale at which friction compensation stops freeing a joint and
+starts driving it.
+
+WHY THIS EXISTS
+---------------
+Every friction script in this repo measures breakaway at coulomb 0.8 and none of
+them check that 0.8 is a sane place to measure. It may not be. Observed by hand
+with brr.py (zero torque, compensation live):
+
+  * coulomb 0 on every joint -- the arm is STICKY. It cannot be pushed into
+    rising even with a deliberate shove.
+  * coulomb populated -- a very gentle push starts the arm rising and it keeps
+    going. It still holds if it is brought to rest first and released cleanly.
+
+That is over-compensation. Compensation cancels friction, so it pushes ALONG the
+velocity a joint already has; if it over-estimates, the net torque drives the
+joint instead of freeing it. At exactly zero velocity there is no velocity to
+act on, so static friction still holds -- which is why "hold it still and let
+go" works and why any residual velocity at torque-mode entry is the hazard.
+
+WHAT IT MEASURES
+----------------
+Breakaway torque alone cannot tell good compensation from over-compensation:
+both lower it, monotonically, and neither looks wrong on its own. So at each
+scale this ramps to breakaway and then ZEROES the commanded torque and watches:
+
+  decelerates            friction was merely cancelled; removing the drive stops
+                         the joint. The scale is on the right side.
+  sustains / accelerates the compensation is pushing along the joint's own
+                         velocity. Over-compensated.
+
+The scale where that flips is the operating limit. A breakaway measured above it
+is not a friction number -- it is partly the scale driving the joint -- so any
+f_c identified there has to be redone below it.
+
+SAFETY -- READ THIS
+-------------------
+This script deliberately watches the joint move after breakaway, which is the
+one thing every other script here refuses to do. `identify` in test-impedance.py
+accelerated joint 1 into a wall doing something similar. The exposure is bounded
+as tightly as the measurement allows:
+
+  * commanded torque is already ZERO for the whole observation -- nothing here
+    commands motion, it only declines to stop it for 0.30 s
+  * 1.0 deg of travel budget, hard abort on exceeding it
+  * hard abort on QD_ABORT on any joint
+  * only the joint under test is compensated; every other joint sits at scale 0
+    with its full natural stiction, pinning the pose
+  * every abort zeroes the SCALES first, restoring stiction, then the torque,
+    then stopJ
+
+Watch the first one. Hand on the e-stop.
+
+The sweep runs at whatever configuration the arm is in when you start it, so put
+the arm where you want it measured first. The threshold is load dependent, so
+the answer is for THAT pose -- re-run it somewhere else before generalising.
+"""
+import argparse
+import time
+
+import numpy as np
+
+# Two scale sets exist in this repo and they disagree. COULOMB is what
+# test-friction-recal.py and test-gravity-residual.py use; BRR_COULOMB is what
+# brr.py and env.py actually run. They differ on joints 0, 2, 3 and 5.
+# Only the joint under test matters here, and they agree on joint 1 (0.8).
+VISCOUS = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
+COULOMB = [0.8, 0.8, 0.7, 0.8, 0.8, 0.8]
+BRR_VISCOUS = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
+BRR_COULOMB = [0.9, 0.8, 0.8, 0.7, 0.8, 1.0]
+OFF = [0.0] * 6
+
+# 1.2x the largest UNCOMPENSATED breakaway, as in test-friction-recal.py.
+TAU_CAP = np.array([17.0, 26.0, 14.0, 5.0, 6.0, 5.0])
+RATE = np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])    # Nm/s
+
+QD_DETECT = 0.02      # rad/s -- breakaway
+DQ_DETECT = 0.0087    # rad (0.5 deg) -- breakaway by displacement
+QD_ABORT = 0.15       # rad/s on ANY joint
+DQ_ABORT = 0.026      # rad (1.5 deg) on the joint under test
+DQ_OTHER = 0.026      # rad (1.5 deg) on any other joint
+
+# Velocity noise floor, from the stationary stretches of brr-log-old.npz:
+# p50 0.0004 rad/s, p95 0.0012, joint 1 noisiest at 0.0038.
+QD_QUIET = 0.006      # rad/s -- "stopped"
+DQ_SETTLE = 0.035     # rad (2.0 deg) allowed during torque-mode entry
+SETTLE_GRACE = 0.15   # s before the settle's velocity abort arms
+SETTLE_HOT = 5        # consecutive ticks over QD_ABORT before it is a runaway
+
+COAST_WINDOW = 0.30   # s to watch after zeroing torque at breakaway
+COAST_BUDGET = 0.017  # rad (1.0 deg) of travel allowed during that window
+APPROACH_BACKOFF = 0.035   # rad (2 deg) detour so every arrival is identical
+
+
+def safe_stop(ctrl, why=''):
+    """Scales first, then torque, then leave torque mode. Order matters."""
+    if why:
+        print(f'      STOP: {why}')
+    try:
+        for _ in range(5):
+            ctrl.directTorque(OFF, OFF, OFF)
+        ctrl.stopJ(2.0)
+    except Exception as e:
+        print(f'      !! safe_stop failed: {e!r}')
+
+
+def wait_for_control_script(ctrl, timeout=5.0, poll=0.01):
+    """reuploadScript() omits waitForProgramRunning(); see env.py."""
+    deadline = time.monotonic() + timeout
+    while not ctrl.isProgramRunning():
+        if time.monotonic() > deadline:
+            raise RuntimeError('control script did not start')
+        time.sleep(poll)
+    while True:
+        try:
+            ctrl.getTCPOffset()
+            return
+        except RuntimeError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(poll)
+
+
+def scales_for(j, coulomb, viscous=None):
+    """
+    Compensate ONLY joint j, at the given coulomb scale.
+
+    Everything else stays at 0 so its full natural stiction pins the pose. With
+    all six compensated the arm creeps at high-load poses, which moves the very
+    configuration the sweep is characterising.
+    """
+    v, c = [0.0] * 6, [0.0] * 6
+    v[j] = VISCOUS[j] if viscous is None else float(viscous)
+    c[j] = float(coulomb)
+    return v, c
+
+
+def approach(ctrl, q, joint):
+    """
+    Arrive at q the same way every time: back off 2 deg on the joint of
+    interest, then come in. Friction state depends on approach direction and
+    distance -- it sets where the joint sits inside its presliding band -- so
+    without this the scales are not comparable to each other.
+    """
+    back = np.asarray(q, float).copy()
+    back[joint] += APPROACH_BACKOFF
+    ctrl.moveJ(back.tolist(), 0.3, 0.3)
+    ctrl.moveJ(np.asarray(q, float).tolist(), 0.3, 0.3)
+
+
+def settle(ctrl, recv, j, coulomb, dwell, qd_quiet=QD_QUIET, timeout=8.0):
+    """
+    Enter torque mode at ZERO torque and wait for the arm to stop.
+
+    This must happen before q_start is read. moveJ leaves the joint under
+    position control and the first directTorque call is what releases it; the
+    arm then sags into its torque-mode equilibrium. Capture q_start before that
+    and the sag reads as breakaway.
+
+    Returns (q_start, sag, settled).
+    """
+    vis, cou = scales_for(j, coulomb)
+    q0 = np.array(recv.getActualQ())
+    zeros = [0.0] * 6
+    t0 = time.perf_counter()
+    quiet_since, hot = None, 0
+    peak = np.zeros(6)
+    while True:
+        ts = ctrl.initPeriod()
+        ctrl.directTorque(zeros, vis, cou)
+        qd = np.abs(np.array(recv.getActualQd()))
+        dq = np.array(recv.getActualQ()) - q0
+        now = time.perf_counter()
+        peak = np.maximum(peak, qd)
+
+        # Debounced, and not armed until the mode switch has passed: moveJ
+        # returns with residual velocity and the first readings across the
+        # switch can spike. 5 ticks is 10 ms and ~1.5 mrad.
+        if now - t0 > SETTLE_GRACE:
+            hot = hot + 1 if np.max(qd) > QD_ABORT else 0
+            if hot >= SETTLE_HOT:
+                k = int(np.argmax(qd))
+                raise RuntimeError(
+                    f'settle: joint {k} at {qd[k]:.3f} rad/s for {hot} ticks '
+                    f'(limit {QD_ABORT}); peak {np.round(peak, 3)}, travel '
+                    f'{np.round(np.degrees(dq), 2)} deg')
+        if np.max(np.abs(dq)) > DQ_SETTLE:
+            # Crept, did not run. A fact about this pose and scale, not an
+            # emergency: the caller records it and moves to the next scale.
+            k = int(np.argmax(np.abs(dq)))
+            print(f'      will not hold: joint {k} crept '
+                  f'{np.degrees(dq[k]):+.2f} deg on entry')
+            return np.array(recv.getActualQ()), dq, False
+
+        if np.max(qd) < qd_quiet:
+            quiet_since = quiet_since if quiet_since is not None else now
+            if now - quiet_since >= dwell:
+                q = np.array(recv.getActualQ())
+                return q, q - q0, True
+        else:
+            quiet_since = None
+        if now - t0 > timeout:
+            k = int(np.argmax(peak))
+            print(f'      settle timed out: joint {k} at {peak[k]:.4f} rad/s '
+                  f'(need < {qd_quiet:.4f}) -- raise --qd-quiet if that is '
+                  f'the noise floor')
+            return np.array(recv.getActualQ()), dq, False
+        ctrl.waitPeriod(ts)
+
+
+def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, coulomb, log):
+    """Ramp joint j until it moves. Returns breakaway [Nm], or None at the cap."""
+    tau = np.zeros(6)
+    vis, cou = scales_for(j, coulomb)
+    t0 = time.perf_counter()
+    while True:
+        ts = ctrl.initPeriod()
+        mag = rate * (time.perf_counter() - t0)
+        if mag > tau_cap:
+            return None
+        tau[j] = sgn * mag
+        ctrl.directTorque(tau.tolist(), vis, cou)
+
+        q = np.array(recv.getActualQ())
+        qd = np.array(recv.getActualQd())
+        log.append(np.r_[time.perf_counter() - t0, coulomb, sgn * mag, q, qd])
+
+        dq = q - q_start
+        if np.max(np.abs(qd)) > QD_ABORT:
+            raise RuntimeError(f'joint speed {np.max(np.abs(qd)):.3f} rad/s')
+        if abs(dq[j]) > DQ_ABORT:
+            raise RuntimeError(f'joint {j} travelled {np.degrees(dq[j]):.1f} deg')
+        oth = np.abs(dq).copy()
+        oth[j] = 0.0
+        k = int(np.argmax(oth))
+        if oth[k] > DQ_OTHER:
+            raise RuntimeError(
+                f'joint {k} moved {np.degrees(dq[k]):+.2f} deg while joint {j} '
+                f'was under test; all dq = {np.round(np.degrees(dq), 2)}')
+
+        if abs(qd[j]) > QD_DETECT or abs(dq[j]) > DQ_DETECT:
+            return mag
+        ctrl.waitPeriod(ts)
+
+
+def coast(ctrl, recv, j, coulomb, q_break):
+    """
+    The stability test. Torque is already zero; watch what the joint does.
+
+    Returns (qd_at_break, qd_at_end, peak, travel, verdict).
+    """
+    vis, cou = scales_for(j, coulomb)
+    zeros = [0.0] * 6
+    t0 = time.perf_counter()
+    qd0 = abs(np.array(recv.getActualQd())[j])
+    peak = last = qd0
+    while time.perf_counter() - t0 < COAST_WINDOW:
+        ts = ctrl.initPeriod()
+        ctrl.directTorque(zeros, vis, cou)
+        qd = np.array(recv.getActualQd())
+        dq = np.array(recv.getActualQ()) - q_break
+        last = abs(qd[j])
+        peak = max(peak, last)
+        if np.max(np.abs(qd)) > QD_ABORT or abs(dq[j]) > COAST_BUDGET:
+            return qd0, last, peak, float(dq[j]), 'RUNAWAY'
+        ctrl.waitPeriod(ts)
+    dq = float((np.array(recv.getActualQ()) - q_break)[j])
+    ref = max(qd0, 1e-6)
+    verdict = ('decelerates' if last < 0.2 * ref
+               else 'sustains' if last < 1.2 * ref
+               else 'accelerates')
+    return qd0, last, peak, dq, verdict
+
+
+def report(rows, j, home):
+    print('\n' + '=' * 76)
+    print(f'  COULOMB SCALE SWEEP -- joint {j}')
+    print('=' * 76)
+    print(f'  pose (rad): {np.round(home, 6)}')
+    print(f'  pendant (deg): {np.round(np.degrees(home), 3)}\n')
+    print('  coulomb   breakaway + / -         coast +        coast -')
+    limit = None
+    for r in rows:
+        p_, m_ = r.get('+'), r.get('-')
+        bp = f'{p_[0]:6.2f}' if p_ else '   n/a'
+        bm = f'{m_[0]:6.2f}' if m_ else '   n/a'
+        vp = p_[5] if p_ else 'n/a'
+        vm = m_[5] if m_ else 'n/a'
+        unstable = [v for v in (vp, vm)
+                    if v in ('sustains', 'accelerates', 'RUNAWAY')]
+        if unstable and limit is None:
+            limit = r['coulomb']
+        mark = '   <-- first unstable' if unstable and limit == r['coulomb'] else ''
+        print(f'   {r["coulomb"]:5.2f}   {bp} / {bm} Nm      '
+              f'{vp:12s}  {vm:12s}{mark}')
+
+    print()
+    if not rows:
+        print('  no data')
+        return
+    if limit is None:
+        print('  every scale tested decelerates after breakaway. No '
+              'over-compensation in\n  this range AT THIS POSE -- whatever '
+              'makes the arm rise is not the coulomb\n  scale on this joint.')
+        return
+    safe = [r['coulomb'] for r in rows if r['coulomb'] < limit]
+    print(f'  over-compensation starts at coulomb {limit:.2f}.')
+    if safe:
+        print(f'  highest scale that still decelerates: {max(safe):.2f}')
+        print(f'\n  Run below that, and re-measure f_c there. A breakaway read '
+              f'at or above\n  {limit:.2f} is not a friction number -- part of '
+              f'it is the scale driving the joint.')
+    elif limit > 0.0:
+        print('  even the lowest scale tested is unstable; extend the sweep '
+              'downward.')
+    else:
+        # Nothing to extend: 0.0 is the floor. But VISCOUS is still live on
+        # this joint, and viscous compensation cancels damping, which is
+        # destabilising in its own right.
+        print('  unstable at coulomb 0.00 -- so the COULOMB scale is not what '
+              'drives it.\n  Viscous is still at '
+              f'{VISCOUS[j]:.2f} on this joint and cancelling damping is '
+              'destabilising\n  too. Re-run with --viscous 0 to take the '
+              'joint fully uncompensated; if it\n  is still unstable there, '
+              'the cause is outside the friction scales entirely.')
+    if limit <= 0.8:
+        print(f'\n  NOTE: 0.8 is the default in test-friction-recal.py, '
+              f'test-gravity-residual.py\n  and test-friction-repeat.py. The '
+              f'limit is at or below it, so every f_c\n  measured at 0.8 -- '
+              f'including the 5.19-8.77 Nm spread in\n  RECALIBRATION-PLAN.md '
+              f'-- needs redoing.')
+    print(f'\n  This is for the pose above. The threshold is load dependent; '
+          f're-run it\n  somewhere else before generalising.')
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--ip', default='192.168.0.100')
+    ap.add_argument('--script', default='rtde_control-1.6.5-frictionfix.script')
+    ap.add_argument('--joint', type=int, default=1)
+    ap.add_argument('--pose', default=None,
+                    help='6 joint angles [rad]. Default: wherever the arm is '
+                         'when you start, which is the point -- put it where '
+                         'you want it measured.')
+    ap.add_argument('--values', default='0.0,0.2,0.4,0.6,0.8',
+                    help='coulomb scales to sweep')
+    ap.add_argument('--scales', choices=('recal', 'brr'), default='recal',
+                    help="which set the VISCOUS scale comes from; they agree "
+                         "on joint 1")
+    ap.add_argument('--viscous', type=float, default=None,
+                    help='viscous scale on the test joint, held fixed across '
+                         'the sweep (default: the set value, 0.9 on joint 1). '
+                         '0 takes the joint fully uncompensated at coulomb 0.')
+    ap.add_argument('--rate', type=float, default=None, help='Nm/s')
+    ap.add_argument('--cap', type=float, default=None, help='Nm')
+    ap.add_argument('--dwell', type=float, default=2.0,
+                    help='s at rest in torque mode before the ramp')
+    ap.add_argument('--predwell', type=float, default=1.0,
+                    help='s under POSITION control after moveJ, before torque '
+                         'mode. moveJ returns on trajectory completion, not on '
+                         'the servo settling.')
+    ap.add_argument('--qd-quiet', type=float, default=QD_QUIET)
+    ap.add_argument('--out', default=None,
+                    help='default: scale-sweep-<YYYYmmdd-HHMMSS>.npz')
+    ap.add_argument('--dry-run', action='store_true')
+    args = ap.parse_args()
+
+    j = args.joint
+    if args.scales == 'brr':
+        VISCOUS[:], COULOMB[:] = list(BRR_VISCOUS), list(BRR_COULOMB)
+    if args.viscous is not None:
+        VISCOUS[j] = args.viscous
+    values = [float(x) for x in args.values.split(',')]
+    rate = RATE[j] if args.rate is None else args.rate
+    cap = TAU_CAP[j] if args.cap is None else args.cap
+    out = args.out or time.strftime('scale-sweep-%Y%m%d-%H%M%S.npz')
+
+    print(f'COULOMB SCALE SWEEP, joint {j}')
+    print(f'  values {values}')
+    print(f'  viscous {VISCOUS[j]} held fixed on joint {j}; every other joint '
+          f'at scale 0')
+    print(f'  rate {rate} Nm/s   cap {cap} Nm   dwell {args.dwell} s   '
+          f'predwell {args.predwell} s')
+    print(f'  at breakaway the torque is ZEROED and the joint watched for '
+          f'{COAST_WINDOW:.2f} s')
+    print(f'    budget {np.degrees(COAST_BUDGET):.1f} deg, hard abort on that '
+          f'or {QD_ABORT} rad/s')
+    est = len(values) * 2 * (cap / rate * 0.5 + args.dwell + args.predwell + 4)
+    print(f'\n  ~{est / 60:.0f} min if nothing aborts.')
+    if args.dry_run:
+        return
+
+    import rtde_control
+    import rtde_receive
+
+    print('\nThis one deliberately lets the joint move after breakaway.')
+    print('Put the arm where you want it measured. Hand on the e-stop.')
+    input('enter to start, ctrl-C to abort: ')
+
+    ctrl = rtde_control.RTDEControlInterface(args.ip, 500.0)
+    recv = rtde_receive.RTDEReceiveInterface(args.ip)
+    ctrl.setCustomScriptFile(args.script)
+    wait_for_control_script(ctrl)
+
+    home = (np.array([float(x) for x in args.pose.split(',')]) if args.pose
+            else np.array(recv.getActualQ()))
+    print(f'\nsweeping at the CURRENT configuration'
+          if not args.pose else '\nsweeping at the given pose')
+    print(f'  pose (rad): {np.round(home, 6)}')
+    print(f'  pendant (deg): {np.round(np.degrees(home), 3)}')
+    try:
+        from kinematics import URKin
+        import pinocchio as pin
+        kin = URKin([0.0] * 6)
+        g = pin.computeGeneralizedGravity(kin.model, kin.data, home)
+        print(f'  joint {j} gravity torque (links only, no payload): '
+              f'{g[j]:.1f} Nm')
+    except Exception:
+        pass
+    print()
+
+    rows, log = [], []
+    try:
+        for cj in values:
+            print(f'  coulomb {cj:.2f}:')
+            row = {'coulomb': cj}
+            for sgn, name in ((1.0, '+'), (-1.0, '-')):
+                approach(ctrl, home, j)
+                if args.predwell > 0:
+                    time.sleep(args.predwell)
+                ctrl.setWatchdog(0.05)
+                try:
+                    q_start, _, ok = settle(ctrl, recv, j, cj, args.dwell,
+                                            qd_quiet=args.qd_quiet)
+                    if not ok:
+                        print(f'    {name}: would not settle -- skipped')
+                        row[name] = None
+                        continue
+                    b = ramp(ctrl, recv, j, sgn, q_start, rate, cap, cj, log)
+                    if b is None:
+                        print(f'    {name}: no breakaway below {cap:.1f} Nm')
+                        row[name] = None
+                        continue
+                    q_break = np.array(recv.getActualQ())
+                    qd0, qd1, peak, dq, verdict = coast(ctrl, recv, j, cj,
+                                                        q_break)
+                    print(f'    {name}: breakaway {b:6.3f} Nm   coast '
+                          f'{qd0:.4f} -> {qd1:.4f} rad/s '
+                          f'(peak {peak:.4f}, {np.degrees(dq):+.2f} deg)   '
+                          f'{verdict}')
+                    row[name] = (b, qd0, qd1, peak, dq, verdict)
+                finally:
+                    safe_stop(ctrl)
+                time.sleep(0.6)
+            rows.append(row)
+    except KeyboardInterrupt:
+        print('\naborted by user')
+    except RuntimeError as e:
+        print(f'\nABORT: {e}')
+    finally:
+        safe_stop(ctrl, 'end of sweep')
+        try:
+            ctrl.stopScript()
+        except Exception:
+            pass
+
+    if log:
+        L = np.array(log)
+        np.savez(out, t=L[:, 0], coulomb=L[:, 1], tau=L[:, 2], q=L[:, 3:9],
+                 qd=L[:, 9:15], values=np.array(values), pose=home, joint=j,
+                 viscous=VISCOUS, coulomb_set=COULOMB,
+                 coast_window=COAST_WINDOW, coast_budget=COAST_BUDGET)
+        print(f'\nwrote {out}')
+
+    report(rows, j, home)
+
+
+if __name__ == '__main__':
+    main()
