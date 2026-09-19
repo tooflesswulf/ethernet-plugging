@@ -1,4 +1,44 @@
 """
+=============================================================================
+RUN THIS NEXT  (temporary -- delete this block once it has been run)
+=============================================================================
+
+    python test-offaxis.py --f-sat 80 --amps 10,20,30,40,50 \
+        --fc-assist 1.0 --f-c 10.34,9.52,6.96,2.78,2.94,2.07
+
+WHY: every f_c test so far ran at HALF strength. At standstill
+friction_feedforward returns f_c * assist * tanh(tau/t_eps), and fc_assist
+defaults to 0.5 -- so f_c[1] = 9.52 Nm delivered only 4.76 Nm against an
+11.8-24.1 Nm measured breakaway. At assist 1.0 it delivers 9.52 Nm, which is
+81% of the weaker direction and the value the doctrine in impedance.py:63
+actually intends. --f-sat 80 lifts the force cap, which is what limits the
+command, not K.
+
+READ IT IN THIS ORDER:
+
+  1. realised / commanded displacement, printed just above the verdict.
+     Every run so far topped out at 0.43, which is why none of them could
+     answer anything -- the arm never left its deadband. If this is still
+     below ~0.9, stop there: the compensation is still too weak and the
+     off-axis numbers mean nothing.
+
+  2. If it clears ~0.9, then the off-axis error:
+       collapses  -> friction was the whole story. f_c + fc_assist is the fix
+                     and the teleop coupling is solved.
+       persists   -> friction is RULED OUT as the cause. Something outside
+                     the three mechanisms below is holding it, and that is
+                     new information.
+
+  3. The q trace is logged now, so which joints actually broke loose can be
+     read off directly instead of inferred from the Jacobian span.
+
+WATCH FOR: a limit cycle at fc_assist 1.0. 81% of breakaway is close to the
+line and over-compensation is the failure mode -- impedance.py:63 warns that
+it turns a deadband into a limit cycle. If the arm buzzes at rest, back it to
+0.8 and re-run.
+
+=============================================================================
+
 Why does a +x teleop command move y, z and the rotations?
 
 Three mechanisms can do it and they need different fixes, so measure before
@@ -126,7 +166,9 @@ def run_step(ctrl, recv, kin, imp, base, axis, amp, ramp_t, dt, trace):
         if frac >= 1.0:
             peak_off_t = max(peak_off_t, ot)
             peak_off_r = max(peak_off_r, orr)
-        trace.append(np.r_[t, amp, pose, eq, F, d])
+        # q is logged so the next run can show WHICH joints broke loose,
+        # rather than inferring it from the Jacobian span after the fact.
+        trace.append(np.r_[t, amp, pose, eq, F, d, q])
 
         if np.max(np.abs(force[:3])) > FORCE_MAX:
             abort = f'force {np.max(np.abs(force[:3])):.1f} N'
@@ -292,6 +334,12 @@ def main():
                     help='scale K, with D scaled by sqrt of it so zeta is '
                          'preserved. Raising K alone silently changes zeta -- '
                          'see impedance.calibrate.')
+    ap.add_argument('--fc-assist', type=float, default=None,
+                    help='weight on the STANDSTILL term of '
+                         'friction_feedforward. Default 0.5, which halves it: '
+                         'f_c=9.52 delivers only 4.76 Nm against an 11.8-24.1 '
+                         'Nm breakaway. 1.0 gives the 80%%-of-weaker-direction '
+                         'the doctrine intends.')
     ap.add_argument('--f-c', default=None,
                     help='6 comma-separated Nm to enable the friction '
                          'feedforward. Default OFF, matching env.py today.')
@@ -310,6 +358,9 @@ def main():
     print(f'  amplitudes {[round(1000*a,1) for a in amps]} mm, both directions, '
           f'{args.reps} reps')
     print(f'  equilibrium ramped in over {args.ramp} s, then held to rest')
+    print(f'  fc_assist {0.5 if args.fc_assist is None else args.fc_assist}'
+          + ('   (default 0.5 HALVES the standstill term)'
+             if args.fc_assist is None else ''))
     print(f'  f_c {np.round(f_c, 2)}' + ('   (OFF -- as env.py runs today)'
                                          if not args.f_c else ''))
     print(f'  firmware scales 0 on every joint (coulomb 0.8 is past the '
@@ -341,6 +392,8 @@ def main():
         imp.D_free = imp.D_free * np.sqrt(args.k_scale)
         imp.K_contact = imp.K_contact * args.k_scale
         imp.D_contact = imp.D_contact * np.sqrt(args.k_scale)
+    if args.fc_assist is not None:
+        imp.fc_assist = args.fc_assist
     if args.f_sat is not None:
         imp.F_sat = np.array([args.f_sat] * 3 + list(imp.F_sat[3:]))
     dt = ctrl.getStepTime() or 0.002
@@ -389,7 +442,7 @@ def main():
     if trace:
         T = np.array(trace)
         np.savez(out, t=T[:, 0], amp=T[:, 1], pose=T[:, 2:8], eq=T[:, 8:14],
-                 wrench=T[:, 14:20], disp=T[:, 20:26],
+                 wrench=T[:, 14:20], disp=T[:, 20:26], q=T[:, 26:32],
                  results=np.array([[r['amp'], r['on'], r['off_t'], r['off_r'],
                                     r['peak_off_t'], r['peak_off_r'],
                                     r['resid'], float(r['settled'])]
