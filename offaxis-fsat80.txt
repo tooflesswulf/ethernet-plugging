@@ -1,0 +1,96 @@
+OFF-AXIS AMPLITUDE SWEEP, axis 0
+  amplitudes [10.0, 20.0, 30.0, 40.0, 50.0] mm, both directions, 2 reps
+  equilibrium ramped in over 1.0 s, then held to rest
+  f_c [0. 0. 0. 0. 0. 0.]   (OFF -- as env.py runs today)
+  firmware scales 0 on every joint (coulomb 0.8 is past the over-compensation
+    threshold; see test-scale-sweep.py)
+
+  20 steps, ~1 min
+
+The arm moves by the commanded amplitude on each step. Clear space.
+enter to start, ctrl-C to abort: 
+
+base pose  : [-0.8184  0.1289  0.3282 -0.235  -3.0292  0.1534]
+K          : [1500. 1500. 1500.  200.  200.  200.]
+leash      : 53.3 mm
+
+  rep 0  +10.0 mm -> on   0.16  off_t   0.13  off_r   0.67 mrad
+  rep 0  -10.0 mm -> on  -0.65  off_t   0.39  off_r   2.53 mrad
+  rep 0  +20.0 mm -> on   3.17  off_t   1.83  off_r  12.44 mrad
+  rep 0  -20.0 mm -> on  -3.40  off_t   1.94  off_r  13.36 mrad
+  rep 0  +30.0 mm -> on   6.72  off_t   3.76  off_r  26.21 mrad
+  rep 0  -30.0 mm -> on  -7.02  off_t   3.99  off_r  27.50 mrad
+  rep 0  +40.0 mm -> on  15.63  off_t   3.44  off_r  39.36 mrad
+  rep 0  -40.0 mm -> on  -9.97  off_t   5.23  off_r  38.20 mrad
+  rep 0  +50.0 mm -> on  20.82  off_t   5.45  off_r  50.12 mrad
+  rep 0  -50.0 mm -> on -16.71  off_t   0.87  off_r  49.27 mrad
+  rep 1  +10.0 mm -> on   1.02  off_t   0.55  off_r   3.93 mrad
+  rep 1  -10.0 mm -> on  -0.83  off_t   0.54  off_r   3.32 mrad
+  rep 1  +20.0 mm -> on   3.92  off_t   2.21  off_r  15.26 mrad
+  rep 1  -20.0 mm -> on  -3.71  off_t   2.18  off_r  14.65 mrad
+  rep 1  +30.0 mm -> on  10.02  off_t   0.69  off_r  27.63 mrad
+  rep 1  -30.0 mm -> on  -6.97  off_t   3.90  off_r  27.14 mrad
+  rep 1  +40.0 mm -> on  15.96  off_t   4.85  off_r  36.59 mrad
+  rep 1  -40.0 mm -> on -10.83  off_t   4.08  off_r  38.42 mrad
+  rep 1  +50.0 mm -> on  21.67  off_t   7.19  off_r  47.64 mrad
+  rep 1  -50.0 mm -> on -17.17  off_t   0.44  off_r  48.60 mrad
+
+wrote offaxis-20260919-163301.npz
+
+==============================================================================
+  OFF-AXIS RESPONSE to a commanded +/-x step
+==============================================================================
+  amp[mm]  dir  on[mm]  off-trans[mm]  off-rot[mrad]  peak-trans[mm]  resid[mm]
+     10.0   +    0.16         0.13          0.67           0.23      9.84
+    -10.0   -   -0.65         0.39          2.53           0.43      9.36
+     20.0   +    3.17         1.83         12.44           1.90     16.93
+    -20.0   -   -3.40         1.94         13.36           2.00     16.72
+     30.0   +    6.72         3.76         26.21           3.85     23.58
+    -30.0   -   -7.02         3.99         27.50           4.05     23.32
+     40.0   +   15.63         3.44         39.36           4.06     24.61
+    -40.0   -   -9.97         5.23         38.20           5.23     30.48
+     50.0   +   20.82         5.45         50.12           5.77     29.68
+    -50.0   -  -16.71         0.87         49.27           3.88     33.30
+     10.0   +    1.02         0.55          3.93           0.66      9.00
+    -10.0   -   -0.83         0.54          3.32           0.60      9.19
+     20.0   +    3.92         2.21         15.26           2.30     16.23
+    -20.0   -   -3.71         2.18         14.65           2.23     16.44
+     30.0   +   10.02         0.69         27.63           1.99     19.99
+    -30.0   -   -6.97         3.90         27.14           3.94     23.36
+     40.0   +   15.96         4.85         36.59           4.88     24.52
+    -40.0   -  -10.83         4.08         38.42           4.87     29.46
+     50.0   +   21.67         7.19         47.64           7.22     29.23
+    -50.0   -  -17.17         0.44         48.60           2.84     32.83
+
+  realised / commanded displacement: median 0.23, max 0.43
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  THIS RUN CANNOT ANSWER THE QUESTION.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  The arm never left the friction deadband -- it realised at most 43% of
+  the commanded displacement, and the holding force was still climbing at the
+  largest amplitude. Everything measured here is PRESLIDING deflection: the
+  arm flexing in place while stuck, along whatever direction its stuck
+  compliance points. That deflection is elastic, so it scales with the command
+  and mimics the "linear coupling" signature exactly -- the verdict below would
+  be an artefact.
+
+  Push harder before reading anything into it:
+    --f-sat 80 --amps 10,20,30,40,50   (F_sat, not K, is the cap)
+  or turn the feedforward on, which is what it is for:
+    --f-c 10.34,9.52,6.96,2.78,2.94,2.07
+
+
+  settled off-axis translation: mean   2.68 mm,  R^2(prop)  0.36  ->  neither cleanly
+  settled off-axis rotation   : mean  26.14 mrad,  R^2(prop)  0.94  ->  proportional to amplitude
+  PEAK off-axis translation   : mean   3.15 mm,  R^2(prop)  0.74  ->  proportional to amplitude
+
+  settled / peak off-axis translation: 0.82
+
+------------------------------------------------------------------------------
+  READ AS
+------------------------------------------------------------------------------
+  Mixed or noisy. Add repeats (--reps) before concluding; friction is
+  stochastic and a handful of steps will not separate these.
+
+  (settled: neither cleanly;  peak: proportional to amplitude)
