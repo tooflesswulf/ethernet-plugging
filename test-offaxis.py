@@ -61,7 +61,7 @@ from kinematics import URKin
 ROBOT_IP = '192.168.0.100'
 
 FORCE_MAX = 60.0      # N, raw
-SPEED_MAX = 0.25      # m/s
+SPEED_MAX = 0.40      # m/s -- raised: breaking out of a deep deadband snaps
 EXCURSION = 0.06      # m from base, any translational axis
 SETTLE_V = 0.002      # m/s -- "stopped"
 SETTLE_W = 0.01       # rad/s
@@ -202,6 +202,26 @@ def report(rows, axis):
               + ('' if r['settled'] else '   (did not settle)'))
 
     A = [abs(r['amp']) for r in rows]
+    realised = np.array([abs(r['on']) / max(abs(r['amp']), 1e-12) for r in rows])
+    print(f'\n  realised / commanded displacement: median {np.median(realised):.2f}, '
+          f'max {realised.max():.2f}')
+    if realised.max() < 0.5:
+        print('\n' + '!' * 78)
+        print('  THIS RUN CANNOT ANSWER THE QUESTION.')
+        print('!' * 78)
+        print('  The arm never left the friction deadband -- it realised at most '
+              f'{100*realised.max():.0f}% of\n  the commanded displacement, and '
+              'the holding force was still climbing at the\n  largest '
+              'amplitude. Everything measured here is PRESLIDING deflection: '
+              'the\n  arm flexing in place while stuck, along whatever '
+              'direction its stuck\n  compliance points. That deflection is '
+              'elastic, so it scales with the command\n  and mimics the '
+              '"linear coupling" signature exactly -- the verdict below would\n'
+              '  be an artefact.\n')
+        print('  Push harder before reading anything into it:')
+        print('    --f-sat 80 --amps 10,20,30,40,50   (F_sat, not K, is the cap)')
+        print('  or turn the feedforward on, which is what it is for:')
+        print('    --f-c 10.34,9.52,6.96,2.78,2.94,2.07\n')
     print()
     for label, key in (('settled off-axis translation', 'off_t'),
                        ('settled off-axis rotation   ', 'off_r'),
@@ -263,6 +283,15 @@ def main():
     ap.add_argument('--reps', type=int, default=2)
     ap.add_argument('--ramp', type=float, default=1.0,
                     help='s to ramp the equilibrium in; not a step')
+    ap.add_argument('--f-sat', type=float, default=None,
+                    help='translational force saturation [N]. THIS is what caps '
+                         'the command, not K: impedance.compute saturates F at '
+                         'F_sat, so raising K alone just hits the cap sooner. '
+                         'Default 40 (impedance.py).')
+    ap.add_argument('--k-scale', type=float, default=1.0,
+                    help='scale K, with D scaled by sqrt of it so zeta is '
+                         'preserved. Raising K alone silently changes zeta -- '
+                         'see impedance.calibrate.')
     ap.add_argument('--f-c', default=None,
                     help='6 comma-separated Nm to enable the friction '
                          'feedforward. Default OFF, matching env.py today.')
@@ -306,6 +335,14 @@ def main():
     tcp = ctrl.getTCPOffset()
     kin = URKin(tcp)
     imp = CartesianImpedance(f_c=f_c, tau_rated=kin.tau_rated)
+    if args.k_scale != 1.0:
+        # D = 2 zeta sqrt(K I), so D must go as sqrt(K) to hold zeta.
+        imp.K_free = imp.K_free * args.k_scale
+        imp.D_free = imp.D_free * np.sqrt(args.k_scale)
+        imp.K_contact = imp.K_contact * args.k_scale
+        imp.D_contact = imp.D_contact * np.sqrt(args.k_scale)
+    if args.f_sat is not None:
+        imp.F_sat = np.array([args.f_sat] * 3 + list(imp.F_sat[3:]))
     dt = ctrl.getStepTime() or 0.002
 
     base = np.array(recv.getActualTCPPose())
@@ -319,6 +356,13 @@ def main():
         for rep in range(args.reps):
             for a in amps:
                 for sgn in (+1.0, -1.0):
+                    # Re-read base every time. The return-to-base step below
+                    # cannot be assumed to work: with the arm deep in its
+                    # deadband it stays where the previous step left it, and
+                    # every subsequent displacement is then measured from a
+                    # stale origin. That is what made rep 1 of the first run
+                    # report negative on-axis motion for a positive command.
+                    base = np.array(recv.getActualTCPPose())
                     r = run_step(ctrl, recv, kin, imp, base, axis, sgn * a,
                                  args.ramp, dt, trace)
                     rows.append(r)
