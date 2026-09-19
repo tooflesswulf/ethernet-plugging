@@ -128,6 +128,11 @@ RATE_DEFAULT = np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])   # Nm/s
 # 0.006 clears joint 1's p95 with margin and is still 3x tighter than QD_DETECT.
 QD_QUIET = 0.006     # rad/s -- "stopped" for the torque-mode settle
 
+# Travel limit during the settle, before any torque is commanded. Deliberately
+# looser than DQ_ABORT (some sag on entry is normal and expected) but far
+# tighter than "unbounded", which is what the first version of settle() had.
+DQ_SETTLE = 0.035    # rad (2.0 deg) on ANY joint during torque-mode entry
+
 QD_DETECT = 0.02     # rad/s  -- breakaway
 DQ_DETECT = 0.0087   # rad (0.5 deg) -- breakaway by displacement
 QD_ABORT = 0.15      # rad/s on ANY joint
@@ -281,6 +286,28 @@ def settle(ctrl, recv, j, isolate, dwell, qd_quiet=QD_QUIET, timeout=8.0):
         ctrl.directTorque(zeros, vis, cou)
         qd = np.abs(np.array(recv.getActualQd()))
         now = time.perf_counter()
+        # GUARDS. The settle is a torque-mode entry with no commanded torque,
+        # which is NOT the same as "nothing can happen": the controller's own
+        # gravity compensation is still running, and if its model is wrong the
+        # residual drives the arm. This loop had no limits in its first version
+        # and let joint 1 raise the arm at pose 3. Same limits as the ramp.
+        dq_s = np.array(recv.getActualQ()) - q0
+        if np.max(qd) > QD_ABORT:
+            k = int(np.argmax(qd))
+            raise RuntimeError(f'settle: joint {k} at {qd[k]:.3f} rad/s '
+                               f'(limit {QD_ABORT}) -- torque-mode entry is '
+                               f'driving the arm, not settling')
+        if np.max(np.abs(dq_s)) > DQ_SETTLE:
+            # Crept to the limit at low speed: this pose will not hold under
+            # these scales. That is a fact about the pose, not a runaway, so
+            # the caller skips it and keeps going. Only QD_ABORT above -- an
+            # actual runaway -- is allowed to end the campaign.
+            k = int(np.argmax(np.abs(dq_s)))
+            q = np.array(recv.getActualQ())
+            print(f'      will not hold: joint {k} crept '
+                  f'{np.degrees(dq_s[k]):+.2f} deg on entry '
+                  f'(limit {np.degrees(DQ_SETTLE):.1f})')
+            return q, q - q0, False
         if quiet_since is None:
             worst = np.maximum(worst, qd)
         if np.max(qd) < qd_quiet:
@@ -527,6 +554,82 @@ def report(res, temps, t_start, joint, on_ref=True):
           '\n  At this default pose tau_hat = 0, so g is small here by design.')
 
 
+def report_probe(rows, joints):
+    """Render the probe table. Split out so it can be tested off-robot."""
+    print('\n' + '=' * 66)
+    print('  POSE PROBE -- which poses hold in torque mode')
+    print('=' * 66)
+    print('  pose   scales OFF      test joint ON     read as')
+    bad_off, bad_on = [], []
+    for r in rows:
+        o_ok, o_sag = r['scales OFF']
+        n_ok, n_sag = r[f'joint {joints[0]} ON']
+        if not o_ok:
+            verdict = 'GRAVITY residual exceeds friction'
+            bad_off.append(r['pose'])
+        elif not n_ok:
+            verdict = 'friction COMPENSATION drives it'
+            bad_on.append(r['pose'])
+        else:
+            verdict = 'usable'
+        print(f'  {r["pose"]:4d}   {np.degrees(np.abs(o_sag)).max():6.2f} deg'
+              f'      {np.degrees(np.abs(n_sag)).max():6.2f} deg      '
+              f'{verdict}')
+    print()
+    if bad_off:
+        print(f'  poses {bad_off} move with NO compensation at all -- that is '
+              f'the\n  controller\'s gravity model, not our scales. Drop them, '
+              f'or fix the model\n  first; a friction number measured there '
+              f'sits on a moving pose.')
+    if bad_on:
+        print(f'  poses {bad_on} hold until the scales go on -- the '
+              f'compensation is\n  injecting torque at standstill. Lower the '
+              f'coulomb scale for that joint\n  and re-probe; this is '
+              f'over-compensation, not gravity.')
+    if not bad_off and not bad_on:
+        print('  all poses hold both ways -- the campaign can run as planned.')
+
+
+def probe_poses(ctrl, recv, poses, joints, dwell, qd_quiet):
+    """
+    Reconnaissance: no torque ramps at all. At every pose, enter torque mode
+    twice -- once with ALL scales at zero, once with the test joint compensated
+    -- and record how far the arm moves.
+
+    This separates the two candidate causes of a pose that will not hold:
+
+      * moves with scales OFF  -> the controller's gravity compensation is
+        wrong; the residual drives the joint and friction alone has to hold it.
+      * holds with scales OFF, moves with them ON -> the friction compensation
+        itself is driving the joint at standstill. That is over-compensation,
+        the failure impedance.py:63 warns about, and it is a scale problem
+        rather than a gravity problem.
+
+    Costs a couple of minutes for 14 poses and tells you which are usable
+    before committing to a campaign.
+    """
+    rows = []
+    for pi, q in enumerate(poses):
+        print(f'  pose {pi}:')
+        row = {'pose': pi}
+        for label, j_comp in (('scales OFF', None), (f'joint {joints[0]} ON',
+                                                     joints[0])):
+            ctrl.moveJ(q.tolist(), 0.3, 0.3)
+            ctrl.setWatchdog(0.05)
+            jj = joints[0] if j_comp is None else j_comp
+            _, sag, ok = settle(ctrl, recv, jj, j_comp is not None, dwell,
+                                qd_quiet=qd_quiet)
+            safe_stop(ctrl)
+            k = int(np.argmax(np.abs(sag)))
+            print(f'    {label:12s}: {"held " if ok else "MOVED"}  '
+                  f'worst joint {k} {np.degrees(sag[k]):+6.2f} deg   '
+                  f'all {np.round(np.degrees(sag), 2)}')
+            row[label] = (ok, sag.copy())
+            time.sleep(0.5)
+        rows.append(row)
+    return rows
+
+
 def load_poses(path):
     """Radians, one pose per line, '#' comments. Returns (N, 6)."""
     P = []
@@ -685,6 +788,10 @@ def main():
     ap.add_argument('--qd-quiet', type=float, default=QD_QUIET,
                     help=f'rad/s counting as stopped for the torque-mode settle '
                          f'(default {QD_QUIET}; noise floor is ~0.001-0.004)')
+    ap.add_argument('--probe-only', action='store_true',
+                    help='no torque ramps: just visit every pose and report '
+                         'whether it holds in torque mode, with scales off and '
+                         'on. Use this before committing to a campaign.')
     ap.add_argument('--compensate-all', action='store_true',
                     help='apply the friction scales to ALL joints during a '
                          'ramp, not just the one under test. The old behaviour; '
@@ -795,6 +902,23 @@ def main():
                   'at.\n  The within-pose sigma is still valid, but the DECISION '
                   'block then assumes\n  the scatter here also holds there.')
     print()
+
+    if args.probe_only:
+        if POSES is None:
+            POSES_P = np.array([home])
+        else:
+            POSES_P = POSES
+        try:
+            rows = probe_poses(ctrl, recv, POSES_P, joints, args.dwell,
+                               args.qd_quiet)
+        finally:
+            safe_stop(ctrl, 'end of probe')
+            try:
+                ctrl.stopScript()
+            except Exception:
+                pass
+        report_probe(rows, joints)
+        return
 
     res, temps, t_start, jcol, pcol, log, sags = [], [], [], [], [], [], []
     t_run = time.perf_counter()
