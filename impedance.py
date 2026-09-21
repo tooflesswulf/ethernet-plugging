@@ -31,6 +31,25 @@ _FALLBACK = {'f_c_pos': [0.0] * 6, 'f_c_neg': [0.0] * 6,
              'fc_assist': 0.5, 'fc_veps': 0.05, 'fc_teps': 4.0}
 
 
+def load_gravity_residual(path=FRICTION_CONFIG):
+    """
+    Read [gravity_residual].theta -> (4,) mass-moment parameters.
+
+    Zeros on any problem, which makes the correction a no-op rather than a
+    guess. See kinematics.URKin.gravity_bias for what theta means.
+    """
+    try:
+        with open(path, 'rb') as fh:
+            th = np.asarray(tomllib.load(fh)['gravity_residual']['theta'], float)
+        if th.shape != (4,) or not np.all(np.isfinite(th)):
+            raise ValueError('theta must be 4 finite numbers')
+        return th
+    except Exception as e:
+        warnings.warn(f'{path}: {e!r} -- gravity residual correction disabled',
+                      RuntimeWarning)
+        return np.zeros(4)
+
+
 def load_scales(path=FRICTION_CONFIG):
     """
     Read the [scales] table from friction.toml -> (viscous, coulomb).

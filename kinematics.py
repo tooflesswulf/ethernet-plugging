@@ -81,6 +81,57 @@ class URKin:
         Rb = self.data.oMf[self.f_base].rotation
         return np.block([[Rb.T, np.zeros((3, 3))], [np.zeros((3, 3)), Rb.T]]) @ J
 
+    def gravity_regressor(self, q):
+        """
+        (6, 4) matrix mapping mass-moment parameters to joint torques.
+
+        Row j is the torque on joint j from a phantom point mass rigidly
+        attached to the tool, per unit of theta = [dm, dm*p_x, dm*p_y, dm*p_z].
+        Linear in theta by construction, which is why the fit is a least
+        squares rather than a search.
+
+        The first column is the mass acting at the tool origin; the other three
+        are its moment about that origin, expressed in the TOOL frame so the
+        offset p is a fixed property of the tool rather than of the pose.
+        """
+        q = np.asarray(q, float)
+        g_hat = np.array([0.0, 0.0, -1.0])
+        pin.computeJointJacobians(self.model, self.data, q)
+        pin.updateFramePlacements(self.model, self.data)
+        J = pin.getFrameJacobian(self.model, self.data, self.f_tool,
+                                 pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
+        R_t = self.data.oMf[self.f_tool].rotation
+        # Vectorised over joints. The obvious per-joint loop costs ~90 us,
+        # which is 4.5% of a 2 ms tick for something the control path calls
+        # every cycle.
+        A = np.empty((6, 4))
+        A[:, 0] = J[:3].T @ g_hat
+        # (R_t.T @ v) for each row v is (v @ R_t), which is one matmul.
+        A[:, 1:] = np.cross(g_hat, J[3:].T) @ R_t
+        return A * 9.81
+
+    def gravity_bias(self, q, theta):
+        """
+        Per-joint torque to CANCEL the controller's gravity-model error.
+
+        Pass the result straight to CartesianImpedance.compute(tau_bias=...) --
+        it is already negated. The sign is the easy thing to get wrong here and
+        getting it wrong DOUBLES the error instead of removing it, so there is
+        no negation left for the caller to do, and a unit test pins it.
+
+        The underlying quantity is the standing torque the model error exerts,
+        g = regressor @ theta, measured as (|tau-| - |tau+|)/2 from breakaway in
+        both directions. g > 0 means the joint needs LESS torque to move
+        positive, i.e. something is already pushing it that way, so the
+        correction is -g.
+
+        theta comes from impedance.load_gravity_residual(). Zeros make this a
+        no-op. ~19 us, most of it the pinocchio calls that
+        jacobian() also makes -- see gravity_regressor if that ever
+        needs sharing.
+        """
+        return -(self.gravity_regressor(q) @ np.asarray(theta, float))
+
     @staticmethod
     def rescale_inertia(lam, model_diag, measured_diag):
         """

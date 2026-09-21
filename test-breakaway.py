@@ -268,11 +268,16 @@ def report(res, joints, pose):
         for sgn, b, on_, tr, how in rows:
             bs = f'{b:8.3f}' if b is not None else '  CAP   '
             os_ = f'{on_:7.3f}' if on_ is not None else '   n/a '
+            # Only a SPEED-gated row can be suspect. A travel-gated one stops
+            # the instant it passes DQ_CONFIRM, so its travel is pinned just
+            # above the threshold by construction -- flagging that as "barely
+            # moved" fired on every correctly detected row and meant nothing.
             flag = ''
             if how == 'speed':
-                flag = '   <- speed-gated, check travel'
-            if b is not None and abs(tr) < 2 * DQ_CONFIRM:
-                flag = '   <- barely moved, SUSPECT'
+                flag = ('   <- fast breakaway: speed fired before travel, so '
+                        'read slightly EARLY (conservative)'
+                        if abs(tr) < DQ_CONFIRM
+                        else '   <- speed-gated, travel ok')
             print(f'      {"+" if sgn > 0 else "-"}   {bs}  {os_}   '
                   f'{np.degrees(abs(tr)):8.3f}   {how}{flag}')
         got = {}

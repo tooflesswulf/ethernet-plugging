@@ -9,11 +9,36 @@ measured = "2026-09-21"
 tool = "test-breakaway.py --joints 1,2,3 --reps 3, all friction scales at zero"
 data = [
     "breakaway-20260919-171811.npz",
+    "breakaway-20260921-141908.npz",   # all six joints, from here on
+    "breakaway-20260921-143122.npz",
+    "breakaway-20260921-144105.npz",
+    "breakaway-20260921-144959.npz",
+    "breakaway-20260921-151040.npz",
     "breakaway-20260921-113338.npz",
     "breakaway-20260921-113810.npz",
     "breakaway-20260921-114321.npz",
     "breakaway-20260921-114759.npz",
 ]
+asymmetry = """
+The +/- difference g = (|tau-| - |tau+|)/2 is TWO things, and 45 measurements
+over ten poses separate them:
+
+    g = gravity_residual(q) + per-joint friction asymmetry     R^2 0.889
+
+  gravity alone            R^2 0.727   (4 params)
+  per-joint constant alone R^2 0.551   (6 params)
+
+  joint   friction asym   gravity term range   dominates
+    0        +1.04         +0.00 to  +0.00     constant  (zero gravity load)
+    1        +1.64         -1.63 to  +5.60     GRAVITY
+    2        -0.32         -2.33 to  +2.85     GRAVITY
+    3        +0.49         -0.30 to  +0.33     constant
+    4        +1.02         -0.16 to  +0.25     constant
+    5        +0.54         -0.69 to  +0.22     constant
+
+Joint 0 is the control: its axis is vertical so it carries zero gravity torque
+at every pose, and it still shows +1.04 Nm of asymmetry. That cannot be gravity.
+"""
 note = """
 f_c is the MINIMUM measured breakaway across all five poses, per joint per
 direction -- not the mean. Breakaway varies with load (joint 1 spans 6.83-8.94
@@ -50,15 +75,60 @@ coulomb = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 # bound a coulomb runaway. test-scale-sweep.py --axis viscous measures it.
 viscous = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
 
+[gravity_residual]
+# The controller's own gravity compensation is wrong by a standing torque that
+# varies with pose. Modelled as a phantom point mass rigidly attached to the
+# tool, parameterised by its mass-moment so the model is LINEAR in theta:
+#
+#   g_j(q) = 9.81 * [ J_v[:,j] . g_hat , (R^T (g_hat x J_w[:,j])) ] . theta
+#   theta  = [ dm , dm*p_x , dm*p_y , dm*p_z ]        kg, kg m
+#
+# Fitted jointly with a per-joint friction asymmetry over 45 measurements
+# (6 joints x up to 10 poses, breakaway-*.npz). Splitting the two matters: the
+# combined model reaches R^2 0.889, against 0.727 for gravity alone and 0.551
+# for per-joint constants alone. Joint 0 is the control -- vertical axis, zero
+# gravity torque at every pose, and still +1.04 Nm of asymmetry, so the
+# constant part is real and is not gravity leaking through.
+#
+# Residual after the fit: 0.1-0.35 Nm on joints 0/3/4/5, ~1.0 Nm on 1 and 2.
+theta = [-0.752842, 0.073373, 0.013608, 0.087259]
+
+# Per-joint friction asymmetry left over once the gravity term is removed [Nm].
+# NOT used by the control path -- recorded because it is what f_c+ and f_c-
+# should straddle once tau_bias is live, and because joint 0's entry is the
+# evidence that friction asymmetry exists at all.
+asymmetry = [1.035, 1.641, -0.317, 0.490, 1.015, 0.541]
+
+# f_c minima recomputed from GRAVITY-CORRECTED breakaway, i.e. what f_c_pos /
+# f_c_neg below should become once tau_bias is actually supplied. Do not swap
+# these in before then -- without the bias they would over-compensate joint 1
+# by up to 2.7 Nm.
+#   f_c_pos_corrected = [9.31, 9.00, 3.94, 1.41, 1.90, 1.41]
+#   f_c_neg_corrected = [11.03, 10.40, 6.32, 2.54, 4.25, 2.36]
+# Cancelling the gravity term cuts joint 1's across-pose spread from 2.97x to
+# 2.00x and lifts its negative minimum 8.88 -> 10.40. The other joints barely
+# move, which is the same conclusion the per-joint fit reached.
+
 [friction]
 # Positive- and negative-direction breakaway [Nm], per joint 0..5.
-# Joints 0, 4 and 5 are ZERO: never measured with a working detector. They move
-# < 0.02 deg under a teleop command (test-offaxis.py), so zero costs nothing and
-# errs safe. Do NOT reinstate the pre-2026-09-21 table for them -- it was taken
-# at coulomb 0.8, past the over-compensation threshold, with a single-sample
-# detector that over-read by whatever travel the velocity took to build.
-f_c_pos = [0.0, 6.828, 4.100, 1.594, 0.0, 0.0]
-f_c_neg = [0.0, 11.031, 6.157, 2.755, 0.0, 0.0]
+# All six joints measured as of 2026-09-21. Do NOT reinstate the pre-2026-09-21
+# table -- it was taken at coulomb 0.8, past the over-compensation threshold,
+# with a single-sample detector that over-read by whatever travel the velocity
+# took to build.
+#
+# Joint 0 is worth noting: it carries ZERO gravity torque at every pose, so its
+# 1.21x asymmetry cannot be a standing gravity torque. That is the cleanest
+# evidence so far that genuine friction asymmetry exists and is not just the
+# gravity residual showing through.
+# True minima now: joints 1-3 over TEN poses, joints 0/4/5 over FIVE. The
+# provisional 0.8 haircut those three carried is gone -- they have real minima.
+# Rounded down.
+#
+# Joint 1's negative minimum dropped 11.03 -> 8.88 when the new poses arrived,
+# which is the minimum rule doing its job: five poses had not yet found the
+# weak one. Expect it to keep falling slowly as poses are added.
+f_c_pos = [9.30, 6.32, 4.09, 1.56, 1.95, 1.94]
+f_c_neg = [11.02, 8.87, 6.15, 2.43, 4.11, 2.58]
 
 # KINETIC friction [Nm], per joint 0..5 -- the torque needed to KEEP a joint
 # moving, which is lower than the breakaway above. ZERO everywhere because none
