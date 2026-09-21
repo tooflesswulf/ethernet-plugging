@@ -56,17 +56,26 @@ weakest pose everywhere inside the measured envelope.
 # disagreeing coulomb tables (test-friction-recal's [0.8, 0.8, 0.7, 0.8, 0.8,
 # 0.8] and brr.py's [0.9, 0.8, 0.8, 0.7, 0.8, 1.0]).
 #
-# COULOMB IS ZERO EVERYWHERE, pending measurement. Not because zero is right --
-# the firmware's velocity-based compensation is the correct tool for kinetic
-# friction -- but because the only threshold ever measured put joint 1's
-# over-compensation limit between 0.60 and 0.80 at ONE pose, and the previous
-# default of 0.8 was past it. Fill these in per joint as test-scale-sweep.py
-# clears them, and set f_k below to the residual it reports at the chosen scale.
+# Measured per joint at TWO poses each, 2026-09-21 (scale-sweep-2026092*.npz),
+# 0.0-1.0 in steps of 0.2. The over-compensation threshold -- where the joint
+# ACCELERATES after breakaway instead of stopping -- is:
 #
-#   joint 1: stable at 0.60, unstable at 0.80 (2026-09-19, one pose, n=1).
-#            Residual kinetic there ~1.4-1.8 Nm.
-#   joints 0, 2, 3, 4, 5: never swept.
-coulomb = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+#   joint 0   1.00     joint 2   > 1.00     joint 4   > 1.00
+#   joint 1   0.80     joint 3   > 1.00     joint 5   > 1.00
+#
+# JOINT 1 IS THE ODD ONE OUT and it is consistent: 0.80 at both poses here and
+# at the 2026-09-19 pose, three for three. Every other joint was still stable at
+# the top of the sweep. That is why these are per joint and not one global
+# number -- a single 0.8 would have driven joint 1 while under-using the rest.
+#
+# Set one step below each threshold. Joints 2-5 are set to 0.8 rather than 1.0
+# because the sweep stopped at 1.0 and never found their limit, so the margin
+# there is unknown rather than large.
+#
+# The verdicts behind these are inertia-independent -- a pure comparison of
+# velocity before and after the torque is removed -- so unlike f_k below they
+# do not inherit the URDF inertia's errors.
+coulomb = [0.8, 0.6, 0.8, 0.8, 0.8, 0.8]
 
 # VISCOUS is inherited, NOT measured. It has never been swept on any joint.
 # Viscous compensation cancels damping, and damping is what turns a constant
@@ -130,25 +139,26 @@ asymmetry = [1.035, 1.641, -0.317, 0.490, 1.015, 0.541]
 f_c_pos = [9.30, 6.32, 4.09, 1.56, 1.95, 1.94]
 f_c_neg = [11.02, 8.87, 6.15, 2.43, 4.11, 2.58]
 
-# KINETIC friction [Nm], per joint 0..5 -- the torque needed to KEEP a joint
-# moving, which is lower than the breakaway above. ZERO everywhere because none
-# of it has been measured yet, and because the firmware's own coulomb
-# compensation is the right tool for this half: it is velocity-based, which is
-# exactly wrong for breakaway (0.7% effect, test-scale-sweep.py) and exactly
-# right here. On joint 1 it delivers roughly 6.0 Nm per unit scale against a
-# kinetic friction near 5.3 Nm, so a scale somewhere around 0.6-0.9 cancels most
-# of it -- but the over-compensation threshold measured on joint 1 sits between
-# 0.6 and 0.8, so there is little or no margin. Expect to run the scale BELOW
-# the threshold and leave the remainder to f_k.
+# KINETIC friction [Nm] left over at the coulomb scales above -- the torque
+# that still opposes motion once the firmware has done its half. Measured from
+# the coast deceleration, I*(qd0^2 - qd_end^2)/(2*travel), minimum across the
+# two poses per joint (same conservative rule as f_c: under-compensating is
+# safe, over-compensating drives the joint).
 #
-# To measure: test-scale-sweep.py reports the coast deceleration at each scale,
-# and I * a IS the residual kinetic friction at that scale. One sweep per joint
-# gives both the stability limit and the f_k to put here.
+# HOW MUCH TO TRUST THESE: they scale directly with the joint inertia, which
+# comes from the URDF via crba. Chirp identification already found that model
+# wrong by 1.5-4.2x on five axes (see impedance.py), and for geared joints the
+# reflected rotor inertia usually dominates the link inertia and is usually
+# absent from a URDF altogether. The inertias used were
 #
-# Zero means our loop adds no kinetic term at all. That is the safe direction:
-# an f_k that is too large drives the joint instead of freeing it.
-f_k_pos = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-f_k_neg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+#   j0 2.656   j1 3.350   j2 1.045   j3 0.047   j4 0.008   j5 0.001  kg m^2
+#
+# so joints 0-2 are link-dominated and plausible, while 3-5 are small enough
+# that a missing rotor term would swamp them. Joints 4 and 5 reading 0.00 means
+# "below what this method can resolve", NOT "no kinetic friction". Zero is the
+# safe value either way, so they stay zero until there is a better inertia.
+f_k_pos = [0.48, 0.31, 0.22, 0.02, 0.0, 0.0]
+f_k_neg = [0.56, 1.64, 1.17, 0.04, 0.0, 0.0]
 
 # Weight on the STANDSTILL term only: the term is f_c * assist * tanh(tau/t_eps),
 # so the delivered push at rest is assist * f_c. At 0.8 that is 80% of the
