@@ -203,7 +203,17 @@ def report_assist(rows):
     print('=' * 76)
     print(f'  hold {HOLD_TIME:.0f} s after settling; quiet means every joint '
           f'under {QUIET_QD} rad/s RMS\n')
-    print('  assist   worst joint   qd RMS [rad/s]   verdict')
+    moved = max(abs(r['on'] / r['amp']) if r['amp'] else 0.0 for r in rows)
+    if moved < 0.5:
+        print('!' * 76)
+        print('  THIS TESTED NOTHING.')
+        print('!' * 76)
+        print(f'  The arm realised at most {moved:.2f} of the commanded offset, '
+              f'so the joints\n  never broke free. A limit cycle needs the '
+              f'joint to break loose and then\n  OVERSHOOT; one that is still '
+              f'stuck cannot hunt, however hard the assist\n  term pushes. '
+              f'Raise --assist-amp until this clears ~0.9 and re-run.\n')
+    print('  assist   worst joint   qd RMS [rad/s]   realised   verdict')
     limit = None
     for r in rows:
         rms = r['hold_qd_rms']
@@ -211,14 +221,19 @@ def report_assist(rows):
         hunting = rms[k] > QUIET_QD
         if hunting and limit is None:
             limit = r['assist']
-        print(f'   {r["assist"]:5.2f}      joint {k}        {rms[k]:.5f}      '
+        fr = abs(r['on'] / r['amp']) if r['amp'] else np.nan
+        print(f'   {r["assist"]:5.2f}      joint {k}        {rms[k]:.5f}     '
+              f'{fr:5.2f}      '
               + ('HUNTING' if hunting else 'quiet')
               + ('   <-- first' if hunting and limit == r['assist'] else ''))
     print()
-    if limit is None:
-        print('  No hunting at any assist tested. The standstill term is not '
-              'driving the\n  arm into a limit cycle at these f_c, and the '
-              'highest value tested is usable.')
+    if limit is None and moved < 0.5:
+        print('  No hunting -- but see above: nothing moved, so this says '
+              'nothing about\n  whether fc_assist is safe.')
+    elif limit is None:
+        print('  No hunting at any assist tested, and the arm DID move, so the '
+              'standstill\n  term is not driving it into a limit cycle at '
+              'these f_c. The highest value\n  tested is usable.')
     else:
         ok = [r['assist'] for r in rows if r['assist'] < limit]
         print(f'  Hunting starts at fc_assist {limit:.2f}.')
@@ -288,6 +303,16 @@ def main():
                     help='rotational step [mrad] for part B')
     ap.add_argument('--ramp', type=float, default=1.0)
     ap.add_argument('--hold', type=float, default=HOLD_TIME)
+    ap.add_argument('--assist-amp', type=float, default=25.0,
+                    help='part A offset [mm]. MUST be large enough to actually '
+                         'move the joint: a limit cycle needs the joint to '
+                         'break free and overshoot, and a stuck joint cannot '
+                         'hunt. The 2 mm of the first run realised 0.07-0.36 mm '
+                         'and tested nothing.')
+    ap.add_argument('--corrected-fc', action='store_true',
+                    help='use the gravity-CORRECTED f_c table, which is only '
+                         'valid with the bias on -- pairs with the default '
+                         '(bias enabled), invalid with --no-bias')
     ap.add_argument('--f-sat', type=float, default=None,
                     help='translational force cap [N]. THIS limits the command, '
                          'not K -- compute() saturates F at F_sat, so raising K '
@@ -300,13 +325,21 @@ def main():
 
     cfg = load_friction()
     vis, cou = load_scales()
+    if args.corrected_fc:
+        if args.no_bias:
+            ap.error('--corrected-fc needs the gravity bias; drop --no-bias')
+        if not np.any(cfg['f_c_pos_bias']):
+            ap.error('friction.toml has no f_c_pos_bias table')
+        cfg['f_c_pos'] = np.asarray(cfg['f_c_pos_bias'], float)
+        cfg['f_c_neg'] = np.asarray(cfg['f_c_neg_bias'], float)
     theta = None if args.no_bias else load_gravity_residual()
     axes = [int(a) for a in args.axes.split(',')]
     assists = [float(a) for a in args.assists.split(',')]
     out = args.out or time.strftime('teleop-%Y%m%d-%H%M%S.npz')
 
     print('TELEOP VALIDATION')
-    print(f'  f_c+   {np.round(cfg["f_c_pos"], 2)}')
+    print(f'  f_c+   {np.round(cfg["f_c_pos"], 2)}'
+          + ('   (gravity-corrected)' if args.corrected_fc else ''))
     print(f'  f_c-   {np.round(cfg["f_c_neg"], 2)}')
     print(f'  f_k+   {np.round(cfg["f_k_pos"], 2)}')
     print(f'  f_k-   {np.round(cfg["f_k_neg"], 2)}')
@@ -337,7 +370,11 @@ def main():
             raise RuntimeError('control script did not start')
         time.sleep(0.01)
     kin = URKin(ctrl.getTCPOffset())
-    imp = CartesianImpedance(tau_rated=kin.tau_rated)
+    imp = CartesianImpedance(f_c=cfg['f_c_pos'], f_c_neg=cfg['f_c_neg'],
+                             tau_rated=kin.tau_rated)
+    imp.f_k = np.asarray(cfg['f_k_pos'], float)
+    imp.f_k_neg = np.asarray(cfg['f_k_neg'], float)
+    imp.fc_assist = float(cfg['fc_assist'])
     if args.f_sat is not None:
         imp.F_sat = np.array([args.f_sat] * 3 + list(imp.F_sat[3:]))
     scales = (list(vis), list(cou))
@@ -357,14 +394,16 @@ def main():
                 # a small offset so there IS a standing command to feed on --
                 # at exactly zero error the assist term is zero and no limit
                 # cycle can start
-                r = drive(ctrl, recv, kin, imp, base, 0, 0.002, args.ramp,
+                r = drive(ctrl, recv, kin, imp, base, 0,
+                          args.assist_amp * 1e-3, args.ramp,
                           scales, theta, hold=args.hold, trace=trace)
                 r['assist'] = asst
                 a_rows.append(r)
                 k = int(np.argmax(r['hold_qd_rms']))
                 print(f'  assist {asst:4.2f}: worst joint {k} '
                       f'{r["hold_qd_rms"][k]:.5f} rad/s RMS over {r["hold_n"]} '
-                      f'samples')
+                      f'samples   (realised '
+                      f'{abs(r["on"] / (args.assist_amp * 1e-3)):.2f})')
             imp.fc_assist = float(cfg['fc_assist'])
 
         if args.part in ('b', 'both'):

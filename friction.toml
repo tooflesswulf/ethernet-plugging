@@ -112,8 +112,9 @@ asymmetry = [1.035, 1.641, -0.317, 0.490, 1.015, 0.541]
 # f_c_neg below should become once tau_bias is actually supplied. Do not swap
 # these in before then -- without the bias they would over-compensate joint 1
 # by up to 2.7 Nm.
-#   f_c_pos_corrected = [9.31, 9.00, 3.94, 1.41, 1.90, 1.41]
-#   f_c_neg_corrected = [11.03, 10.40, 6.32, 2.54, 4.25, 2.36]
+# They are the f_c_pos_bias / f_c_neg_bias keys below -- real keys, not
+# commented out, so they can be A/B'd (test-teleop.py --corrected-fc) without
+# editing this file. Nothing reads them by default.
 # Cancelling the gravity term cuts joint 1's across-pose spread from 2.97x to
 # 2.00x and lifts its negative minimum 8.88 -> 10.40. The other joints barely
 # move, which is the same conclusion the per-joint fit reached.
@@ -136,6 +137,11 @@ asymmetry = [1.035, 1.641, -0.317, 0.490, 1.015, 0.541]
 # Joint 1's negative minimum dropped 11.03 -> 8.88 when the new poses arrived,
 # which is the minimum rule doing its job: five poses had not yet found the
 # weak one. Expect it to keep falling slowly as poses are added.
+# Valid ONLY with tau_bias live -- see [gravity_residual]. Without the bias
+# these over-compensate joint 1 by up to 2.7 Nm.
+f_c_pos_bias = [9.31, 9.00, 3.94, 1.41, 1.90, 1.41]
+f_c_neg_bias = [11.03, 10.40, 6.32, 2.54, 4.25, 2.36]
+
 f_c_pos = [9.30, 6.32, 4.09, 1.56, 1.95, 1.94]
 f_c_neg = [11.02, 8.87, 6.15, 2.43, 4.11, 2.58]
 

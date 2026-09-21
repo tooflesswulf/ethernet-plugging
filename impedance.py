@@ -26,8 +26,12 @@ MAX_ORIENTATION_ERROR = 0.2   # rad; the rotvec axis is ill-conditioned near pi
 # preferable to a guess.
 FRICTION_CONFIG = Path(__file__).with_name('friction.toml')
 
+# f_c_*_bias are the gravity-CORRECTED table, valid only when a caller supplies
+# tau_bias. Nothing uses them by default; they are here so they can be A/B'd
+# without editing the config. Zeros mean "not present".
 _FALLBACK = {'f_c_pos': [0.0] * 6, 'f_c_neg': [0.0] * 6,
              'f_k_pos': [0.0] * 6, 'f_k_neg': [0.0] * 6,
+             'f_c_pos_bias': [0.0] * 6, 'f_c_neg_bias': [0.0] * 6,
              'fc_assist': 0.5, 'fc_veps': 0.05, 'fc_teps': 4.0}
 
 
@@ -94,7 +98,8 @@ def load_friction(path=FRICTION_CONFIG):
         for k in out:
             if k in cfg:
                 out[k] = cfg[k]
-        for k in ('f_c_pos', 'f_c_neg', 'f_k_pos', 'f_k_neg'):
+        for k in ('f_c_pos', 'f_c_neg', 'f_k_pos', 'f_k_neg',
+                  'f_c_pos_bias', 'f_c_neg_bias'):
             if len(out[k]) != 6:
                 raise ValueError(f'{k} must have 6 entries, got {len(out[k])}')
             out[k] = np.asarray(out[k], float)
@@ -107,7 +112,8 @@ def load_friction(path=FRICTION_CONFIG):
         warnings.warn(f'{path}: {e!r} -- falling back to NO friction '
                       f'compensation', RuntimeWarning)
         out = dict(_FALLBACK)
-        for k in ('f_c_pos', 'f_c_neg', 'f_k_pos', 'f_k_neg'):
+        for k in ('f_c_pos', 'f_c_neg', 'f_k_pos', 'f_k_neg',
+                  'f_c_pos_bias', 'f_c_neg_bias'):
             out[k] = np.zeros(6)
         return out
 
