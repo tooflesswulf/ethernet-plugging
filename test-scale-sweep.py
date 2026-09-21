@@ -75,14 +75,24 @@ OFF = [0.0] * 6
 TAU_CAP = np.array([17.0, 26.0, 14.0, 5.0, 6.0, 5.0])
 RATE = np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])    # Nm/s
 
-# Breakaway is DISPLACEMENT, not a velocity sample -- the same fix
-# test-breakaway.py carries. A single tick over QD_DETECT is a noise spike or a
-# micro-slip: on joint 1 those trips moved 0.016-0.018 deg against 0.2-0.48 for
-# real ones. Runs before 2026-09-21 used the old single-sample rule and their
-# breakaway column reads HIGH by whatever travel the velocity took to build.
-DQ_CONFIRM = 0.00087  # rad (0.050 deg) -- breakaway
+# DELIBERATELY DIFFERENT FROM test-breakaway.py. That script gates on 0.05 deg
+# of DISPLACEMENT, which catches the true onset of motion -- and at that point
+# the joint is still in presliding, moving at 0.0004-0.0056 rad/s, at or below
+# the 0.001-0.004 rad/s noise floor (measured across the 2026-09-21 breakaway
+# runs: 72% of detections under 0.010 rad/s).
+#
+# That is fine for a torque reading and fatal for the COAST, which is this
+# script's actual measurement: I*(qd0^2 - qd_end^2)/(2*travel) needs qd0 well
+# clear of noise. So detection here waits for real VELOCITY instead, debounced
+# so a single spike cannot trigger it.
+#
+# The cost is that the breakaway column below reads HIGH -- it is the torque at
+# which velocity reached 0.02 rad/s, which includes the presliding travel that
+# test-breakaway.py stops before. Treat it as indicative; f_c comes from
+# test-breakaway.py.
 QD_DETECT = 0.02      # rad/s, and it must HOLD for DETECT_HOT ticks
-DETECT_HOT = 10       # 20 ms at 500 Hz
+DETECT_HOT = 10       # 20 ms at 500 Hz -- a spike cannot trip this
+DQ_DETECT = 0.0087    # rad (0.5 deg) -- backstop if velocity never builds
 QD_ABORT = 0.15       # rad/s on ANY joint
 DQ_ABORT = 0.026      # rad (1.5 deg) on the joint under test
 DQ_OTHER = 0.026      # rad (1.5 deg) on any other joint
@@ -247,10 +257,8 @@ def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, coulomb, log):
                 f'joint {k} moved {np.degrees(dq[k]):+.2f} deg while joint {j} '
                 f'was under test; all dq = {np.round(np.degrees(dq), 2)}')
 
-        if abs(dq[j]) > DQ_CONFIRM:
-            return mag
         hot = hot + 1 if abs(qd[j]) > QD_DETECT else 0
-        if hot >= DETECT_HOT:
+        if hot >= DETECT_HOT or abs(dq[j]) > DQ_DETECT:
             return mag
         ctrl.waitPeriod(ts)
 
@@ -329,14 +337,18 @@ def report(rows, j, home, inertia=None):
     print(f'  pendant (deg): {np.round(np.degrees(home), 3)}\n')
     if inertia is not None:
         print(f'  joint {j} effective inertia {inertia:.2f} kg m^2\n')
-    print('  coulomb   breakaway + / -         coast +        coast -        '
-          'residual kinetic +/- [Nm]')
+    # The breakaway torque is NOT printed. This script detects on velocity so
+    # the coast has something to measure, which means its breakaway reads high
+    # by the presliding travel test-breakaway.py stops before -- the two
+    # numbers are not comparable and printing them side by side invites exactly
+    # that comparison. It is still measured and still saved to the npz
+    # ('cells', column 'breakaway'); f_c comes from test-breakaway.py.
+    print('  coulomb      coast +        coast -        residual kinetic '
+          '+/- [Nm]')
     limit = None
     resid = {}
     for r in rows:
         p_, m_ = r.get('+'), r.get('-')
-        bp = f'{p_[0]:6.2f}' if p_ else '   n/a'
-        bm = f'{m_[0]:6.2f}' if m_ else '   n/a'
         vp = p_[5] if p_ else 'n/a'
         vm = m_[5] if m_ else 'n/a'
         unstable = [v for v in (vp, vm)
@@ -351,8 +363,7 @@ def report(rows, j, home, inertia=None):
         resid[r['coulomb']] = rk
         rs = '  '.join('  n/a ' if not np.isfinite(x) else f'{x:+6.2f}'
                        for x in rk)
-        print(f'   {r["coulomb"]:5.2f}   {bp} / {bm} Nm      '
-              f'{vp:12s}  {vm:12s}   {rs}{mark}')
+        print(f'   {r["coulomb"]:5.2f}    {vp:12s}  {vm:12s}   {rs}{mark}')
 
     print()
     if not rows:
@@ -369,9 +380,9 @@ def report(rows, j, home, inertia=None):
         print(f'  over-compensation starts at coulomb {limit:.2f}.')
     if safe and limit is not None:
         print(f'  highest scale that still decelerates: {max(safe):.2f}')
-        print(f'\n  Run below that, and re-measure f_c there. A breakaway read '
-              f'at or above\n  {limit:.2f} is not a friction number -- part of '
-              f'it is the scale driving the joint.')
+        print(f'\n  Run below that. Anything measured at or above {limit:.2f} '
+              f'is contaminated:\n  part of what you read is the scale driving '
+              f'the joint, not friction.')
     elif safe:
         print(f'  highest scale tested: {max(safe):.2f}, still stable. Sweep '
               f'higher to find\n  the threshold, or use this one.')
@@ -389,11 +400,10 @@ def report(rows, j, home, inertia=None):
               'joint fully uncompensated; if it\n  is still unstable there, '
               'the cause is outside the friction scales entirely.')
     if limit is not None and limit <= 0.8:
-        print(f'\n  NOTE: 0.8 is the default in test-friction-recal.py, '
-              f'test-gravity-residual.py\n  and test-friction-repeat.py. The '
-              f'limit is at or below it, so every f_c\n  measured at 0.8 -- '
-              f'including the 5.19-8.77 Nm spread in\n  RECALIBRATION-PLAN.md '
-              f'-- needs redoing.')
+        print(f'\n  NOTE: the limit is at or below 0.8, which several older '
+              f'scripts use as\n  their default. Any f_c measured at 0.8 -- '
+              f'including the 5.19-8.77 Nm\n  spread in RECALIBRATION-PLAN.md '
+              f'-- was taken on a driven joint.')
     if inertia is not None and resid:
         print('\n' + '-' * 76)
         print('  f_k FOR friction.toml')
@@ -419,6 +429,10 @@ def report(rows, j, home, inertia=None):
                   'looking for.')
     print(f'\n  This is for the pose above. The threshold is load dependent; '
           f're-run it\n  somewhere else before generalising.')
+    print('  Breakaway torque is in the npz but not shown: this script detects '
+          'on velocity\n  so the coast has something to measure, so its '
+          'breakaway is not comparable to\n  test-breakaway.py\'s. Use that '
+          'script for f_c.')
 
 
 def rows_from_npz(path):
@@ -466,8 +480,10 @@ def main():
                     help='coulomb scale held fixed when --axis viscous '
                          '(default 0.8, the value that feels light)')
     ap.add_argument('--values', default=None,
-                    help='scales to sweep (default 0.0,0.2,0.4,0.6,0.8 for '
-                         'coulomb; 0.9,0.7,0.5,0.3,0.0 for viscous)')
+                    help='scales to sweep (default 0.0,0.2,0.4,0.6,0.8,1.0 '
+                         'for coulomb; 0.9,0.7,0.5,0.3,0.0 for viscous). '
+                         'Joint 0 was still stable at 0.8, so the range now '
+                         'runs to 1.0 to find thresholds rather than miss them.')
     ap.add_argument('--viscous', type=float, default=None,
                     help='viscous scale on the test joint, held fixed across '
                          'the sweep (default: the set value, 0.9 on joint 1). '
@@ -500,7 +516,7 @@ def main():
     if args.values:
         values = [float(x) for x in args.values.split(',')]
     else:
-        values = ([0.0, 0.2, 0.4, 0.6, 0.8] if args.axis == 'coulomb'
+        values = ([0.0, 0.2, 0.4, 0.6, 0.8, 1.0] if args.axis == 'coulomb'
                   else [0.9, 0.7, 0.5, 0.3, 0.0])
     rate = RATE[j] if args.rate is None else args.rate
     cap = TAU_CAP[j] if args.cap is None else args.cap
