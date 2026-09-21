@@ -61,14 +61,14 @@ import time
 
 import numpy as np
 
-# Two scale sets exist in this repo and they disagree. COULOMB is what
-# test-friction-recal.py and test-gravity-residual.py use; BRR_COULOMB is what
-# brr.py and env.py actually run. They differ on joints 0, 2, 3 and 5.
-# Only the joint under test matters here, and they agree on joint 1 (0.8).
-VISCOUS = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
-COULOMB = [0.8, 0.8, 0.7, 0.8, 0.8, 0.8]
-BRR_VISCOUS = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
-BRR_COULOMB = [0.9, 0.8, 0.8, 0.7, 0.8, 1.0]
+from impedance import load_scales
+
+# Scales come from friction.toml -- the single copy. The repo used to carry two
+# disagreeing tables (test-friction-recal's and brr.py's) with nothing saying
+# which was authoritative; --viscous still overrides for a deliberate probe.
+_VIS, _COU = load_scales()
+VISCOUS = [float(x) for x in _VIS]
+COULOMB = [float(x) for x in _COU]
 OFF = [0.0] * 6
 
 # 1.2x the largest UNCOMPENSATED breakaway, as in test-friction-recal.py.
@@ -224,7 +224,8 @@ def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, coulomb, log):
 
         q = np.array(recv.getActualQ())
         qd = np.array(recv.getActualQd())
-        log.append(np.r_[time.perf_counter() - t0, coulomb, sgn * mag, q, qd])
+        log.append(np.r_[time.perf_counter() - t0, coulomb, sgn * mag,
+                         0.0, q, qd])          # phase 0 = ramp
 
         dq = q - q_start
         if np.max(np.abs(qd)) > QD_ABORT:
@@ -244,7 +245,7 @@ def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, coulomb, log):
         ctrl.waitPeriod(ts)
 
 
-def coast(ctrl, recv, j, coulomb, q_break):
+def coast(ctrl, recv, j, coulomb, q_break, log=None, sgn=1.0):
     """
     The stability test. Torque is already zero; watch what the joint does.
 
@@ -258,10 +259,16 @@ def coast(ctrl, recv, j, coulomb, q_break):
     while time.perf_counter() - t0 < COAST_WINDOW:
         ts = ctrl.initPeriod()
         ctrl.directTorque(zeros, vis, cou)
+        qq = np.array(recv.getActualQ())
         qd = np.array(recv.getActualQd())
-        dq = np.array(recv.getActualQ()) - q_break
+        dq = qq - q_break
         last = abs(qd[j])
         peak = max(peak, last)
+        if log is not None:
+            # The coast IS the measurement; the first version of this script
+            # printed it and threw it away, leaving the npz with ramps only.
+            log.append(np.r_[time.perf_counter() - t0, coulomb, 0.0,
+                             1.0, qq, qd])              # phase 1 = coast
         if np.max(np.abs(qd)) > QD_ABORT or abs(dq[j]) > COAST_BUDGET:
             return qd0, last, peak, float(dq[j]), 'RUNAWAY'
         ctrl.waitPeriod(ts)
@@ -273,14 +280,49 @@ def coast(ctrl, recv, j, coulomb, q_break):
     return qd0, last, peak, dq, verdict
 
 
-def report(rows, j, home):
+def residual_kinetic(qd0, qd_end, travel, inertia):
+    """
+    Torque [Nm] opposing motion during the coast, from v^2 = v0^2 - 2*a*d.
+
+    With commanded torque at zero, whatever decelerates the joint IS the
+    friction the compensation did not cancel -- which is exactly the f_k that
+    belongs in friction.toml for that scale. Negative means the joint was being
+    DRIVEN: over-compensation, and no f_k can fix it.
+
+    Viscous drag is lumped in, but at the ~0.02 rad/s of a coast it is a small
+    part of the total.
+    """
+    d = abs(travel)
+    if d < 1e-9 or inertia is None:
+        return np.nan
+    return float(inertia) * (qd0 ** 2 - qd_end ** 2) / (2.0 * d)
+
+
+def joint_inertia(q, j):
+    """Effective inertia [kg m^2] of joint j at q, or None without pinocchio."""
+    try:
+        import pinocchio as pin
+        from kinematics import URKin
+        kin = URKin([0.0] * 6)
+        H = pin.crba(kin.model, kin.data, np.asarray(q, float))
+        H = np.triu(H) + np.triu(H, 1).T
+        return float(H[j, j])
+    except Exception:
+        return None
+
+
+def report(rows, j, home, inertia=None):
     print('\n' + '=' * 76)
     print(f'  COULOMB SCALE SWEEP -- joint {j}')
     print('=' * 76)
     print(f'  pose (rad): {np.round(home, 6)}')
     print(f'  pendant (deg): {np.round(np.degrees(home), 3)}\n')
-    print('  coulomb   breakaway + / -         coast +        coast -')
+    if inertia is not None:
+        print(f'  joint {j} effective inertia {inertia:.2f} kg m^2\n')
+    print('  coulomb   breakaway + / -         coast +        coast -        '
+          'residual kinetic +/- [Nm]')
     limit = None
+    resid = {}
     for r in rows:
         p_, m_ = r.get('+'), r.get('-')
         bp = f'{p_[0]:6.2f}' if p_ else '   n/a'
@@ -292,8 +334,15 @@ def report(rows, j, home):
         if unstable and limit is None:
             limit = r['coulomb']
         mark = '   <-- first unstable' if unstable and limit == r['coulomb'] else ''
+        rk = []
+        for v in (p_, m_):
+            rk.append(np.nan if v is None else
+                      residual_kinetic(v[1], v[2], v[4], inertia))
+        resid[r['coulomb']] = rk
+        rs = '  '.join('  n/a ' if not np.isfinite(x) else f'{x:+6.2f}'
+                       for x in rk)
         print(f'   {r["coulomb"]:5.2f}   {bp} / {bm} Nm      '
-              f'{vp:12s}  {vm:12s}{mark}')
+              f'{vp:12s}  {vm:12s}   {rs}{mark}')
 
     print()
     if not rows:
@@ -330,6 +379,29 @@ def report(rows, j, home):
               f'limit is at or below it, so every f_c\n  measured at 0.8 -- '
               f'including the 5.19-8.77 Nm spread in\n  RECALIBRATION-PLAN.md '
               f'-- needs redoing.')
+    if inertia is not None and resid:
+        print('\n' + '-' * 76)
+        print('  f_k FOR friction.toml')
+        print('-' * 76)
+        usable = {c: v for c, v in resid.items()
+                  if (limit is None or c < limit)
+                  and any(np.isfinite(x) and x > 0 for x in v)}
+        if not usable:
+            print('  no stable scale produced a positive residual -- nothing to '
+                  'put in f_k.')
+        else:
+            best = max(usable)
+            rp, rm = usable[best]
+            print(f'  At the highest STABLE scale tested ({best:.2f}), the coast '
+                  f'still opposes\n  motion by {rp:+.2f} / {rm:+.2f} Nm. That '
+                  f'residual is what the firmware did not\n  cancel, and it is '
+                  f'what belongs in f_k_pos[{j}] / f_k_neg[{j}].')
+            print(f'\n  Run the arm at coulomb {best:.2f} on joint {j} and set:')
+            print(f'    f_k_pos[{j}] = {max(rp, 0.0):.2f}   '
+                  f'f_k_neg[{j}] = {max(rm, 0.0):.2f}')
+            print('\n  Under-compensate if in doubt: too large an f_k drives the '
+                  'joint, which is\n  the same runaway the scale sweep above is '
+                  'looking for.')
     print(f'\n  This is for the pose above. The threshold is load dependent; '
           f're-run it\n  somewhere else before generalising.')
 
@@ -344,11 +416,16 @@ def main():
                     help='6 joint angles [rad]. Default: wherever the arm is '
                          'when you start, which is the point -- put it where '
                          'you want it measured.')
-    ap.add_argument('--values', default='0.0,0.2,0.4,0.6,0.8',
-                    help='coulomb scales to sweep')
-    ap.add_argument('--scales', choices=('recal', 'brr'), default='recal',
-                    help="which set the VISCOUS scale comes from; they agree "
-                         "on joint 1")
+    ap.add_argument('--axis', choices=('coulomb', 'viscous'), default='coulomb',
+                    help="which scale to sweep. 'viscous' holds coulomb at "
+                         "--hold-coulomb and sweeps viscous instead -- use it "
+                         "to ask whether damping bounds a coulomb runaway.")
+    ap.add_argument('--hold-coulomb', type=float, default=0.8,
+                    help='coulomb scale held fixed when --axis viscous '
+                         '(default 0.8, the value that feels light)')
+    ap.add_argument('--values', default=None,
+                    help='scales to sweep (default 0.0,0.2,0.4,0.6,0.8 for '
+                         'coulomb; 0.9,0.7,0.5,0.3,0.0 for viscous)')
     ap.add_argument('--viscous', type=float, default=None,
                     help='viscous scale on the test joint, held fixed across '
                          'the sweep (default: the set value, 0.9 on joint 1). '
@@ -368,19 +445,32 @@ def main():
     args = ap.parse_args()
 
     j = args.joint
-    if args.scales == 'brr':
-        VISCOUS[:], COULOMB[:] = list(BRR_VISCOUS), list(BRR_COULOMB)
     if args.viscous is not None:
         VISCOUS[j] = args.viscous
-    values = [float(x) for x in args.values.split(',')]
+    if args.values:
+        values = [float(x) for x in args.values.split(',')]
+    else:
+        values = ([0.0, 0.2, 0.4, 0.6, 0.8] if args.axis == 'coulomb'
+                  else [0.9, 0.7, 0.5, 0.3, 0.0])
     rate = RATE[j] if args.rate is None else args.rate
     cap = TAU_CAP[j] if args.cap is None else args.cap
     out = args.out or time.strftime('scale-sweep-%Y%m%d-%H%M%S.npz')
 
-    print(f'COULOMB SCALE SWEEP, joint {j}')
+    print(f'{args.axis.upper()} SCALE SWEEP, joint {j}')
     print(f'  values {values}')
-    print(f'  viscous {VISCOUS[j]} held fixed on joint {j}; every other joint '
-          f'at scale 0')
+    print(f'  scales from friction.toml: viscous {VISCOUS}')
+    if args.axis == 'coulomb':
+        print(f'  viscous {VISCOUS[j]} held fixed on joint {j}; every other '
+              f'joint at scale 0')
+    else:
+        print(f'  coulomb {args.hold_coulomb} held fixed on joint {j}; every '
+              f'other joint at scale 0')
+        print(f'  Coulomb over-compensation is a roughly CONSTANT excess '
+              f'torque, so with no\n  damping it integrates into acceleration. '
+              f'Viscous compensation cancels the\n  damping that would '
+              f'otherwise bound it at a terminal velocity. This asks how\n  '
+              f'much has to come back before the runaway becomes a bounded '
+              f'drift.')
     print(f'  rate {rate} Nm/s   cap {cap} Nm   dwell {args.dwell} s   '
           f'predwell {args.predwell} s')
     print(f'  at breakaway the torque is ZEROED and the joint watched for '
@@ -423,9 +513,16 @@ def main():
 
     rows, log = [], []
     try:
-        for cj in values:
-            print(f'  coulomb {cj:.2f}:')
-            row = {'coulomb': cj}
+        for val in values:
+            # `cj` is always the coulomb scale actually applied; when sweeping
+            # viscous it is pinned and `val` lands on VISCOUS[j] instead.
+            if args.axis == 'coulomb':
+                cj = val
+            else:
+                cj = args.hold_coulomb
+                VISCOUS[j] = val
+            print(f'  {args.axis} {val:.2f}:')
+            row = {'coulomb': val}
             for sgn, name in ((1.0, '+'), (-1.0, '-')):
                 approach(ctrl, home, j)
                 if args.predwell > 0:
@@ -445,7 +542,7 @@ def main():
                         continue
                     q_break = np.array(recv.getActualQ())
                     qd0, qd1, peak, dq, verdict = coast(ctrl, recv, j, cj,
-                                                        q_break)
+                                                        q_break, log, sgn)
                     print(f'    {name}: breakaway {b:6.3f} Nm   coast '
                           f'{qd0:.4f} -> {qd1:.4f} rad/s '
                           f'(peak {peak:.4f}, {np.degrees(dq):+.2f} deg)   '
@@ -466,15 +563,32 @@ def main():
         except Exception:
             pass
 
-    if log:
-        L = np.array(log)
-        np.savez(out, t=L[:, 0], coulomb=L[:, 1], tau=L[:, 2], q=L[:, 3:9],
-                 qd=L[:, 9:15], values=np.array(values), pose=home, joint=j,
+    cells, verdicts = [], []
+    for r in rows:
+        for name, sgn in (('+', 1.0), ('-', -1.0)):
+            v = r.get(name)
+            if v is None:
+                cells.append([r['coulomb'], sgn, np.nan, np.nan, np.nan,
+                              np.nan, np.nan])
+                verdicts.append('skipped')
+            else:
+                b, qd0, qd1, pk, dq, vd = v
+                cells.append([r['coulomb'], sgn, b, qd0, qd1, pk, dq])
+                verdicts.append(vd)
+    if log or cells:
+        L = np.array(log) if log else np.zeros((0, 15))
+        np.savez(out, t=L[:, 0], coulomb=L[:, 1], tau=L[:, 2], phase=L[:, 3],
+                 q=L[:, 4:10], qd=L[:, 10:16],
+                 cells=np.array(cells, float),
+                 cell_cols=np.array(['coulomb', 'sgn', 'breakaway', 'qd0',
+                                     'qd_end', 'qd_peak', 'travel']),
+                 verdict=np.array(verdicts),
+                 values=np.array(values), pose=home, joint=j,
                  viscous=VISCOUS, coulomb_set=COULOMB,
                  coast_window=COAST_WINDOW, coast_budget=COAST_BUDGET)
         print(f'\nwrote {out}')
 
-    report(rows, j, home)
+    report(rows, j, home, joint_inertia(q_sweep, j))
 
 
 if __name__ == '__main__':

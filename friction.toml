@@ -1,0 +1,94 @@
+# Friction compensation constants for impedance.friction_feedforward.
+#
+# Edit THIS file, not impedance.py. If the file is missing or malformed the
+# controller falls back to NO compensation (all zeros), which is the safe
+# direction -- it is also what env.py has been running.
+
+[provenance]
+measured = "2026-09-21"
+tool = "test-breakaway.py --joints 1,2,3 --reps 3, all friction scales at zero"
+data = [
+    "breakaway-20260919-171811.npz",
+    "breakaway-20260921-113338.npz",
+    "breakaway-20260921-113810.npz",
+    "breakaway-20260921-114321.npz",
+    "breakaway-20260921-114759.npz",
+]
+note = """
+f_c is the MINIMUM measured breakaway across all five poses, per joint per
+direction -- not the mean. Breakaway varies with load (joint 1 spans 6.83-8.94
+Nm positive and 11.03-21.98 negative across these poses) and over-compensation
+is a runaway rather than a limit cycle, because the term pushes ALONG the
+velocity a joint already has. The minimum keeps the standstill term under the
+weakest pose everywhere inside the measured envelope.
+"""
+
+[scales]
+# FIRMWARE friction compensation scales, per joint 0..5, passed to
+# direct_torque by the patched control script. These are the operating values:
+# env.py, brr.py and the measurement scripts should all read them from here
+# rather than keeping their own copies, which is how the repo ended up with two
+# disagreeing coulomb tables (test-friction-recal's [0.8, 0.8, 0.7, 0.8, 0.8,
+# 0.8] and brr.py's [0.9, 0.8, 0.8, 0.7, 0.8, 1.0]).
+#
+# COULOMB IS ZERO EVERYWHERE, pending measurement. Not because zero is right --
+# the firmware's velocity-based compensation is the correct tool for kinetic
+# friction -- but because the only threshold ever measured put joint 1's
+# over-compensation limit between 0.60 and 0.80 at ONE pose, and the previous
+# default of 0.8 was past it. Fill these in per joint as test-scale-sweep.py
+# clears them, and set f_k below to the residual it reports at the chosen scale.
+#
+#   joint 1: stable at 0.60, unstable at 0.80 (2026-09-19, one pose, n=1).
+#            Residual kinetic there ~1.4-1.8 Nm.
+#   joints 0, 2, 3, 4, 5: never swept.
+coulomb = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# VISCOUS is inherited, NOT measured. It has never been swept on any joint.
+# Viscous compensation cancels damping, and damping is what turns a constant
+# over-compensation excess into a terminal velocity instead of acceleration --
+# so a viscous scale that is too high removes the thing that would otherwise
+# bound a coulomb runaway. test-scale-sweep.py --axis viscous measures it.
+viscous = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
+
+[friction]
+# Positive- and negative-direction breakaway [Nm], per joint 0..5.
+# Joints 0, 4 and 5 are ZERO: never measured with a working detector. They move
+# < 0.02 deg under a teleop command (test-offaxis.py), so zero costs nothing and
+# errs safe. Do NOT reinstate the pre-2026-09-21 table for them -- it was taken
+# at coulomb 0.8, past the over-compensation threshold, with a single-sample
+# detector that over-read by whatever travel the velocity took to build.
+f_c_pos = [0.0, 6.828, 4.100, 1.594, 0.0, 0.0]
+f_c_neg = [0.0, 11.031, 6.157, 2.755, 0.0, 0.0]
+
+# KINETIC friction [Nm], per joint 0..5 -- the torque needed to KEEP a joint
+# moving, which is lower than the breakaway above. ZERO everywhere because none
+# of it has been measured yet, and because the firmware's own coulomb
+# compensation is the right tool for this half: it is velocity-based, which is
+# exactly wrong for breakaway (0.7% effect, test-scale-sweep.py) and exactly
+# right here. On joint 1 it delivers roughly 6.0 Nm per unit scale against a
+# kinetic friction near 5.3 Nm, so a scale somewhere around 0.6-0.9 cancels most
+# of it -- but the over-compensation threshold measured on joint 1 sits between
+# 0.6 and 0.8, so there is little or no margin. Expect to run the scale BELOW
+# the threshold and leave the remainder to f_k.
+#
+# To measure: test-scale-sweep.py reports the coast deceleration at each scale,
+# and I * a IS the residual kinetic friction at that scale. One sweep per joint
+# gives both the stability limit and the f_k to put here.
+#
+# Zero means our loop adds no kinetic term at all. That is the safe direction:
+# an f_k that is too large drives the joint instead of freeing it.
+f_k_pos = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+f_k_neg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Weight on the STANDSTILL term only: the term is f_c * assist * tanh(tau/t_eps),
+# so the delivered push at rest is assist * f_c. At 0.8 that is 80% of the
+# weakest measured breakaway, which is the intended doctrine.
+#
+# It does NOT weight the kinetic term -- that has its own magnitude, f_k above.
+fc_assist = 0.8
+
+# How sharply the term flips with velocity sign. Too small and it is effectively
+# f_c*sign(qd), so every reversal swings the torque by 2*f_c, which chatters.
+fc_veps = 0.05
+# Commanded-torque scale for the standstill term's tanh.
+fc_teps = 4.0

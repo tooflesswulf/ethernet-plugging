@@ -31,6 +31,7 @@ TCP = [0, 0, 0.1537, 0, 0, 0]
 class FakeCtrl:
     def __init__(self):
         self.torques = []
+        self.scales = []
         self.ret = True
         self.stopped = False
 
@@ -40,8 +41,12 @@ class FakeCtrl:
     def waitPeriod(self, t):
         pass
 
-    def directTorque(self, tau):
+    def directTorque(self, tau, viscous=None, coulomb=None):
         self.torques.append(np.array(tau))
+        # Scales are load-bearing: a stop must zero them, a control tick must
+        # send the configured ones. Record so tests can assert on it.
+        self.scales.append((None if viscous is None else np.array(viscous),
+                            None if coulomb is None else np.array(coulomb)))
         return self.ret
 
     def zeroFtSensor(self):
@@ -125,6 +130,10 @@ def e():
     o._late_worst = 0.0
     o.stop_flag = True
     o._loop_hz = 0.0
+    # Firmware friction-compensation scales, as Env.__init__ sets them.
+    o.viscous_scale = [0.9, 0.9, 0.8, 0.9, 0.9, 0.9]
+    o.coulomb_scale = [0.9, 0.8, 0.8, 0.7, 0.8, 1.0]
+    o._scale_off = [0.0] * 6
     return o
 
 
@@ -283,6 +292,37 @@ def test_exception_in_tick_still_commands_zero(e):
     e._control_loop()
     assert e._fault is not None and 'exception' in e._fault
     assert np.abs(e.ctrl.torques[-1]).max() == 0.0
+
+
+def test_safe_stop_kills_the_friction_scales_not_just_the_torque(e):
+    """
+    Zero torque is NOT a stop while firmware friction compensation is live -- the
+    controller keeps pushing a MOVING joint whatever we command. The scales have
+    to go to zero too, which restores natural stiction and helps arrest it. This
+    is what `identify` got wrong when it drove joint 1 into a wall.
+    """
+    e._safe_stop_torque()
+    vis, cou = e.ctrl.scales[-1]
+    assert vis is not None and cou is not None, 'stop sent bare directTorque'
+    assert np.all(vis == 0) and np.all(cou == 0)
+    assert np.all(e.ctrl.torques[-1] == 0)
+
+
+def test_control_tick_sends_the_configured_scales(e):
+    """A bare call inherits pybind's non-zero defaults; always be explicit."""
+    e._control_tick(0.0, 0.002, 1)
+    vis, cou = e.ctrl.scales[-1]
+    assert np.allclose(vis, e.viscous_scale)
+    assert np.allclose(cou, e.coulomb_scale)
+
+
+def test_friction_feedforward_is_off_by_default(e):
+    """
+    The firmware compensates now. Stacking our own feedforward on top is the
+    over-compensation that turns stiction into a limit cycle -- see
+    RECALIBRATION-PLAN.md step 2 before switching any of it back on.
+    """
+    assert np.all(e.imp.f_c == 0)
 
 
 def test_safe_stop_zeroes_then_stops(e):

@@ -41,10 +41,12 @@ the 26 Nm cap. The forensics said why, and all of it is fixed here.
      joint 1 ran past it three times with 0.004-0.008 deg of travel. Raised,
      and a cap hit is now reported as a cap hit rather than a NaN.
 
-Scales are ZERO on every joint. The coulomb scale does not reduce static
-breakaway at all -- 0.7% over 0.0-0.6, see test-scale-sweep.py -- and 0.8 is
-past the over-compensation threshold, so there is nothing to gain and stability
-to lose.
+Scales come from friction.toml's [scales] table and are applied during the ramp,
+so breakaway is measured under whatever the controller will run. This barely
+moves the number -- the coulomb scale changes static breakaway by 0.7% over
+0.0-0.6 (test-scale-sweep.py), since the firmware term is velocity-based and a
+joint about to break away is not moving -- but it removes a discrepancy rather
+than assuming one away. --zero-scales forces zeros.
 
 SAFETY
 ------
@@ -61,7 +63,28 @@ import time
 
 import numpy as np
 
+from impedance import load_scales
+
 OFF = [0.0] * 6
+
+# Firmware compensation scales, from friction.toml -- one copy, shared with
+# env.py and test-scale-sweep.py. Applied DURING the ramp so breakaway is
+# measured under the scales the controller will actually run.
+#
+# It barely matters which they are: the coulomb scale changes static breakaway
+# by 0.7% over 0.0-0.6 (test-scale-sweep.py), because the firmware term is
+# velocity-based and a joint about to break away is not moving. Measuring under
+# the operating scales rather than under zeros is for correctness of principle,
+# not because the number moves. --zero-scales forces zeros.
+#
+# NOTE the 2026-09-21 measurements now in friction.toml were taken with viscous
+# at ZERO as well as coulomb. Viscous compensation is velocity-proportional, so
+# like coulomb it should be inert at standstill -- but it also removes damping,
+# which could make the SETTLE creep more and fail more often. The scales used
+# are recorded in the npz; if a rerun disagrees with the committed table, check
+# that first.
+VISCOUS, COULOMB = (lambda v, c: ([float(x) for x in v], [float(x) for x in c]))(
+    *load_scales())
 
 # Raised from test-friction-repeat.py's [17, 26, 14, 5, 6, 5]. Joint 1 ran past
 # 26 Nm three times with no motion, so that limit was measuring the cap, not the
@@ -141,7 +164,7 @@ def settle(ctrl, recv, dwell, qd_quiet=QD_QUIET, timeout=8.0):
     quiet_since, hot = None, 0
     while True:
         ts = ctrl.initPeriod()
-        ctrl.directTorque(OFF, OFF, OFF)
+        ctrl.directTorque(OFF, VISCOUS, COULOMB)
         qd = np.abs(np.array(recv.getActualQd()))
         dq = np.array(recv.getActualQ()) - q0
         now = time.perf_counter()
@@ -186,7 +209,7 @@ def ramp(ctrl, recv, j, sgn, q_start, rate, cap, log, rep):
         if mag > cap:
             return None, onset, 0.0, 'cap'
         tau[j] = sgn * mag
-        ctrl.directTorque(tau.tolist(), OFF, OFF)
+        ctrl.directTorque(tau.tolist(), VISCOUS, COULOMB)
 
         q = np.array(recv.getActualQ())
         qd = np.array(recv.getActualQd())
@@ -309,18 +332,24 @@ def main():
                     help='s under POSITION control after moveJ, before torque '
                          'mode; moveJ returns on trajectory completion, not on '
                          'the servo settling')
+    ap.add_argument('--zero-scales', action='store_true',
+                    help='force all firmware scales to zero instead of using '
+                         "friction.toml's [scales]")
     ap.add_argument('--out', default=None)
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
 
+    if args.zero_scales:
+        VISCOUS[:] = [0.0] * 6
+        COULOMB[:] = [0.0] * 6
     joints = [int(x) for x in args.joints.split(',')]
     rates = {j: (RATE[j] if args.rate is None else args.rate) for j in joints}
     caps = {j: (TAU_CAP[j] if args.cap is None else args.cap) for j in joints}
     out = args.out or time.strftime('breakaway-%Y%m%d-%H%M%S.npz')
 
     print(f'BREAKAWAY BY DIRECTION, joints {joints}, {args.reps} reps')
-    print('  all friction scales ZERO (coulomb does nothing for breakaway and '
-          '0.8 is\n  past the over-compensation threshold)')
+    print(f'  firmware scales (friction.toml): viscous {VISCOUS}')
+    print(f'                                   coulomb {COULOMB}')
     for j in joints:
         print(f'  joint {j}: rate {rates[j]} Nm/s   cap {caps[j]} Nm')
     print(f'  breakaway = {np.degrees(DQ_CONFIRM):.3f} deg of travel, or '
@@ -408,6 +437,7 @@ def main():
                  result_cols=np.array(['joint', 'sgn', 'breakaway', 'onset',
                                        'travel', 'how_0trav_1speed_2cap']),
                  pose=home, joints=np.array(joints),
+                 viscous=np.array(VISCOUS), coulomb=np.array(COULOMB),
                  dq_confirm=DQ_CONFIRM, detect_hot=DETECT_HOT)
         print(f'\nwrote {out}')
     report(res, joints, home)
