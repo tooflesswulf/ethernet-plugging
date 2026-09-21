@@ -75,8 +75,14 @@ OFF = [0.0] * 6
 TAU_CAP = np.array([17.0, 26.0, 14.0, 5.0, 6.0, 5.0])
 RATE = np.array([1.0, 1.0, 1.0, 0.5, 0.5, 0.5])    # Nm/s
 
-QD_DETECT = 0.02      # rad/s -- breakaway
-DQ_DETECT = 0.0087    # rad (0.5 deg) -- breakaway by displacement
+# Breakaway is DISPLACEMENT, not a velocity sample -- the same fix
+# test-breakaway.py carries. A single tick over QD_DETECT is a noise spike or a
+# micro-slip: on joint 1 those trips moved 0.016-0.018 deg against 0.2-0.48 for
+# real ones. Runs before 2026-09-21 used the old single-sample rule and their
+# breakaway column reads HIGH by whatever travel the velocity took to build.
+DQ_CONFIRM = 0.00087  # rad (0.050 deg) -- breakaway
+QD_DETECT = 0.02      # rad/s, and it must HOLD for DETECT_HOT ticks
+DETECT_HOT = 10       # 20 ms at 500 Hz
 QD_ABORT = 0.15       # rad/s on ANY joint
 DQ_ABORT = 0.026      # rad (1.5 deg) on the joint under test
 DQ_OTHER = 0.026      # rad (1.5 deg) on any other joint
@@ -214,6 +220,7 @@ def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, coulomb, log):
     tau = np.zeros(6)
     vis, cou = scales_for(j, coulomb)
     t0 = time.perf_counter()
+    hot = 0
     while True:
         ts = ctrl.initPeriod()
         mag = rate * (time.perf_counter() - t0)
@@ -240,7 +247,10 @@ def ramp(ctrl, recv, j, sgn, q_start, rate, tau_cap, coulomb, log):
                 f'joint {k} moved {np.degrees(dq[k]):+.2f} deg while joint {j} '
                 f'was under test; all dq = {np.round(np.degrees(dq), 2)}')
 
-        if abs(qd[j]) > QD_DETECT or abs(dq[j]) > DQ_DETECT:
+        if abs(dq[j]) > DQ_CONFIRM:
+            return mag
+        hot = hot + 1 if abs(qd[j]) > QD_DETECT else 0
+        if hot >= DETECT_HOT:
             return mag
         ctrl.waitPeriod(ts)
 
@@ -350,17 +360,22 @@ def report(rows, j, home, inertia=None):
         return
     if limit is None:
         print('  every scale tested decelerates after breakaway. No '
-              'over-compensation in\n  this range AT THIS POSE -- whatever '
-              'makes the arm rise is not the coulomb\n  scale on this joint.')
-        return
-    safe = [r['coulomb'] for r in rows if r['coulomb'] < limit]
-    print(f'  over-compensation starts at coulomb {limit:.2f}.')
-    if safe:
+              'over-compensation in\n  this range AT THIS POSE -- the highest '
+              'scale tested is usable, and the\n  threshold is somewhere '
+              'above it.')
+    safe = [r['coulomb'] for r in rows
+            if limit is None or r['coulomb'] < limit]
+    if limit is not None:
+        print(f'  over-compensation starts at coulomb {limit:.2f}.')
+    if safe and limit is not None:
         print(f'  highest scale that still decelerates: {max(safe):.2f}')
         print(f'\n  Run below that, and re-measure f_c there. A breakaway read '
               f'at or above\n  {limit:.2f} is not a friction number -- part of '
               f'it is the scale driving the joint.')
-    elif limit > 0.0:
+    elif safe:
+        print(f'  highest scale tested: {max(safe):.2f}, still stable. Sweep '
+              f'higher to find\n  the threshold, or use this one.')
+    elif limit is not None and limit > 0.0:
         print('  even the lowest scale tested is unstable; extend the sweep '
               'downward.')
     else:
@@ -373,7 +388,7 @@ def report(rows, j, home, inertia=None):
               'destabilising\n  too. Re-run with --viscous 0 to take the '
               'joint fully uncompensated; if it\n  is still unstable there, '
               'the cause is outside the friction scales entirely.')
-    if limit <= 0.8:
+    if limit is not None and limit <= 0.8:
         print(f'\n  NOTE: 0.8 is the default in test-friction-recal.py, '
               f'test-gravity-residual.py\n  and test-friction-repeat.py. The '
               f'limit is at or below it, so every f_c\n  measured at 0.8 -- '
@@ -404,6 +419,33 @@ def report(rows, j, home, inertia=None):
                   'looking for.')
     print(f'\n  This is for the pose above. The threshold is load dependent; '
           f're-run it\n  somewhere else before generalising.')
+
+
+def rows_from_npz(path):
+    """
+    Rebuild the report's `rows` from a saved run.
+
+    Exists because the report is the last thing main() does, after the npz is
+    written -- so a bug there (as in the q_sweep NameError of 2026-09-21) loses
+    the printout but never the data. --replay regenerates it without touching
+    the robot, and gives the report path a way to be exercised offline, which
+    is how that bug reached hardware in the first place.
+    """
+    d = np.load(path)
+    cells, verdicts = d['cells'], d['verdict']
+    rows = []
+    for c in d['values']:
+        row = {'coulomb': float(c)}
+        for k in range(len(cells)):
+            if not np.isclose(cells[k, 0], c):
+                continue
+            name = '+' if cells[k, 1] > 0 else '-'
+            b = cells[k, 2]
+            row[name] = (None if not np.isfinite(b) else
+                         (b, cells[k, 3], cells[k, 4], cells[k, 5],
+                          cells[k, 6], str(verdicts[k])))
+        rows.append(row)
+    return rows, int(d['joint']), d['pose']
 
 
 def main():
@@ -441,8 +483,16 @@ def main():
     ap.add_argument('--qd-quiet', type=float, default=QD_QUIET)
     ap.add_argument('--out', default=None,
                     help='default: scale-sweep-<YYYYmmdd-HHMMSS>.npz')
+    ap.add_argument('--replay', default=None,
+                    help='re-print the report from a saved .npz without '
+                         'touching the robot')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
+
+    if args.replay:
+        rows, j_, pose_ = rows_from_npz(args.replay)
+        report(rows, j_, pose_, joint_inertia(pose_, j_))
+        return
 
     j = args.joint
     if args.viscous is not None:
@@ -588,7 +638,7 @@ def main():
                  coast_window=COAST_WINDOW, coast_budget=COAST_BUDGET)
         print(f'\nwrote {out}')
 
-    report(rows, j, home, joint_inertia(q_sweep, j))
+    report(rows, j, home, joint_inertia(home, j))
 
 
 if __name__ == '__main__':
