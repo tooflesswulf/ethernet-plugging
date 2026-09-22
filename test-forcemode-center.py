@@ -43,9 +43,16 @@ match; tcp -> centre moves to the TCP.
 Safety: zero target wrench means the arm is nearly free-floating. With --ft-input
 other than "off", force mode reads a wrench THIS SCRIPT supplies -- if the loop
 stalls, the controller acts on a stale one. Streaming is enabled only inside a
-push and handed back straight after. Speed limits are
-low by default and the run aborts if the TCP drifts more than --max-drift from
-where the segment started. Keep the e-stop within reach.
+push and handed back straight after. Speed limits are low by default and the run
+aborts if the TCP drifts more than --max-drift from where the segment started.
+Keep the e-stop within reach.
+
+If a run dies while the streamed input is enabled, the CONTROLLER stays enabled
+and the next run protective-stops ("fieldbus input disconnected") as soon as it
+pauses -- typically while zeroing the F/T, before it has streamed anything. This
+script therefore disables the input at startup and again before every zero, so
+just starting it clears that state (clear the protective stop on the pendant
+first).
 """
 from scipy.spatial.transform import Rotation as R
 from scipy.optimize import least_squares
@@ -178,6 +185,10 @@ def run_segment(ctrl, recv, args, label, log, seg, t_log):
     back to where the segment started, so the workspace stays bounded.
     """
     print(f'\n--- segment "{label}" --- hands OFF while the F/T zeroes')
+    # Never zero while the controller is waiting on a streamed wrench: nothing is
+    # writing it here, and zeroing a source with no data is a fieldbus protective
+    # stop. Cheap insurance -- the previous rep already disabled it.
+    ctrl.ftRtdeInputEnable(False)
     time.sleep(1.0)
     ctrl.zeroFtSensor()
     time.sleep(0.3)
@@ -200,7 +211,7 @@ def run_segment(ctrl, recv, args, label, log, seg, t_log):
             # letting the controller compensate again would subtract the payload twice.
             ctrl.ftRtdeInputEnable(True, 0.0, [0.0] * 3, [0.0] * 3)
 
-        t0 = time.perf_counter()
+        t0 = t_prev = time.perf_counter()
         aborted = ''
         try:
             while time.perf_counter() - t0 < args.seconds:
@@ -221,15 +232,29 @@ def run_segment(ctrl, recv, args, label, log, seg, t_log):
                 log.append(np.r_[time.perf_counter() - t_log, seg, rep, pose,
                                  recv.getActualTCPSpeed(), w, sent, recv.getActualQ()])
                 ctrl.waitPeriod(t_start)
+                now = time.perf_counter()
+                # Bail out ourselves rather than let the controller notice: while the
+                # streamed input is enabled, a gap in it is a "fieldbus input
+                # disconnected" protective stop, which needs a pendant reset.
+                if shift is not None and now - t_prev > args.max_stall:
+                    aborted = f'loop stalled {1e3 * (now - t_prev):.0f} ms'
+                    t_prev = now
+                    break
+                t_prev = now
         finally:
-            ctrl.forceModeStop()
+            # ORDER MATTERS. forceModeStop() runs stopl(10) in the control script,
+            # which blocks while the arm decelerates; the script processes no further
+            # commands meanwhile. Disabling the streamed input first means the
+            # controller is back on its own F/T before that blocking stop, instead of
+            # sitting on an input nobody is writing.
             if shift is not None:
-                # Hand the F/T back to the controller before anything else moves:
-                # a streamed input that stops updating is a stale input.
                 ctrl.ftRtdeInputEnable(False)
+            ctrl.forceModeStop()
         if aborted == 'protective/emergency stop':
             print(f'    ABORTED: {aborted}')
             return aborted
+        if aborted:
+            print(f'      push {rep + 1} ended early: {aborted}')
         back = np.linalg.norm(np.array(recv.getActualTCPPose())[:3] - home[:3])
         if back > 2e-3:
             print(f'      hands off -- returning {1e3 * back:.0f} mm', flush=True)
@@ -241,7 +266,6 @@ def run_segment(ctrl, recv, args, label, log, seg, t_log):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--ip', default='192.168.0.100')
-    ap.add_argument('--hz', type=float, default=500.0)
     ap.add_argument('--offsets', type=offsets_arg, default='tip=0.03,base=-0.154',
                     help='push points as name=offset_along_tool_z_from_TCP[m], tip positive')
     ap.add_argument('--task-frame', choices=('base', 'tcp'), default='base')
@@ -264,6 +288,9 @@ def main():
                     default=np.array([0.03] * 3 + [0.3] * 3),
                     help='forceMode speed limits "m/s,rad/s"')
     ap.add_argument('--max-drift', type=float, default=0.10, help='abort if TCP moves this far [m]')
+    ap.add_argument('--max-stall', type=float, default=0.02,
+                    help='with --ft-input on, end the push if one loop takes longer than this [s]; '
+                         'a gap in the streamed wrench is a fieldbus protective stop')
     ap.add_argument('--v-min', type=float, default=1e-3,
                     help='ignore samples whose push point moves slower than this [m/s]')
     ap.add_argument('--fm-damping', type=float, default=None)
@@ -273,6 +300,12 @@ def main():
 
     ctrl = rtde_control.RTDEControlInterface(args.ip)
     recv = rtde_receive.RTDEReceiveInterface(args.ip)
+    # ft_rtde_input_enable is CONTROLLER state and outlives the process that set
+    # it: a run that died before its cleanup leaves the controller waiting on a
+    # wrench nobody is sending, and the next run trips "fieldbus input
+    # disconnected" while it sits there zeroing. Clear it before anything else.
+    ctrl.ftRtdeInputEnable(False)
+
     tcp = args.tcp = np.array(ctrl.getTCPOffset())
     print(f'TCP offset  : {np.round(tcp, 4)}')
     print(f'F/T input   : {args.ft_input} -- {FT_MODES[args.ft_input][1]}'
@@ -334,7 +367,7 @@ def main():
         np.savez(out, t=L[:, 0], seg=L[:, 1], rep=L[:, 2], pose=L[:, 3:9], twist=L[:, 9:15],
                  tcp_force=L[:, 15:21], ft_sent=L[:, 21:27], q=L[:, 27:33],
                  f_min=args.f_min, v_min=args.v_min, seconds=args.seconds, reps=args.reps,
-                 ft_input=args.ft_input, ft_frame=args.ft_frame,
+                 ft_input=args.ft_input, ft_frame=args.ft_frame, max_stall=args.max_stall,
                  labels=np.array([r[0] for r in args.offsets]),
                  push_offsets=np.array([r[1] for r in args.offsets]),
                  task_frame=args.task_frame, tcp_offset=tcp, vmax=args.vmax,
