@@ -469,6 +469,7 @@ class Env:
         while not self.stop_flag:
             t0 = time.perf_counter()
             obs = self.get_obs()
+            
 
             # Do not log if stationary
             # cur_pose = np.r_[obs['state']['actual_pose'], obs['state']['gripper_width']]
