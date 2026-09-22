@@ -164,7 +164,7 @@ def build_parser():
                    help='position gain on stiff axes [1/s]')
 
     g = ap.add_argument_group('safety')
-    g.add_argument('--vmax', type=csv6, default=csv6('0.01,0.1'),
+    g.add_argument('--vmax', type=csv6, default=csv6('0.08,0.9'),
                    help='speed clamp m/s, rad/s (norms; first and fourth used)')
     g.add_argument('--amax', type=csv6, default=csv6('0.5,2.0'),
                    help='acceleration clamp m/s^2, rad/s^2; also bounds how fast contact is shed')
@@ -190,7 +190,7 @@ def build_parser():
 
     g = ap.add_argument_group('teleop')
     g.add_argument('--teleop-hz', type=float, default=100.0)
-    g.add_argument('--teleop-speed', type=csv6, default=csv6('0.008,0.08'),
+    g.add_argument('--teleop-speed', type=csv6, default=csv6('0.08,0.9'),
                    help='DualSense full-stick target speed m/s, rad/s')
 
     g = ap.add_argument_group('center / free')
@@ -616,6 +616,7 @@ def make_dualsense(args, pose):
     inside the mode tripped C207A0 before the first cycle.
     """
     from interface import DualSenseInterface
+    print(args.teleop_speed)
     return DualSenseInterface(pose, xyzspeed=args.teleop_speed[0], rpyspeed=args.teleop_speed[3],
                               enable_zadaptive=False)
 
