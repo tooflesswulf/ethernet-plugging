@@ -469,6 +469,7 @@ class Session:
         self.watchdog = False
         self.buf, self.n = np.full((1 << 15, NCOL), np.nan), 0
         self.t0, self.t_last, self.max_gap, self.slow = clock(), None, 0.0, 0
+        self.v_last = np.zeros(6)          # last TCP twist actually sent
         try:
             recv.getFtRawWrench()
             self.has_raw = True
@@ -496,8 +497,37 @@ class Session:
     def prompt(self, msg, **ctx):
         self.io.prompt(msg, self.kick, **ctx)
 
+    def ramp_down(self, timeout=0.5):
+        """
+        Bring the arm to rest with speedL, feeding the watchdog every cycle.
+
+        speedStop() alone is NOT safe with the watchdog on: the control script runs
+        stopl() synchronously and ur_rtde waits for it, so the host sends nothing
+        for the whole deceleration. From 10 mm/s and 0.079 rad/s that outlasted the
+        50 ms watchdog and protective-stopped the arm (C207A0 Fieldbus input
+        disconnected, fdcc-center-20260922-162200.npz). Stopped this way first,
+        the speedStop that follows has nothing left to decelerate.
+        """
+        a, dt = self.args, self.dt
+        v = np.array(self.v_last, float)
+        t0 = self.clock()
+        while self.clock() - t0 < timeout:
+            t_start = self.ctrl.initPeriod()
+            if self.recv.isProtectiveStopped() or self.recv.isEmergencyStopped():
+                return
+            v = v - clamp_wrench(v, a.amax[0] * dt, a.amax[3] * dt)
+            if self.ctrl.speedL(v.tolist(), a.amax[0], self.speedl_time) is False:
+                return
+            self.ctrl.waitPeriod(t_start)
+            tw = np.array(self.recv.getActualTCPSpeed(), float)
+            if not v.any() and np.linalg.norm(tw[:3]) < 5e-4 and np.linalg.norm(tw[3:]) < 5e-3:
+                break
+
     def stop(self):
+        """Ramp to rest through speedL, then speedStop (see ramp_down)."""
+        self.ramp_down()
         self.ctrl.speedStop(self.args.stop_acc)
+        self.v_last = np.zeros(6)
         self.adm.reset()
         self.t_last = None
 
@@ -538,6 +568,7 @@ class Session:
         if send:
             if self.ctrl.speedL(v_cmd.tolist(), a.amax[0], self.speedl_time) is False:
                 raise Abort('speedL refused -- control script not running (watchdog stop?)')
+            self.v_last = v_cmd
         else:
             v_cmd = NAN6
         raw = self.recv.getFtRawWrench() if self.has_raw else NAN6
@@ -1175,6 +1206,10 @@ def run(args, ctrl, recv, io, clock=time.perf_counter, out=None):
     finally:
         try:
             try:
+                sess.ramp_down()           # never speedStop from speed with the watchdog on
+            except Exception as ex:
+                print(f'ramp down failed: {ex!r}')
+            try:
                 ctrl.speedStop(args.stop_acc)
             except Exception as ex:
                 print(f'speedStop failed: {ex!r}')
@@ -1218,7 +1253,7 @@ class FakeRobot:
         self.forces, self.calls, self.speedl_times = [], [], []
         self.zero, self.noise, self.rng = np.zeros(6), noise, np.random.default_rng(seed)
         self.pstop_at, self.push = np.inf, None
-        self.wd_action = 'stop'        # 'protective' models what the UR16e actually did
+        self.wd_action = 'protective'  # what the UR16e does (C207A0); 'stop' = plain program stop
 
     def now(self):
         return self.t
@@ -1236,7 +1271,8 @@ class FakeRobot:
                 self.pstop_at, self.stop_acc = self.t, 10.0
         go = self.speeding and self.running
         target, acc = (self.cmd, self.acc) if go else (np.zeros(6), self.stop_acc)
-        dv = clamp_wrench((target - self.twist) * min(1.0, h / self.tau), acc * h, 4 * acc * h)
+        dv = clamp_wrench((target - self.twist) * min(1.0, h / self.tau), acc * h,
+                          (acc if go else self.stop_acc) * h * (4 if go else 1))
         self.twist = self.twist + dv
         self.pose[:3] += self.twist[:3] * h
         self.pose[3:] = (R.from_rotvec(self.twist[3:] * h) * R.from_rotvec(self.pose[3:])).as_rotvec()
@@ -1275,7 +1311,10 @@ class FakeRobot:
         if not self._input('speedStop'):
             return False
         self.speeding, self.stop_acc = False, a
-        return True
+        # stopl(a) runs synchronously and ur_rtde waits on it: the host is silent
+        # until the arm is at rest (rotation decelerates at a rad/s^2 too).
+        self.advance(max(np.linalg.norm(self.twist[:3]), np.linalg.norm(self.twist[3:])) / a)
+        return self.running
 
     def stopScript(self):
         self.calls.append('stopScript')
@@ -1543,6 +1582,21 @@ def selftest():
     _, _, reason = quiet(run, args_hi, fk, fk, SimIO(fk, hand=lambda d: hand_at(0.0, np.array([60.0, 0, 0]))),
                          fk.now, os.path.join(tmp, 'fabort.npz'))
     check('60 N aborts the run', reason.startswith('ABORT: wrench'), reason)
+
+    fk = FakeRobot(POSE0, 1 / 500)
+    fk.setWatchdog(20.0)
+    fk.speedL([0.01, 0, 0, 0, 0, 0.079], 1.0, 0.008)
+    fk.advance(0.2)
+    fk.speedStop(1.0)
+    check('fake: bare speedStop at 0.079 rad/s trips C207A0', 'watchdog-stop' in fk.calls and fk.isProtectiveStopped(),
+          '(reproduces fdcc-center-20260922-162200)')
+    args = ap.parse_args(['--mode', 'free', '--reps', '2', '--seconds', '2'])
+    fk = FakeRobot(POSE0, 1 / args.hz, noise=0.1)
+    out, _, reason = quiet(run, args, fk, fk, SimIO(fk, hand=lambda d: hand_at(-0.154, np.array([12.0, 0, 0]))),
+                           fk.now, os.path.join(tmp, 'fast-release.npz'))
+    wz = np.abs(np.load(out)['v_cmd'][:, 3:]).max()
+    check('push ending at speed returns without a watchdog stop', reason == 'finished' and 'watchdog-stop' not in fk.calls,
+          f'{reason}, peak rotation {wz:.3f} rad/s')
 
     print('validation modes on the fake (analysis code paths)')
     for sensor, flag, point, expect in (('tcp', 'tcp', 0.0, 0.0), ('tcp', 'tcp', 0.03, 0.03),
