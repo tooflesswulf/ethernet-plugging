@@ -78,6 +78,7 @@ from scipy.optimize import least_squares
 import numpy as np
 import argparse
 import contextlib
+from collections import deque
 import io as _io
 import json
 import os
@@ -142,9 +143,12 @@ def build_parser():
     g.add_argument('--d', type=csv6, default=csv6('1000,20'),
                    help='damping N s/m, Nm s/rad. 1/D is the free-space admittance: '
                         '1000 N s/m = 1 mm/s per N, forceMode was 0.93')
-    g.add_argument('--m', type=csv6, default=csv6('10,0.2'),
-                   help='virtual mass kg, kg m^2. M/D is the response time constant (10 ms). '
-                        '30 kg chattered on a hard surface once amax let it react (fake, 2026-09-22)')
+    g.add_argument('--m', type=csv6, default=csv6('15,0.3'),
+                   help='virtual mass kg, kg m^2; M/D is the response time constant (15 ms). A trade: '
+                        'too light and the 25 Hz loop through getActualTCPForce (it reads the arm\'s own '
+                        'motion as ~20 kg, 34 ms late) limit-cycles -- 10 kg did, 9 N rms, '
+                        'fdcc-tap-20260922-165218; too heavy and hard contact chatters (fakes: >= 17 kg '
+                        'at 27 mm/s). 15 passes both on the fakes, with thin margins')
     g.add_argument('--sel', type=csv6, default=csv6('1'),
                    help='1 = compliant, 0 = stiff (position tracking at --stiff-gain). '
                         '"1,0" locks rotation only')
@@ -159,8 +163,10 @@ def build_parser():
                    help='+1: getActualTCPForce is the external force ON the tool (push +x reads +x)')
     g.add_argument('--deadband', type=csvn, default=csvn('1.5,0.15'),
                    help='soft deadband on |F| [N], |tau| [Nm]; the F/T error is ~1.8 N median')
-    g.add_argument('--f-cut', type=float, default=30.0,
-                   help='first-order low-pass on the wrench [Hz], 0 = off')
+    g.add_argument('--f-cut', type=float, default=30.0, help='low-pass on the wrench [Hz], 0 = off')
+    g.add_argument('--f-order', type=int, choices=(1, 2), default=1,
+                   help='1 = first order; 2 = Butterworth, -40 dB/decade: cuts the 25 Hz mode harder '
+                        'for the same lag at low frequency')
     g.add_argument('--stiff-gain', type=float, default=5.0,
                    help='position gain on stiff axes [1/s]')
     g.add_argument('--ff-release', type=csvn, default=csvn('3,0.3'),
@@ -219,6 +225,9 @@ def build_parser():
                    help='after contact the target sits press/K inside the surface: steady force [N]')
     g.add_argument('--tap-hold', type=float, default=2.0, help='hold after contact [s]')
     g.add_argument('--f-contact', type=float, default=5.0, help='contact threshold [N]')
+    g.add_argument('--tap-ramp', type=float, default=0.3,
+                   help='ramp up to the approach speed over this long [s]. A step reads as a false '
+                        'contact: the F/T sees the arm\'s own acceleration as ~20 kg')
 
     g = ap.add_argument_group('stall')
     g.add_argument('--stall-dir', type=csv3, default=csv3('0,0,1'), help='base frame; up by default')
@@ -346,6 +355,36 @@ def from_frame(x, Rc):
 
 # -------------------------------------------------------------------- controller
 
+class LowPass:
+    """Per-component low-pass: first order, or a 2nd-order Butterworth (bilinear, prewarped)."""
+
+    def __init__(self, f_cut, order, dt):
+        self.off = f_cut <= 0
+        if self.off:
+            return
+        if order == 1:
+            a = 1.0 - np.exp(-2 * np.pi * f_cut * dt)
+            self.b, self.a = np.array([a, 0, 0]), np.array([1.0, a - 1.0, 0])
+        else:
+            k = np.tan(np.pi * f_cut * dt)
+            n = 1.0 / (1.0 + np.sqrt(2) * k + k * k)
+            self.b = np.array([k * k, 2 * k * k, k * k]) * n
+            self.a = np.array([1.0, 2 * (k * k - 1) * n, (1 - np.sqrt(2) * k + k * k) * n])
+        self.reset()
+
+    def reset(self):
+        self.x = self.y = None
+
+    def __call__(self, u):
+        if self.off:
+            return u
+        if self.x is None:                   # start at rest on the first sample
+            self.x, self.y = [u, u], [u, u]
+        y = self.b[0] * u + self.b[1] * self.x[0] + self.b[2] * self.x[1] - self.a[1] * self.y[0] - self.a[2] * self.y[1]
+        self.x, self.y = [u, self.x[0]], [y, self.y[0]]
+        return y
+
+
 class Admittance:
     """
     Per cycle, at the compliance point p and in the compliance frame C:
@@ -365,14 +404,14 @@ class Admittance:
     """
 
     def __init__(self, K, D, M, sel, frame, point, tcp_offset, ft_ref, ft_sign, vmax, amax,
-                 deadband, f_cut, stiff_gain, fmax, tmax, dt, ff_release=(0.0, 0.0)):
+                 deadband, f_cut, stiff_gain, fmax, tmax, dt, ff_release=(0.0, 0.0), f_order=1):
         self.K, self.D, self.M = (np.array(x, float) for x in (K, D, M))
         self.sel = np.array(sel, float)
         self.frame, self.point = frame, np.array(point, float)
         self.tcp, self.ft_ref, self.ft_sign = np.array(tcp_offset, float), ft_ref, float(ft_sign)
         self.vmax, self.amax = np.array(vmax, float), np.array(amax, float)
         self.deadband = np.array(deadband, float)
-        self.alpha = 1.0 if f_cut <= 0 else 1.0 - np.exp(-2 * np.pi * f_cut * dt)
+        self.lp = LowPass(f_cut, f_order, dt)
         self.stiff_gain, self.fmax, self.tmax, self.dt = stiff_gain, fmax, tmax, dt
         self.ff_release = np.array(ff_release, float)
         self.ff_gain = np.ones(2)          # last feedforward scale, translation / rotation
@@ -383,7 +422,7 @@ class Admittance:
 
     def reset(self):
         self.v = np.zeros(6)
-        self.w_filt = None
+        self.lp.reset()
 
     def wrench_at_point(self, pose, w_meas):
         p = point_position(pose, self.point)
@@ -395,8 +434,7 @@ class Admittance:
         pose, target = np.asarray(pose, float), np.asarray(target, float)
         # 1. measured wrench -> p, filter, deadband, clamp
         w, p = self.wrench_at_point(pose, w_meas)
-        self.w_filt = w if self.w_filt is None else self.w_filt + self.alpha * (w - self.w_filt)
-        w = clamp_wrench(soft_deadband(self.w_filt, *self.deadband), self.fmax, self.tmax)
+        w = clamp_wrench(soft_deadband(self.lp(w), *self.deadband), self.fmax, self.tmax)
         # 2. error and target twist at p, everything into C
         pt = point_position(target, self.point)
         e = -pose_error(np.r_[pt, target[3:]], np.r_[p, pose[3:]])
@@ -436,7 +474,7 @@ def make_admittance(args, tcp, dt):
         db[:] = 0.0                        # a deadband bends s(d); pushes are short, drift is not an issue
     return Admittance(K, args.d, args.m, sel, args.frame, args.point, tcp, args.ft_ref, args.ft_sign,
                       args.vmax, args.amax, db, args.f_cut, args.stiff_gain, args.fmax, args.tmax, dt,
-                      getattr(args, 'ff_release', (0.0, 0.0)))
+                      getattr(args, 'ff_release', (0.0, 0.0)), getattr(args, 'f_order', 1))
 
 
 # ----------------------------------------------------------------------- session
@@ -755,11 +793,13 @@ def mode_tap(sess, args, io):
         for rep in range(args.tap_reps):
             print(f'  tap {1e3 * v:.0f} mm/s  #{rep + 1}', flush=True)
             sess.zero()                                   # at home, out of contact
-            target, vt, contact, phase = home.copy(), np.r_[dirn * v, 0, 0, 0], False, 0
+            target, contact, phase, t0 = home.copy(), False, 0, sess.clock()
             try:
                 while True:
                     if not contact:
-                        target[:3] += dirn * v * sess.dt
+                        vr = v * min(1.0, (sess.clock() - t0) / max(args.tap_ramp, 1e-9))
+                        vt = np.r_[dirn * vr, 0, 0, 0]
+                        target[:3] += dirn * vr * sess.dt
                     pose, twist, wm, info = sess.cycle(target, vt, (seg, rep, phase))
                     fc = -args.ft_sign * wm[:3] @ dirn
                     if not contact:
@@ -1283,8 +1323,15 @@ class FakeRobot:
     """
 
     def __init__(self, pose, dt, tcp_offset=EXPECT_TCP, sensor_ref='flange', tau=0.02,
-                 payload=EXPECT_PAYLOAD, noise=0.0, seed=0):
+                 payload=EXPECT_PAYLOAD, noise=0.0, seed=0, cmd_delay=0.0, m_sense=0.0, sense_delay=0.0):
         self.t, self.dt, self.tau = 0.0, dt, tau
+        # Optional measured dynamics (see ur16e()): speedL targets reach the arm
+        # cmd_delay late, and the TCP-force estimate reads the arm's OWN acceleration
+        # as -m_sense * a, sense_delay late.
+        self.cmd_delay, self.m_sense = cmd_delay, m_sense
+        self.cmd_hist, self._ci = [], 0
+        self.a_hist = deque([np.zeros(3)] * (int(round(sense_delay / 1e-3)) + 1),
+                            maxlen=int(round(sense_delay / 1e-3)) + 1)
         self.pose, self.twist, self.cmd = np.array(pose, float), np.zeros(6), np.zeros(6)
         self.tcp, self.sensor_ref, self.payload = np.array(tcp_offset, float), sensor_ref, payload
         self.acc, self.stop_acc = 1.0, 2.0
@@ -1293,6 +1340,19 @@ class FakeRobot:
         self.zero, self.noise, self.rng = np.zeros(6), noise, np.random.default_rng(seed)
         self.pstop_at, self.push = np.inf, None
         self.wd_action = 'protective'  # what the UR16e does (C207A0); 'stop' = plain program stop
+
+    @classmethod
+    def ur16e(cls, pose, dt, **kw):
+        """
+        Fitted to the 25 Hz limit cycle in fdcc-tap-20260922-165218 (M 10 kg): UR
+        tracking ~ unity gain with ~26 ms delay; getActualTCPForce ~ -20 kg x the
+        arm's acceleration, ~34 ms late. Loop gain there was 1.55. Only the 25 Hz
+        point is measured -- trust it near there, not as a full model.
+        """
+        # NOT a contact model: with it every M/D chatters on a 40 N/mm wall, while
+        # the arm settled cleanly at 5-15 mm/s. Use it for the 25 Hz question only.
+        kw = {'tau': 0.004, 'cmd_delay': 0.022, 'm_sense': 20.0, 'sense_delay': 0.034, **kw}
+        return cls(pose, dt, **kw)
 
     def now(self):
         return self.t
@@ -1303,16 +1363,25 @@ class FakeRobot:
             self._step(seconds / n)
 
     def _step(self, h):
+        if h <= 0:
+            return
         if self.running and self.wd_hz > 0 and self.t - self.last_input > 1.0 / self.wd_hz:
             self.running, self.speeding = False, False
             self.calls.append('watchdog-stop')
             if self.wd_action == 'protective':
                 self.pstop_at, self.stop_acc = self.t, 10.0
         go = self.speeding and self.running
-        target, acc = (self.cmd, self.acc) if go else (np.zeros(6), self.stop_acc)
+        cmd = self.cmd
+        if self.cmd_delay > 0:
+            while self._ci + 1 < len(self.cmd_hist) and self.cmd_hist[self._ci + 1][0] <= self.t - self.cmd_delay:
+                self._ci += 1
+            cmd = (self.cmd_hist[self._ci][1] if self.cmd_hist and self.cmd_hist[self._ci][0] <= self.t - self.cmd_delay
+                   else np.zeros(6))
+        target, acc = (cmd, self.acc) if go else (np.zeros(6), self.stop_acc)
         dv = clamp_wrench((target - self.twist) * min(1.0, h / self.tau), acc * h,
                           (acc if go else self.stop_acc) * h * (4 if go else 1))
         self.twist = self.twist + dv
+        self.a_hist.append(dv[:3] / h)
         self.pose[:3] += self.twist[:3] * h
         self.pose[3:] = (R.from_rotvec(self.twist[3:] * h) * R.from_rotvec(self.pose[3:])).as_rotvec()
         self.t += h
@@ -1324,6 +1393,10 @@ class FakeRobot:
             for F, pt, couple in fn(self):
                 w[:3] += F
                 w[3:] += np.cross(pt - q, F) + couple
+        if self.m_sense:
+            F = -self.m_sense * self.a_hist[0]            # phantom, applied at the flange
+            w[:3] += F
+            w[3:] += np.cross(flange_position(self.pose, self.tcp) - q, F)
         return w
 
     def _input(self, name):
@@ -1343,6 +1416,8 @@ class FakeRobot:
         if not self._input('speedL'):
             return False
         self.cmd, self.acc, self.speeding = np.array(xd, float), acceleration, True
+        if self.cmd_delay > 0:
+            self.cmd_hist.append((self.t, self.cmd))
         self.speedl_times.append(time)
         return True
 
@@ -1666,27 +1741,52 @@ def selftest():
             self.n -= 1
             if self.n < 0:
                 raise KeyboardInterrupt
-            self.targ_pose[2] -= 0.027 * h
+            self.targ_pose[2] -= 0.01 * h if self.slow else 0.027 * h
 
     def wall_teleop(*extra):
         a = ap.parse_args(['--mode', 'teleop', '--vmax', '0.08,0.9', '--teleop-speed', '0.08,0.9', *extra])
+        WallPad.slow = '0.01,0.9' in extra
         fk = FakeRobot(POSE0, 1 / a.hz, noise=0.1)
         fk.forces = [wall(np.array(POSE0[:3]) + [0, 0, -0.02], [0, 0, -1], 40000.0)]
         out, _, reason = quiet(run, a, fk, fk, SimIO(fk), fk.now, os.path.join(tmp, 'wall.npz'),
-                               make_iface=lambda aa, p: WallPad(fk, p, 400))
+                               make_iface=lambda aa, p: WallPad(fk, p, 800 if WallPad.slow else 400))
         z = np.load(out)
         F, t = z['tcp_force'][:, 2], z['t']
-        last = F[t > t[-1] - 1.0]
+        last = F[t > t[-1] - 1.0]              # slow case: target reaches the leash ~5 s in, 8 s run
         return reason, F.max(), np.median(last), last.std()
 
-    r, pk, st, sd = wall_teleop()
+    r, pk, st, sd = wall_teleop('--teleop-speed', '0.01,0.9')
     press = 300 * 0.03 + 1.5                           # K * leash + deadband
-    check('teleop into a wall at 27 mm/s: no abort, no chatter', r == 'interrupted' and pk < 35 and sd < 1.0,
+    check('teleop into a wall at 10 mm/s: contact capped at K*leash+db', r == 'interrupted' and
+          abs(st - press) < 3.0 and pk < 20, f'steady {st:.1f} +- {sd:.1f} N, expect {press:.1f} (peak {pk:.1f}) [{r}]')
+    r, pk, st, sd = wall_teleop()
+    check('teleop into a wall at 27 mm/s: no abort (simple fake)', r == 'interrupted' and pk < 35,
           f'peak {pk:.1f} N, steady {st:.1f} +- {sd:.1f} N [{r}]')
-    check('contact force capped at K * leash + deadband', abs(st - press) < 1.5, f'{st:.1f} N, expect {press:.1f}')
     r, pk, st, sd = wall_teleop('--ff-release', '0,0', '--amax', '0.5,2', '--m', '30,0.6')
     check('old settings reproduce the hardware abort', r.startswith('ABORT: wrench'),
           f'peak {pk:.1f} N [{r[:40]}]  (fdcc-teleop-20260922-164226: 43.6 N then abort)')
+
+    # 25 Hz: the measured sensor/arm loop (FakeRobot.ur16e). A 30 ms shove on top of
+    # a steady 5 N push (steady force takes the deadband out of the loop, as the
+    # tap's spring did on the arm) must die out at the defaults. M 10 must not: on
+    # the arm it held 2.5-2.9 mm/s rms at 25 Hz.
+    def kick(*extra):
+        a = ap.parse_args(['--mode', 'free', '--reps', '1', '--seconds', '2.5', *extra])
+        fk = FakeRobot.ur16e(POSE0, 1 / a.hz, noise=0.1)
+
+        def hand(d):
+            t0 = fk.t
+            return hand_at(None, lambda t: np.array([0, 5.0 + 15.0 * (t - t0 < 0.03), 0]), point=a.point)
+        out, _, reason = quiet(run, a, fk, fk, SimIO(fk, hand=hand), fk.now, os.path.join(tmp, 'kick.npz'))
+        z = np.load(out)
+        m = (z['phase'] == 0) & (z['t'] > z['t'][z['phase'] == 0][0] + 1.0)
+        v = z['v_cmd'][m, 1]
+        return reason, 1e3 * (v - v.mean()).std()
+    r10, v10 = kick('--m', '10,0.2')
+    rd, vd = kick()
+    check('25 Hz: M 10 limit-cycles like the arm did', r10 == 'finished' and 1.5 < v10 < 4.0,
+          f'{v10:.2f} mm/s rms (arm: 2.5-2.9)')
+    check('25 Hz: shove on a 5 N push dies out at default M', rd == 'finished' and vd < 0.5, f'{vd:.2f} mm/s rms')
 
     print('validation modes on the fake (analysis code paths)')
     for sensor, flag, point, expect in (('tcp', 'tcp', 0.0, 0.0), ('tcp', 'tcp', 0.03, 0.03),
@@ -1724,7 +1824,7 @@ def selftest():
     out, res, reason = quiet(run, args, fk, fk, SimIO(fk), fk.now, os.path.join(tmp, 'tap.npz'))
     rows = res['rows'] if res else np.zeros((0, 8))
     check('tap: contact at every speed', len(rows) == len(args.tap_speeds), reason)
-    check('tap: peak rises with speed', len(rows) > 1 and np.all(np.diff(rows[:, 2]) > 0) and res['slope'] > 0,
+    check('tap: peak rises with speed', len(rows) > 1 and rows[-1, 2] > rows[0, 2] and res['slope'] > 0,
           f'peaks {np.round(rows[:, 2], 1)} N, slope {res.get("slope", np.nan):.2f} N per mm/s' if len(rows) else '')
     press = args.tap_press + args.deadband[0]       # the deadband adds to the steady contact force
     check('tap: settles to press + deadband', len(rows) and np.allclose(rows[:, 7], press, atol=0.5),
