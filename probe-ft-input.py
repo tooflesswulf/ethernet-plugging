@@ -5,18 +5,18 @@ NO MOTION AT ALL: this never enters force mode and never commands a move. It
 walks through the external-F/T calls one at a time, waiting and checking the
 protective-stop flag after each, so the offending step names itself.
 
-The hypothesis it tests: an RTDE input field that has never been written in the
-CURRENT session counts as disconnected. ft_rtde_input_enable is controller state
-and survives the process that set it, so after a crashed run the controller is
-reading external_force_torque while a fresh client has never written it -- and
-it protective-stops a second or two after connecting, which lands on whatever
-the script happens to be doing then (for us, zeroing the F/T).
+What it established so far (2026-09-22): writing the register once is NOT enough.
+Step 4 wrote a real wrench and passed; step 5 then called ftRtdeInputEnable(True)
+with that value ~3 s old and the controller protective-stopped immediately. So
+the register must be kept FRESH from the instant it is enabled, not merely
+non-empty -- ft_rtde_input_enable subscribes the controller to a value it expects
+every cycle.
 
-If that is right, PRIMING the register (writing it once, immediately after
-connecting) prevents the stop, and --no-prime reproduces it.
+The default order therefore streams first and flips the enable on from inside
+the streaming loop, and disables from inside it too.
 
-    python probe-ft-input.py              # prime first, then walk the steps
-    python probe-ft-input.py --no-prime   # skip the prime: expected to fail
+    python probe-ft-input.py                              # the fix
+    python probe-ft-input.py --order enable-then-stream   # reproduces the stop
 
 Clear any protective stop on the pendant first. Read the step that reports
 STOPPED, and if it is the very first check, the stop was already latched.
@@ -36,6 +36,11 @@ def main():
                     help='skip writing external_force_torque before anything else')
     ap.add_argument('--settle', type=float, default=3.0,
                     help='seconds to wait after each step (the stop takes ~1-2 s to appear)')
+    ap.add_argument('--order', choices=('stream-then-enable', 'enable-then-stream'),
+                    default='stream-then-enable',
+                    help='"enable-then-stream" reproduces the failure; the default is the fix')
+    ap.add_argument('--warmup', type=int, default=20,
+                    help='cycles to stream before flipping the enable on')
     args = ap.parse_args()
 
     recv = rtde_receive.RTDEReceiveInterface(args.ip)
@@ -55,7 +60,8 @@ def main():
 
     print(f'connected. protective stop now: {recv.isProtectiveStopped()}')
     print(f'payload {recv.getPayload():.3f} kg   TCP {np.round(ctrl.getTCPOffset(), 4)}')
-    print(f'settle {args.settle:.0f} s after each step; prime={"no" if args.no_prime else "yes"}\n')
+    print(f'settle {args.settle:.0f} s after each step; prime={"no" if args.no_prime else "yes"}; '
+          f'order={args.order}\n')
 
     try:
         if not check('0. just connected, nothing called'):
@@ -86,26 +92,50 @@ def main():
         if not check('4. wrote a real wrench while disabled'):
             return
 
-        ok = ctrl.ftRtdeInputEnable(True, 0.0, [0.0] * 3, [0.0] * 3)
-        print(f'  ftRtdeInputEnable(True) returned {ok}')
-        if not check('5. enabled, streaming has NOT started'):
-            print('\n-> Enabling alone trips it: the controller needs the register kept '
-                  'fresh from the moment it is enabled. Stream before enabling.')
-            return
+        if args.order == 'enable-then-stream':
+            ok = ctrl.ftRtdeInputEnable(True, 0.0, [0.0] * 3, [0.0] * 3)
+            print(f'  ftRtdeInputEnable(True) returned {ok}')
+            if not check('5. enabled, streaming has NOT started'):
+                print('\n-> Enabling alone trips it: a value written moments ago is already '
+                      'stale. The register must be kept fresh from the instant it is '
+                      'enabled -- rerun with --order stream-then-enable.')
+                return
 
-        print(f'  streaming getActualTCPForce for {args.settle:.0f} s at 500 Hz...')
-        t_end = time.perf_counter() + args.settle
-        n = 0
+        # Stream continuously, and (in stream-then-enable order) flip the enable on
+        # from INSIDE the loop, so the register is never once left unwritten.
+        print(f'  streaming at 500 Hz for {2 * args.settle:.0f} s, '
+              f'enable goes on after {args.warmup} cycles...')
+        t_end = time.perf_counter() + 2 * args.settle
+        n, enabled, worst = 0, args.order == 'enable-then-stream', 0.0
+        t_prev = time.perf_counter()
         while time.perf_counter() < t_end:
             t_start = ctrl.initPeriod()
             ctrl.setExternalForceTorque(list(recv.getActualTCPForce()))
             n += 1
+            if not enabled and n >= args.warmup:
+                ok = ctrl.ftRtdeInputEnable(True, 0.0, [0.0] * 3, [0.0] * 3)
+                print(f'  ftRtdeInputEnable(True) mid-stream returned {ok}')
+                enabled = True
+            if recv.isProtectiveStopped():
+                print(f'  STOPPED after {n} updates, while streaming')
+                break
             ctrl.waitPeriod(t_start)
-        print(f'  sent {n} updates ({n / args.settle:.0f} Hz)')
-        check('6. streamed continuously')
+            now = time.perf_counter()
+            worst = max(worst, now - t_prev)
+            t_prev = now
+        print(f'  sent {n} updates, worst gap {1e3 * worst:.1f} ms')
+        if not check('6. streamed continuously, enabled mid-stream'):
+            print('\n-> Even continuous streaming trips it. Check the worst gap above: '
+                  'if it is tens of ms, Python jitter is the problem.')
+            return
 
+        # Keep the register fresh while the disable lands, then stop.
         ctrl.ftRtdeInputEnable(False)
-        check('7. disabled again')
+        for _ in range(args.warmup):
+            t_start = ctrl.initPeriod()
+            ctrl.setExternalForceTorque(list(recv.getActualTCPForce()))
+            ctrl.waitPeriod(t_start)
+        check('7. disabled from inside the stream')
     finally:
         try:
             ctrl.ftRtdeInputEnable(False)
