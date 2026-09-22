@@ -30,7 +30,20 @@ the flange and only the TCP definition can move it.
 
     python test-forcemode-center.py --offsets tip=0.03,base=-0.154
 
-Safety: zero target wrench means the arm is nearly free-floating. Speed limits are
+--ft-input replaces what force mode READS. "off" leaves the controller on its own
+F/T. The others stream getActualTCPForce back through ftRtdeInputEnable, either
+unchanged ("passthrough") or with the moment re-referenced ("tcp"/"flange").
+Re-referencing the measurement is what actually moves the compliance centre: with
+the moment taken about the TCP, a force through the TCP produces no torque, so
+the controller has no reason to rotate. "passthrough" is the control -- it isolates
+the streaming path's own effect (frame convention, extra latency) from the shift.
+Expect: off -> centre at the flange; passthrough -> unchanged if the conventions
+match; tcp -> centre moves to the TCP.
+
+Safety: zero target wrench means the arm is nearly free-floating. With --ft-input
+other than "off", force mode reads a wrench THIS SCRIPT supplies -- if the loop
+stalls, the controller acts on a stale one. Streaming is enabled only inside a
+push and handed back straight after. Speed limits are
 low by default and the run aborts if the TCP drifts more than --max-drift from
 where the segment started. Keep the e-stop within reach.
 """
@@ -116,6 +129,47 @@ def solve_centre(d, s):
     return sols[:3]
 
 
+def shift_wrench(w, pose, tcp_offset, mode):
+    """
+    Move a wrench's reference point along the tool axis.
+
+    Moment about B, given a wrench (F, tau_A) referenced at A:
+        tau_B = tau_A + (p_A - p_B) x F
+
+    With r = R_tool * tcp_offset pointing flange -> TCP:
+        'to_tcp'    tau' = tau - r x F      (reference moves outward to the TCP)
+        'to_flange' tau' = tau + r x F      (reference moves inward to the flange)
+        'none'      unchanged
+
+    Which one you need depends on where getActualTCPForce is actually
+    referenced, which UR's docs and its behaviour disagree about -- the doc says
+    "in the TCP" while forceMode acts at the flange. Run the modes and let the
+    measurement decide.
+    """
+    if mode == 'none':
+        return np.array(w, float)
+    r = R.from_rotvec(pose[3:]).apply(np.asarray(tcp_offset, float)[:3])
+    sgn = -1.0 if mode == 'to_tcp' else 1.0
+    return np.r_[w[:3], np.asarray(w[3:], float) + sgn * np.cross(r, w[:3])]
+
+
+def to_frame(w, pose, frame):
+    """Express a base-frame wrench in the tool frame, if asked."""
+    if frame == 'base':
+        return w
+    Rt = R.from_rotvec(pose[3:]).as_matrix().T
+    return np.r_[Rt @ w[:3], Rt @ w[3:]]
+
+
+# --ft-input value -> (shift mode, human description)
+FT_MODES = {
+    'off': (None, 'controller uses its own F/T (no streaming)'),
+    'passthrough': ('none', 'stream getActualTCPForce back unchanged'),
+    'tcp': ('to_tcp', 'stream it with the moment re-referenced to the TCP'),
+    'flange': ('to_flange', 'stream it with the moment re-referenced to the flange'),
+}
+
+
 def run_segment(ctrl, recv, args, label, log, seg, t_log):
     """
     One push point, done as several SHORT pushes. The arm yields and runs away
@@ -129,27 +183,50 @@ def run_segment(ctrl, recv, args, label, log, seg, t_log):
     time.sleep(0.3)
     home = np.array(recv.getActualTCPPose())
 
+    shift = FT_MODES[args.ft_input][0]
     for rep in range(args.reps):
         task_frame = list(recv.getActualTCPPose()) if args.task_frame == 'tcp' else [0.0] * 6
         print(f'    push {rep + 1}/{args.reps}: shove at "{label}" NOW '
               f'({args.seconds:.0f} s)', flush=True)
+
+        if shift is not None:
+            # Prime the input with one sample BEFORE handing the controller the
+            # reins, so force mode never starts on a stale or empty register.
+            pose = np.array(recv.getActualTCPPose())
+            w = np.array(recv.getActualTCPForce(), float)
+            ctrl.setExternalForceTorque(
+                to_frame(shift_wrench(w, pose, args.tcp, shift), pose, args.ft_frame).tolist())
+            # sensor_mass 0: getActualTCPForce is already gravity-compensated, so
+            # letting the controller compensate again would subtract the payload twice.
+            ctrl.ftRtdeInputEnable(True, 0.0, [0.0] * 3, [0.0] * 3)
+
         t0 = time.perf_counter()
         aborted = ''
-        while time.perf_counter() - t0 < args.seconds:
-            t_start = ctrl.initPeriod()
-            if recv.isProtectiveStopped() or recv.isEmergencyStopped():
-                aborted = 'protective/emergency stop'
-                break
-            pose = np.array(recv.getActualTCPPose())
-            if np.linalg.norm(pose[:3] - home[:3]) > args.max_drift:
-                aborted = 'drift limit'
-                break
-            ctrl.forceMode(task_frame, SELECTION, ZERO_WRENCH, FRAME_TYPE, args.vmax.tolist())
-            log.append(np.r_[time.perf_counter() - t_log, seg, rep, pose,
-                             recv.getActualTCPSpeed(), recv.getActualTCPForce(),
-                             recv.getActualQ()])
-            ctrl.waitPeriod(t_start)
-        ctrl.forceModeStop()
+        try:
+            while time.perf_counter() - t0 < args.seconds:
+                t_start = ctrl.initPeriod()
+                if recv.isProtectiveStopped() or recv.isEmergencyStopped():
+                    aborted = 'protective/emergency stop'
+                    break
+                pose = np.array(recv.getActualTCPPose())
+                if np.linalg.norm(pose[:3] - home[:3]) > args.max_drift:
+                    aborted = 'drift limit'
+                    break
+                w = np.array(recv.getActualTCPForce(), float)
+                sent = w if shift is None else to_frame(
+                    shift_wrench(w, pose, args.tcp, shift), pose, args.ft_frame)
+                if shift is not None:
+                    ctrl.setExternalForceTorque(sent.tolist())
+                ctrl.forceMode(task_frame, SELECTION, ZERO_WRENCH, FRAME_TYPE, args.vmax.tolist())
+                log.append(np.r_[time.perf_counter() - t_log, seg, rep, pose,
+                                 recv.getActualTCPSpeed(), w, sent, recv.getActualQ()])
+                ctrl.waitPeriod(t_start)
+        finally:
+            ctrl.forceModeStop()
+            if shift is not None:
+                # Hand the F/T back to the controller before anything else moves:
+                # a streamed input that stops updating is a stale input.
+                ctrl.ftRtdeInputEnable(False)
         if aborted == 'protective/emergency stop':
             print(f'    ABORTED: {aborted}')
             return aborted
@@ -168,6 +245,13 @@ def main():
     ap.add_argument('--offsets', type=offsets_arg, default='tip=0.03,base=-0.154',
                     help='push points as name=offset_along_tool_z_from_TCP[m], tip positive')
     ap.add_argument('--task-frame', choices=('base', 'tcp'), default='base')
+    ap.add_argument('--ft-input', choices=tuple(FT_MODES), default='off',
+                    help='what force mode reads: "off" = the controller\'s own F/T; the others '
+                         'stream getActualTCPForce back via ftRtdeInputEnable, either unchanged '
+                         '("passthrough") or with the moment re-referenced ("tcp"/"flange")')
+    ap.add_argument('--ft-frame', choices=('tool', 'base'), default='tool',
+                    help='frame the streamed wrench is expressed in; UR does not document this, '
+                         'so if "tool" behaves oddly try "base"')
     ap.add_argument('--seconds', type=float, default=3.0, help='length of one push [s]')
     ap.add_argument('--reps', type=int, default=6, help='pushes per point')
     ap.add_argument('--f-min', type=float, default=3.0,
@@ -189,8 +273,10 @@ def main():
 
     ctrl = rtde_control.RTDEControlInterface(args.ip)
     recv = rtde_receive.RTDEReceiveInterface(args.ip)
-    tcp = np.array(ctrl.getTCPOffset())
+    tcp = args.tcp = np.array(ctrl.getTCPOffset())
     print(f'TCP offset  : {np.round(tcp, 4)}')
+    print(f'F/T input   : {args.ft_input} -- {FT_MODES[args.ft_input][1]}'
+          + (f', sent in the {args.ft_frame} frame' if args.ft_input != 'off' else ''))
     print(f'payload     : {recv.getPayload():.3f} kg  cog {np.round(recv.getPayloadCog(), 4)}')
     print(f'push points : {args.offsets}')
     if args.fm_damping is not None:
@@ -201,6 +287,9 @@ def main():
     log, results = [], []
     t_log = time.perf_counter()
     try:
+        if args.ft_input != 'off':
+            print('\nNOTE: force mode will read the wrench THIS SCRIPT streams. If the loop '
+                  'stalls,\n      the controller sees a stale wrench -- keep the e-stop handy.')
         for seg, (label, d) in enumerate(args.offsets):
             input(f'\n[{seg + 1}/{len(args.offsets)}] ready to push at "{label}" '
                   f'({1e3 * d:+.0f} mm from TCP along tool z)? press Enter')
@@ -221,6 +310,8 @@ def main():
     finally:
         try:
             ctrl.forceModeStop()
+            if args.ft_input != 'off':
+                ctrl.ftRtdeInputEnable(False)
         finally:
             ctrl.stopScript()
 
@@ -238,10 +329,12 @@ def main():
 
     if log:
         L = np.array(log)
-        out = args.out or time.strftime(f'forcemode-center-{args.task_frame}-%Y%m%d-%H%M%S.npz')
+        out = args.out or time.strftime(
+            f'forcemode-center-{args.task_frame}-ft{args.ft_input}-%Y%m%d-%H%M%S.npz')
         np.savez(out, t=L[:, 0], seg=L[:, 1], rep=L[:, 2], pose=L[:, 3:9], twist=L[:, 9:15],
-                 tcp_force=L[:, 15:21], q=L[:, 21:27], f_min=args.f_min, v_min=args.v_min,
-                 seconds=args.seconds, reps=args.reps,
+                 tcp_force=L[:, 15:21], ft_sent=L[:, 21:27], q=L[:, 27:33],
+                 f_min=args.f_min, v_min=args.v_min, seconds=args.seconds, reps=args.reps,
+                 ft_input=args.ft_input, ft_frame=args.ft_frame,
                  labels=np.array([r[0] for r in args.offsets]),
                  push_offsets=np.array([r[1] for r in args.offsets]),
                  task_frame=args.task_frame, tcp_offset=tcp, vmax=args.vmax,
