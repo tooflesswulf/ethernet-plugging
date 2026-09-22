@@ -5,18 +5,21 @@ NO MOTION AT ALL: this never enters force mode and never commands a move. It
 walks through the external-F/T calls one at a time, waiting and checking the
 protective-stop flag after each, so the offending step names itself.
 
-What it established so far (2026-09-22): writing the register once is NOT enough.
-Step 4 wrote a real wrench and passed; step 5 then called ftRtdeInputEnable(True)
-with that value ~3 s old and the controller protective-stopped immediately. So
-the register must be kept FRESH from the instant it is enabled, not merely
-non-empty -- ft_rtde_input_enable subscribes the controller to a value it expects
-every cycle.
+What it established so far (2026-09-22): the ENABLE ITSELF trips the stop, and
+timing is not the cause. Enabling with a 3 s old value stopped; enabling from
+inside a 500 Hz stream stopped too (~70 updates in, worst loop gap 5.3 ms);
+125 Hz with a matched RTDE connection and 400 Hz busy-waited both stopped the
+same way. Rate and jitter change nothing, so this looks like configuration or
+firmware, not starvation.
 
-The default order therefore streams first and flips the enable on from inside
-the streaming loop, and disables from inside it too.
+Remaining suspects, which --api and the version print below are for:
+  * ft_rtde_input_enable vs the older enable_external_ft_sensor primitive
+  * the installation not being configured to accept an external F/T source
+  * external_force_torque missing from the RTDE input recipe despite the write
+    returning True
 
-    python probe-ft-input.py                              # the fix
-    python probe-ft-input.py --order enable-then-stream   # reproduces the stop
+    python probe-ft-input.py --api ft_rtde           # what failed so far
+    python probe-ft-input.py --api external_ft       # the other primitive
 
 Clear any protective stop on the pendant first. Read the step that reports
 STOPPED, and if it is the very first check, the stop was already latched.
@@ -41,6 +44,9 @@ def main():
                     help='"enable-then-stream" reproduces the failure; the default is the fix')
     ap.add_argument('--warmup', type=int, default=20,
                     help='cycles to stream before flipping the enable on')
+    ap.add_argument('--api', choices=('ft_rtde', 'external_ft'), default='ft_rtde',
+                    help='which primitive enables the external wrench: ftRtdeInputEnable '
+                         '(script cmd 56) or enableExternalFtSensor (cmd 57)')
     ap.add_argument('--rtde-freq', type=float, default=-1.0,
                     help='RTDE frequency for the control interface (-1 = default, 500 Hz on '
                          'e-series). Lower values may widen the gap the controller tolerates.')
@@ -53,6 +59,11 @@ def main():
     t0 = time.perf_counter()
     failed = []
 
+    def enable(on):
+        """Flip the chosen primitive. Both take the same arguments."""
+        fn = ctrl.ftRtdeInputEnable if args.api == 'ft_rtde' else ctrl.enableExternalFtSensor
+        return fn(on, 0.0, [0.0] * 3, [0.0] * 3) if on else fn(False)
+
     def check(step):
         """Wait, then report. Returns True while the robot is still healthy."""
         time.sleep(args.settle)
@@ -63,8 +74,17 @@ def main():
             failed.append(step)
         return not (ps or es)
 
+    try:
+        import dashboard_client
+        db = dashboard_client.DashboardClient(args.ip)
+        db.connect()
+        print(f'PolyScope {db.polyscopeVersion()}   safety {db.safetymode()}')
+        db.disconnect()
+    except Exception as e:
+        print(f'(dashboard unavailable: {e})')
     print(f'connected. protective stop now: {recv.isProtectiveStopped()}')
     print(f'payload {recv.getPayload():.3f} kg   TCP {np.round(ctrl.getTCPOffset(), 4)}')
+    print(f'robot mode {recv.getRobotMode()}  safety mode {recv.getSafetyMode()}')
     print(f'settle {args.settle:.0f} s after each step; prime={"no" if args.no_prime else "yes"}; '
           f'order={args.order}\n')
 
@@ -83,8 +103,8 @@ def main():
             if not check('1. primed the register'):
                 return
 
-        ok = ctrl.ftRtdeInputEnable(False)
-        print(f'  ftRtdeInputEnable(False) returned {ok}')
+        ok = enable(False)
+        print(f'  {args.api} disable returned {ok}')
         if not check('2. disabled streamed F/T input'):
             return
 
@@ -98,8 +118,8 @@ def main():
             return
 
         if args.order == 'enable-then-stream':
-            ok = ctrl.ftRtdeInputEnable(True, 0.0, [0.0] * 3, [0.0] * 3)
-            print(f'  ftRtdeInputEnable(True) returned {ok}')
+            ok = enable(True)
+            print(f'  {args.api} enable returned {ok}')
             if not check('5. enabled, streaming has NOT started'):
                 print('\n-> Enabling alone trips it: a value written moments ago is already '
                       'stale. The register must be kept fresh from the instant it is '
@@ -120,8 +140,8 @@ def main():
             ctrl.setExternalForceTorque(list(recv.getActualTCPForce()))
             n += 1
             if not enabled and n >= args.warmup:
-                ok = ctrl.ftRtdeInputEnable(True, 0.0, [0.0] * 3, [0.0] * 3)
-                print(f'  ftRtdeInputEnable(True) mid-stream returned {ok}')
+                ok = enable(True)
+                print(f'  {args.api} enable mid-stream returned {ok}')
                 enabled = True
             if recv.isProtectiveStopped():
                 print(f'  STOPPED after {n} updates, while streaming')
@@ -142,7 +162,7 @@ def main():
             return
 
         # Keep the register fresh while the disable lands, then stop.
-        ctrl.ftRtdeInputEnable(False)
+        enable(False)
         for _ in range(args.warmup):
             t_start = ctrl.initPeriod()
             ctrl.setExternalForceTorque(list(recv.getActualTCPForce()))
@@ -150,7 +170,7 @@ def main():
         check('7. disabled from inside the stream')
     finally:
         try:
-            ctrl.ftRtdeInputEnable(False)
+            enable(False)
         finally:
             ctrl.stopScript()
         print('\nfirst failing step: ' + (failed[0] if failed else 'none -- all steps passed'))

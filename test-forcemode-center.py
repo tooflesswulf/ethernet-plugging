@@ -30,6 +30,13 @@ the flange and only the TCP definition can move it.
 
     python test-forcemode-center.py --offsets tip=0.03,base=-0.154
 
+NOTE (2026-09-22): every --ft-input mode except "off" currently protective-stops
+this robot ("fieldbus input disconnected"). The trigger is the ftRtdeInputEnable
+call itself, not the streaming: enabling from inside an already-running 500 Hz
+stream stops just as fast as enabling with a stale value, and 125 Hz and 400 Hz
+variants behave identically. See probe-ft-input.py, which isolates it without
+commanding any motion.
+
 --ft-input replaces what force mode READS. "off" leaves the controller on its own
 F/T. The others stream getActualTCPForce back through ftRtdeInputEnable, either
 unchanged ("passthrough") or with the moment re-referenced ("tcp"/"flange").
@@ -321,8 +328,9 @@ def main():
     t_log = time.perf_counter()
     try:
         if args.ft_input != 'off':
-            print('\nNOTE: force mode will read the wrench THIS SCRIPT streams. If the loop '
-                  'stalls,\n      the controller sees a stale wrench -- keep the e-stop handy.')
+            print('\nWARNING: --ft-input other than "off" protective-stops this robot '
+                  '("fieldbus input\n         disconnected") as soon as the enable call goes '
+                  'through -- cause not yet\n         found. See probe-ft-input.py. Expect a stop.')
         for seg, (label, d) in enumerate(args.offsets):
             input(f'\n[{seg + 1}/{len(args.offsets)}] ready to push at "{label}" '
                   f'({1e3 * d:+.0f} mm from TCP along tool z)? press Enter')
