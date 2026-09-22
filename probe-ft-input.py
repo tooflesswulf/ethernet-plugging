@@ -44,6 +44,12 @@ def main():
                     help='"enable-then-stream" reproduces the failure; the default is the fix')
     ap.add_argument('--warmup', type=int, default=20,
                     help='cycles to stream before flipping the enable on')
+    ap.add_argument('--verbose', action='store_true',
+                    help='construct with FLAG_VERBOSE so ur_rtde prints its RTDE recipe setup -- '
+                         'look for external_force_torque being registered or rejected')
+    ap.add_argument('--upper-registers', action='store_true',
+                    help='construct with FLAG_UPPER_RANGE_REGISTERS (24-47), in case another '
+                         'RTDE client already owns the low registers')
     ap.add_argument('--api', choices=('ft_rtde', 'external_ft'), default='ft_rtde',
                     help='which primitive enables the external wrench: ftRtdeInputEnable '
                          '(script cmd 56) or enableExternalFtSensor (cmd 57)')
@@ -54,8 +60,14 @@ def main():
                     help='rate to write the register at (0 = every robot cycle via waitPeriod)')
     args = ap.parse_args()
 
+    flags = int(rtde_control.RTDEControlInterface.FLAG_UPLOAD_SCRIPT)
+    if args.verbose:
+        flags |= int(rtde_control.RTDEControlInterface.FLAG_VERBOSE)
+    if args.upper_registers:
+        flags |= int(rtde_control.RTDEControlInterface.FLAG_UPPER_RANGE_REGISTERS)
     recv = rtde_receive.RTDEReceiveInterface(args.ip)
-    ctrl = rtde_control.RTDEControlInterface(args.ip, args.rtde_freq)
+    ctrl = rtde_control.RTDEControlInterface(args.ip, args.rtde_freq, flags)
+    print(f'control interface flags = {flags}')
     t0 = time.perf_counter()
     failed = []
 
