@@ -1,0 +1,16 @@
+RTDEControlInterface: realtime kernel not found, consider using a realtime kernel for better performance.
+Connected successfully to: 192.168.0.100 at 30004
+PolyScope major version: 5
+PolyScope minor version: 26
+Waiting for RTDE data synchronization to start...
+RTDE synchronization started
+RTDEControlInterface: RTDE control script is not running!
+RTDEControlInterface: RTDE control script is not running!
+RTDE - Socket disconnected
+control interface flags = 5
+PolyScope 5.26.1.140514   safety Safetymode: NORMAL
+connected. protective stop now: False
+payload 1.551 kg   TCP [0.     0.     0.1537 0.     0.     0.    ]
+robot mode 7  safety mode 1
+settle 3 s after each step; prime=yes; order=stream-then-enable
+
