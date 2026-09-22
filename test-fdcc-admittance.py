@@ -191,7 +191,7 @@ def build_parser():
                    help='DualSense full-stick target speed m/s, rad/s')
 
     g = ap.add_argument_group('center / free')
-    g.add_argument('--offsets', type=offsets_arg, default=offsets_arg('tip=0.03,tcp=0,flange=-0.154'),
+    g.add_argument('--offsets', type=offsets_arg, default=offsets_arg('tcp=0,flange=-0.154'),
                    help='center: push points name=offset along tool z from the TCP [m], tip positive')
     g.add_argument('--seconds', type=float, default=3.0, help='length of one push window [s]')
     g.add_argument('--reps', type=int, default=4, help='push windows per point')
