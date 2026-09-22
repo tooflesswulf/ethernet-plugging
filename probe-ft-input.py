@@ -41,10 +41,15 @@ def main():
                     help='"enable-then-stream" reproduces the failure; the default is the fix')
     ap.add_argument('--warmup', type=int, default=20,
                     help='cycles to stream before flipping the enable on')
+    ap.add_argument('--rtde-freq', type=float, default=-1.0,
+                    help='RTDE frequency for the control interface (-1 = default, 500 Hz on '
+                         'e-series). Lower values may widen the gap the controller tolerates.')
+    ap.add_argument('--stream-hz', type=float, default=0.0,
+                    help='rate to write the register at (0 = every robot cycle via waitPeriod)')
     args = ap.parse_args()
 
     recv = rtde_receive.RTDEReceiveInterface(args.ip)
-    ctrl = rtde_control.RTDEControlInterface(args.ip)
+    ctrl = rtde_control.RTDEControlInterface(args.ip, args.rtde_freq)
     t0 = time.perf_counter()
     failed = []
 
@@ -107,9 +112,11 @@ def main():
               f'enable goes on after {args.warmup} cycles...')
         t_end = time.perf_counter() + 2 * args.settle
         n, enabled, worst = 0, args.order == 'enable-then-stream', 0.0
+        period = 1.0 / args.stream_hz if args.stream_hz > 0 else 0.0
         t_prev = time.perf_counter()
         while time.perf_counter() < t_end:
             t_start = ctrl.initPeriod()
+            t_cycle = time.perf_counter()
             ctrl.setExternalForceTorque(list(recv.getActualTCPForce()))
             n += 1
             if not enabled and n >= args.warmup:
@@ -119,11 +126,16 @@ def main():
             if recv.isProtectiveStopped():
                 print(f'  STOPPED after {n} updates, while streaming')
                 break
-            ctrl.waitPeriod(t_start)
+            if period:
+                while time.perf_counter() - t_cycle < period:
+                    pass                      # busy-wait: sleep() granularity is the jitter
+            else:
+                ctrl.waitPeriod(t_start)
             now = time.perf_counter()
             worst = max(worst, now - t_prev)
             t_prev = now
-        print(f'  sent {n} updates, worst gap {1e3 * worst:.1f} ms')
+        rate = n / (2 * args.settle) if n else 0
+        print(f'  sent {n} updates (~{rate:.0f} Hz), worst gap {1e3 * worst:.1f} ms')
         if not check('6. streamed continuously, enabled mid-stream'):
             print('\n-> Even continuous streaming trips it. Check the worst gap above: '
                   'if it is tens of ms, Python jitter is the problem.')
