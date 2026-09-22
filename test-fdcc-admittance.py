@@ -508,7 +508,7 @@ class Session:
         self.ctrl.zeroFtSensor()
         self.idle(0.3)
 
-    def cycle(self, target, vt, tag=(0, 0, 0), v_override=None, send=True):
+    def cycle(self, target, vt, tag=(0, 0, 0), v_override=None, send=True, check_stop=True):
         a = self.args
         t_start = self.ctrl.initPeriod()
         now = self.clock()
@@ -518,7 +518,8 @@ class Session:
             self.max_gap = loop_dt
         if loop_dt > 2 * self.dt:
             self.slow += 1
-        if self.recv.isProtectiveStopped() or self.recv.isEmergencyStopped():
+        self.stopped = self.recv.isProtectiveStopped() or self.recv.isEmergencyStopped()
+        if self.stopped and check_stop:
             raise Abort('protective/emergency stop')
         pose = self.pose()
         twist = np.array(self.recv.getActualTCPSpeed(), float)
@@ -739,11 +740,19 @@ def mode_stall(sess, args, io):
         t0 = sess.clock()
         while sess.clock() - t0 < 0.5:
             sess.cycle(None, None, (part, 0, 0), v_override=v)
+        # Silent gap. Keep READING through a stop (phase 3 once the stop flag is
+        # up) -- aborting on it would cut the log before the deceleration.
         t0 = sess.clock()
         while sess.clock() - t0 < args.stall_gap:
-            sess.cycle(None, None, (part, 0, 1), send=False)
+            sess.cycle(None, None, (part, 0, 3 if getattr(sess, 'stopped', False) else 1),
+                       send=False, check_stop=False)
         running = sess.ctrl.isProgramRunning()
-        print(f'     after the gap: program running = {running}')
+        print(f'     after the gap: program running = {running}, protective stop = {sess.stopped}')
+        if sess.stopped:
+            if use_wd:
+                print('     (the watchdog raises a PROTECTIVE stop on this controller -- clear it on the pendant)')
+                return
+            raise Abort('protective stop during the gap with the watchdog OFF -- not expected')
         if not use_wd:
             sess.stop()
 
@@ -996,24 +1005,48 @@ def analyze_tap(d, args, meta):
 
 
 def analyze_stall(d, args, meta):
+    """
+    Speeds are reported only at times the log actually covers: interpolating past
+    the last sample repeats it, which once reported a stopped arm as still moving.
+    """
     out = {}
+    wd = args.watchdog_hz if args.watchdog_hz > 0 else 20.0
     for part, name in ((0, 'A watchdog off'), (1, 'B watchdog on ')):
-        m = (d['seg'] == part) & (d['phase'] == 1)
+        m = (d['seg'] == part) & ((d['phase'] == 1) | (d['phase'] == 3))
         if not m.any():
+            print(f'  {name}: no gap samples')
             continue
         t = d['t'][m] - d['t'][m][0]
         sp = np.linalg.norm(d['twist'][m, :3], axis=1)
-        at = [float(np.interp(x, t, sp)) for x in (0.0, 0.05, 0.1, 0.2, t[-1])]
-        print(f'  {name}: TCP speed during the silent gap at 0/50/100/200 ms/end: '
-              + ' '.join(f'{1e3 * x:4.1f}' for x in at) + ' mm/s')
-        out[part] = at
+        at = [float(np.interp(x, t, sp)) if x <= t[-1] else np.nan for x in (0.0, 0.05, 0.1, 0.2)]
+        stop = np.flatnonzero(d['phase'][m] == 3)
+        t_stop = t[stop[0]] if len(stop) else np.nan
+        slow = np.flatnonzero(sp < 0.2 * args.stall_speed)
+        t_slow = t[slow[0]] if len(slow) else np.nan
+        print(f'  {name}: gap logged for {1e3 * t[-1]:.0f} ms; TCP speed at 0/50/100/200 ms: '
+              + ' '.join('  -- ' if np.isnan(x) else f'{1e3 * x:4.1f}' for x in at)
+              + f' mm/s, last {1e3 * sp[-1]:.1f}')
+        print(f'      below 20 % of commanded at {1e3 * t_slow:.0f} ms' if np.isfinite(t_slow) else
+              '      never slowed below 20 % of commanded',
+              f'; protective stop seen at {1e3 * t_stop:.0f} ms' if np.isfinite(t_stop) else '')
+        out[part] = {'speeds': at, 'last': float(sp[-1]), 'covered': float(t[-1]),
+                     't_slow': float(t_slow), 't_stop': float(t_stop)}
     if 0 in out:
-        kept = out[0][-1] > 0.5 * args.stall_speed
-        print('  A: ' + ('the arm KEPT MOVING with no host input -- speedL\'s time argument is not a '
-                         'stall guard.' if kept else 'the arm stopped by itself.'))
+        a = out[0]
+        if a['covered'] < 0.9 * args.stall_gap:
+            print('  A: gap not fully logged -- inconclusive.')
+        else:
+            print('  A: ' + ('the arm KEPT MOVING with no host input -- speedL\'s time argument is not a '
+                             'stall guard.' if a['last'] > 0.5 * args.stall_speed else 'the arm stopped by itself.'))
     if 1 in out:
-        print('  B: ' + ('the watchdog stopped it.' if out[1][-1] < 0.2 * args.stall_speed
-                         else 'still moving at the end of the gap -- the watchdog did NOT stop it.'))
+        b = out[1]
+        if np.isfinite(b['t_slow']):
+            print(f'  B: the watchdog stopped it: below 20 % at {1e3 * b["t_slow"]:.0f} ms after the last input '
+                  f'(watchdog period {1e3 / wd:.0f} ms)' + (', via a protective stop' if np.isfinite(b['t_stop']) else ''))
+        elif b['covered'] < 0.9 * args.stall_gap:
+            print('  B: gap not fully logged -- inconclusive.')
+        else:
+            print('  B: still moving at the end of the gap -- the watchdog did NOT stop it.')
     return out
 
 
@@ -1185,6 +1218,7 @@ class FakeRobot:
         self.forces, self.calls, self.speedl_times = [], [], []
         self.zero, self.noise, self.rng = np.zeros(6), noise, np.random.default_rng(seed)
         self.pstop_at, self.push = np.inf, None
+        self.wd_action = 'stop'        # 'protective' models what the UR16e actually did
 
     def now(self):
         return self.t
@@ -1198,6 +1232,8 @@ class FakeRobot:
         if self.running and self.wd_hz > 0 and self.t - self.last_input > 1.0 / self.wd_hz:
             self.running, self.speeding = False, False
             self.calls.append('watchdog-stop')
+            if self.wd_action == 'protective':
+                self.pstop_at, self.stop_acc = self.t, 10.0
         go = self.speeding and self.running
         target, acc = (self.cmd, self.acc) if go else (np.zeros(6), self.stop_acc)
         dv = clamp_wrench((target - self.twist) * min(1.0, h / self.tau), acc * h, 4 * acc * h)
@@ -1550,11 +1586,16 @@ def selftest():
     check('tap: settles to press + deadband', len(rows) and np.allclose(rows[:, 7], press, atol=0.5),
           f'final {np.round(rows[:, 7], 1)} N, expect {press:.1f}' if len(rows) else '')
 
-    args = ap.parse_args(['--mode', 'stall'])
-    fk = FakeRobot(POSE0, 1 / args.hz)
-    out, res, reason = quiet(run, args, fk, fk, SimIO(fk), fk.now, os.path.join(tmp, 'stall.npz'))
-    check('stall: A keeps moving, B watchdog stops', res and res[0][-1] > 0.9 * args.stall_speed and
-          res[1][-1] < 1e-4 and 'watchdog-stop' in fk.calls, reason)
+    for action in ('stop', 'protective'):
+        args = ap.parse_args(['--mode', 'stall'])
+        fk = FakeRobot(POSE0, 1 / args.hz)
+        fk.wd_action = action
+        out, res, reason = quiet(run, args, fk, fk, SimIO(fk), fk.now, os.path.join(tmp, f'stall-{action}.npz'))
+        ok = (res and res[0]['last'] > 0.9 * args.stall_speed and res[1]['covered'] > 0.9 * args.stall_gap
+              and res[1]['last'] < 1e-4 and 0.05 < res[1]['t_slow'] < 0.1 and reason == 'finished')
+        check(f'stall ({action}): A moves on, B stops ~1/hz', ok,
+              f'B slowed at {1e3 * res[1]["t_slow"]:.0f} ms, logged {1e3 * res[1]["covered"]:.0f} ms [{reason}]'
+              if res and 1 in res else reason)
 
     n_fail = results.count(False)
     print(f'\n{len(results) - n_fail}/{len(results)} passed' + (f', {n_fail} FAILED' if n_fail else '')
