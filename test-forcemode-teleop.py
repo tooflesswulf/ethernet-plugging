@@ -69,6 +69,23 @@ def leash(target, actual, max_dp, max_dr):
     return target
 
 
+def wrench_to_flange(w, pose, tcp_offset):
+    """
+    Re-reference a wrench from the TCP to the flange.
+
+    forceMode's compliance is centred on the FLANGE, not the TCP: measured on
+    hardware (forcemode-center-{base,tcp}-20260922-*.npz), a push at the flange
+    is pure translation while a push at the TCP pivots about the flange, and
+    task_frame does not move it. A wrench meant to act at the TCP therefore has
+    to carry the moment of its force about the flange, or you are silently
+    commanding up to |r| * F of extra torque -- 0.154 m * 25 N ~ 3.9 Nm here.
+
+        F_flange = F_tcp        tau_flange = tau_tcp + r x F_tcp
+    """
+    r = R.from_rotvec(pose[3:]).apply(np.asarray(tcp_offset, float)[:3])
+    return np.r_[w[:3], w[3:] + np.cross(r, w[:3])]
+
+
 def clamp_wrench(w, fmax, tmax):
     w = np.array(w, float)
     n = np.linalg.norm(w[:3])
@@ -115,6 +132,10 @@ def main():
                     help='forceModeSetGainScaling 0..2 (default 1); set once before entry')
     ap.add_argument('--payload-kg', type=float, default=None,
                     help='override payload mass for this run (keeps current CoG)')
+    ap.add_argument('--wrench-at', choices=('flange', 'tcp'), default='flange',
+                    help='where the commanded wrench is meant to act; forceMode centres its '
+                         'compliance on the FLANGE, so "flange" re-references the TCP wrench '
+                         'before sending. "tcp" reproduces the old (wrong) behaviour.')
     ap.add_argument('--no-zero', action='store_true', help='skip zeroFtSensor at start')
     ap.add_argument('--out', default=None, help='log file (default forcemode-teleop-<time>.npz)')
     args = ap.parse_args()
@@ -127,7 +148,9 @@ def main():
     recv = rtde_receive.RTDEReceiveInterface(args.ip)
 
     mass, cog = recv.getPayload(), list(recv.getPayloadCog())
-    print(f'payload     : {mass:.3f} kg  cog {np.round(cog, 4)}  tcp {np.round(ctrl.getTCPOffset(), 4)}')
+    tcp = np.array(ctrl.getTCPOffset())
+    print(f'payload     : {mass:.3f} kg  cog {np.round(cog, 4)}  tcp {np.round(tcp, 4)}')
+    print(f'wrench sent : referenced at the {args.wrench_at}')
     if args.payload_kg is not None:
         ctrl.setPayload(args.payload_kg, cog)
         print(f'payload set : {args.payload_kg:.3f} kg for this run')
@@ -185,7 +208,8 @@ def main():
             D = args.d * np.sqrt(k_scale)      # keep the damping ratio roughly fixed
             e = pose_error(target, pose)
             wrench = clamp_wrench(K * e - D * twist, args.fmax, args.tmax)
-            ctrl.forceMode(TASK_FRAME, SELECTION, wrench.tolist(), FRAME_TYPE, limits)
+            sent = wrench if args.wrench_at == 'tcp' else wrench_to_flange(wrench, pose, tcp)
+            ctrl.forceMode(TASK_FRAME, SELECTION, sent.tolist(), FRAME_TYPE, limits)
 
             force = recv.getActualTCPForce()
             try:
@@ -216,7 +240,10 @@ def main():
         np.savez(out, t=L[:, 0], pose=L[:, 1:7], target=L[:, 7:13], twist=L[:, 13:19],
                  wrench_cmd=L[:, 19:25], tcp_force=L[:, 25:31], ft_raw=L[:, 31:37],
                  q=L[:, 37:43], k_scale=L[:, 43], k=args.k, d=args.d, limits=args.vmax,
-                 payload=mass, payload_cog=cog)
+                 payload=mass, payload_cog=cog, tcp_offset=tcp, wrench_at=args.wrench_at,
+                 fmax=args.fmax, tmax=args.tmax, leash=args.leash,
+                 fm_damping=np.nan if args.fm_damping is None else args.fm_damping,
+                 fm_gain=np.nan if args.fm_gain is None else args.fm_gain)
         print(f'wrote {out}  ({len(L)} samples, {len(L) / L[-1, 0]:.0f} Hz achieved)')
 
 
