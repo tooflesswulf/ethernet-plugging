@@ -35,8 +35,8 @@ Conventions
 
 Wrench reference point (--ft-ref)
     getActualTCPForce is a base-frame wrench (F, tau_q) with its moment about SOME
-    point q. UR's docs say the TCP; forceMode's behaviour centres on the flange.
-    So it is a flag. Re-referencing to p (moment of the same force about p):
+    point q. UR's docs say the TCP; `--mode center` on this arm says the FLANGE
+    (2026-09-22), so that is the default. Re-referencing to p:
 
         F_p = F        tau_p = tau_q + (q - p) x F
 
@@ -45,6 +45,9 @@ Wrench reference point (--ft-ref)
     154 mm, the flange-to-TCP distance. `--mode center` measures it: the centre
     lands on --point when --ft-ref is right, and the report prints the implied q
     when it is not.
+
+    ALSO: anything that blocks while the watchdog is armed trips it (C207A0). Slow
+    setup -- the DualSense / interface.py import -- happens before it is armed.
 
 Safety
     Speed and acceleration clamps (--vmax, --amax), force clamp (--fmax) and abort
@@ -115,7 +118,7 @@ def csvn(s):
 
 
 def offsets_arg(s):
-    """"tip=0.03,tcp=0,flange=-0.154" -> [("tip", 0.03), ("tcp", 0.0), ("flange", -0.154)]"""
+    """"tcp=0,flange=-0.154" -> [("tcp", 0.0), ("flange", -0.154)]"""
     out = []
     for part in s.split(','):
         name, _, val = part.partition('=')
@@ -147,10 +150,10 @@ def build_parser():
     g.add_argument('--frame', choices=('tool', 'base'), default='tool',
                    help='compliance frame: tool = TCP axes (moves with the tool), base = fixed')
     g.add_argument('--point', type=csv3, default=csv3('0,0,0'),
-                   help='compliance point in the TCP frame [m]; 0,0,0.03 = 30 mm out to a plug tip')
-    g.add_argument('--ft-ref', choices=('tcp', 'flange'), default='tcp',
-                   help='point getActualTCPForce\'s moment is taken about. UR docs say tcp; '
-                        '--mode center decides')
+                   help='compliance point in the TCP frame [m]; default the TCP itself')
+    g.add_argument('--ft-ref', choices=('tcp', 'flange'), default='flange',
+                   help='point getActualTCPForce\'s moment is taken about: the flange, measured with '
+                        '--mode center on 2026-09-22 (UR\'s docs say the TCP)')
     g.add_argument('--ft-sign', type=float, choices=(1.0, -1.0), default=1.0,
                    help='+1: getActualTCPForce is the external force ON the tool (push +x reads +x)')
     g.add_argument('--deadband', type=csvn, default=csvn('1.5,0.15'),
@@ -191,8 +194,9 @@ def build_parser():
                    help='DualSense full-stick target speed m/s, rad/s')
 
     g = ap.add_argument_group('center / free')
-    g.add_argument('--offsets', type=offsets_arg, default=offsets_arg('tip=0.03,tcp=0,flange=-0.154'),
-                   help='center: push points name=offset along tool z from the TCP [m], tip positive')
+    g.add_argument('--offsets', type=offsets_arg, default=offsets_arg('tcp=0,flange=-0.154'),
+                   help='center: push points name=offset along tool z from the TCP [m], outward positive. '
+                        'Only points you can actually push at')
     g.add_argument('--seconds', type=float, default=3.0, help='length of one push window [s]')
     g.add_argument('--reps', type=int, default=4, help='push windows per point')
     g.add_argument('--seg-drift', type=float, default=0.05,
@@ -605,12 +609,21 @@ class Session:
 
 # ------------------------------------------------------------------------- modes
 
-def mode_teleop(sess, args, io):
-    # Lazy import: interface.py builds a robosuite env for the DualSense driver.
+def make_dualsense(args, pose):
+    """
+    Slow (interface.py -> env.py imports cv2, h5py, camera, wsg; then HID open):
+    seconds of host silence. run() calls this BEFORE arming the watchdog -- doing it
+    inside the mode tripped C207A0 before the first cycle.
+    """
     from interface import DualSenseInterface
+    return DualSenseInterface(pose, xyzspeed=args.teleop_speed[0], rpyspeed=args.teleop_speed[3],
+                              enable_zadaptive=False)
+
+
+def mode_teleop(sess, args, io):
+    iface = sess.iface
     pose = sess.pose()
-    iface = DualSenseInterface(pose, xyzspeed=args.teleop_speed[0], rpyspeed=args.teleop_speed[3],
-                               enable_zadaptive=False)
+    iface.targ_pose = pose.copy()          # built before zeroing; start from where the arm is now
     edge = Edge()
     adm, dt = sess.adm, sess.dt
     every = max(1, round(args.hz / args.teleop_hz))
@@ -1158,7 +1171,7 @@ def replay(path):
 
 # --------------------------------------------------------------------------- run
 
-def run(args, ctrl, recv, io, clock=time.perf_counter, out=None):
+def run(args, ctrl, recv, io, clock=time.perf_counter, out=None, make_iface=make_dualsense):
     """Everything after connecting. Shared by the hardware path and the selftest."""
     mass, cog = float(recv.getPayload()), np.array(recv.getPayloadCog(), float)
     tcp = np.array(ctrl.getTCPOffset(), float)
@@ -1189,6 +1202,9 @@ def run(args, ctrl, recv, io, clock=time.perf_counter, out=None):
             'deadband_used': adm.deadband}
     reason = 'finished'
     try:
+        if args.mode == 'teleop':          # slow setup: before the watchdog is armed
+            print('starting DualSense ...')
+            sess.iface = make_iface(args, sess.pose())
         if not args.no_zero and args.mode not in ('center', 'free', 'tap'):   # those zero per segment
             print('zeroing F/T -- arm must be free of contact')
             sess.zero()
@@ -1243,7 +1259,7 @@ class FakeRobot:
     reference.
     """
 
-    def __init__(self, pose, dt, tcp_offset=EXPECT_TCP, sensor_ref='tcp', tau=0.02,
+    def __init__(self, pose, dt, tcp_offset=EXPECT_TCP, sensor_ref='flange', tau=0.02,
                  payload=EXPECT_PAYLOAD, noise=0.0, seed=0):
         self.t, self.dt, self.tau = 0.0, dt, tau
         self.pose, self.twist, self.cmd = np.array(pose, float), np.zeros(6), np.zeros(6)
@@ -1597,6 +1613,29 @@ def selftest():
     wz = np.abs(np.load(out)['v_cmd'][:, 3:]).max()
     check('push ending at speed returns without a watchdog stop', reason == 'finished' and 'watchdog-stop' not in fk.calls,
           f'{reason}, peak rotation {wz:.3f} rad/s')
+
+    class FakePad:
+        """DualSense stand-in: slow to build, holds the stick +x, then Ctrl-C."""
+        def __init__(self, fk, pose, n):
+            fk.advance(3.0)                                   # the slow import + HID open
+            self.targ_pose, self.n = np.array(pose, float), n
+            self.dualsense = type('D', (), {'state': type('S', (), {k: False for k in
+                                  ('DpadUp', 'DpadDown', 'DpadLeft', 'Cross', 'Square')})()})()
+
+        def update(self, h):
+            self.n -= 1
+            if self.n < 0:
+                raise KeyboardInterrupt
+            self.targ_pose[0] += 5e-3 * h
+
+    args = ap.parse_args(['--mode', 'teleop'])
+    fk = FakeRobot(POSE0, 1 / args.hz, noise=0.1)
+    out, _, reason = quiet(run, args, fk, fk, SimIO(fk), fk.now, os.path.join(tmp, 'teleop.npz'),
+                           make_iface=lambda a, p: FakePad(fk, p, 200))
+    moved = np.load(out)['pose'][-1, 0] - POSE0[0] if out and os.path.exists(out) else np.nan
+    check('teleop: slow DualSense setup does not trip the watchdog',
+          reason == 'interrupted' and 'watchdog-stop' not in fk.calls and moved > 5e-3,
+          f'{reason}, followed the stick {1e3 * moved:.1f} mm (target 10)')
 
     print('validation modes on the fake (analysis code paths)')
     for sensor, flag, point, expect in (('tcp', 'tcp', 0.0, 0.0), ('tcp', 'tcp', 0.03, 0.03),
