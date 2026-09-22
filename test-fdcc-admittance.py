@@ -58,8 +58,10 @@ Safety
     speedL's time argument does NOT stop a stalled loop with ur_rtde 1.6.5. The
     control script's speed_thread re-issues speedl(target, a, t) in a loop with
     the last target until speedStop, so a stalled host keeps the last velocity.
-    The argument is still passed (a few cycles, so each re-issue picks up new
-    targets promptly), but the stall protection is the RTDE watchdog
+    The argument must be ONE control cycle: speed_thread only picks up a new
+    target when speedl() returns, so t = 8 ms fed the arm an 8 ms staircase and
+    it buzzed at 125 Hz whenever the speed changed (fdcc-ramp-20260922-173332).
+    The stall protection is the RTDE watchdog
     (--watchdog-hz): the controller stops the program if no input arrives for
     1/hz. Every speedL feeds it and every idle wait and prompt kicks it. Nothing
     here blocks without kicking, which is why the return between pushes is our own
@@ -193,8 +195,9 @@ def build_parser():
                    help='max target-actual offset m, rad')
     g.add_argument('--max-drift', type=float, default=0.25,
                    help='stop the run if the TCP gets this far from where it started [m]')
-    g.add_argument('--speedl-cycles', type=float, default=4,
-                   help='speedL time argument, in control cycles (NOT a stall guard, see docstring)')
+    g.add_argument('--speedl-cycles', type=float, default=1,
+                   help='speedL time argument, in control cycles. Keep it 1: the control script only '
+                        'takes a new target every t, and 4 (8 ms) buzzed at 125 Hz. Not a stall guard')
     g.add_argument('--watchdog-hz', type=float, default=20.0,
                    help='RTDE watchdog: the controller stops the program if the host is silent '
                         'for 1/hz. 0 = off')
