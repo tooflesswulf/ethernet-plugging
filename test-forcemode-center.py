@@ -5,6 +5,11 @@ No spring, no teleop: forceMode is entered with a ZERO target wrench and all six
 axes compliant, so the arm simply yields to whatever you push with. You push at
 two (ideally three) marked points on the tool, one segment each.
 
+The arm runs away from your hand, so each segment is several SHORT shoves rather
+than one long push, and the arm is driven back to the segment's starting pose
+between them. You do not need to hold a steady force: s below is a ratio of two
+velocities, so it does not care how hard you push, only where.
+
 Geometry, for a compliance centred at c with isotropic gains (offsets are
 distances along the tool z axis measured from the TCP, tip positive):
 
@@ -54,7 +59,7 @@ def offsets_arg(s):
     return out
 
 
-def spin_ratio(pose, twist, d, v_min):
+def spin_ratio(pose, twist, force, d, v_min, f_min):
     """
     s = |omega| / |v| at the PUSH POINT, for one segment.
 
@@ -71,7 +76,9 @@ def spin_ratio(pose, twist, d, v_min):
     arm = np.einsum('nij,j->ni', Rb, np.array([0.0, 0.0, d]))
     v_push = v + np.cross(w, arm)                      # velocity of the pushed point
     vn, wn = np.linalg.norm(v_push, axis=1), np.linalg.norm(w, axis=1)
-    m = vn > v_min
+    # Only samples where you are actually pushing AND the tool is moving. s is
+    # scale-invariant in the force, so short shoves are as good as a steady push.
+    m = (vn > v_min) & (np.linalg.norm(force[:, :3], axis=1) > f_min)
     if m.sum() < 50:
         return np.nan, m.sum(), np.nan
     s = float(np.median(wn[m] / vn[m]))
@@ -109,37 +116,49 @@ def solve_centre(d, s):
     return sols[:3]
 
 
-def run_segment(ctrl, recv, args, label, log, seg):
-    print(f'\n--- segment "{label}" --- keep hands OFF the tool while the F/T zeroes')
+def run_segment(ctrl, recv, args, label, log, seg, t_log):
+    """
+    One push point, done as several SHORT pushes. The arm yields and runs away
+    from your hand, so holding a steady push is not possible and not needed --
+    s is scale-invariant in the applied force. Between pushes the arm is driven
+    back to where the segment started, so the workspace stays bounded.
+    """
+    print(f'\n--- segment "{label}" --- hands OFF while the F/T zeroes')
     time.sleep(1.0)
     ctrl.zeroFtSensor()
     time.sleep(0.3)
+    home = np.array(recv.getActualTCPPose())
 
-    task_frame = list(recv.getActualTCPPose()) if args.task_frame == 'tcp' else [0.0] * 6
-    start = np.array(recv.getActualTCPPose())
-    print(f'    push at "{label}" and keep pushing -- {args.seconds:.0f} s, '
-          f'task_frame={args.task_frame}')
-    t0 = time.perf_counter()
-    aborted = ''
-    while time.perf_counter() - t0 < args.seconds:
-        t_start = ctrl.initPeriod()
-        if recv.isProtectiveStopped() or recv.isEmergencyStopped():
-            aborted = 'protective/emergency stop'
-            break
-        pose = np.array(recv.getActualTCPPose())
-        drift = np.linalg.norm(pose[:3] - start[:3])
-        if drift > args.max_drift:
-            aborted = f'drifted {1e3 * drift:.0f} mm'
-            break
-        ctrl.forceMode(task_frame, SELECTION, ZERO_WRENCH, FRAME_TYPE, args.vmax.tolist())
-        log.append(np.r_[time.perf_counter() - t0, seg, pose,
-                         recv.getActualTCPSpeed(), recv.getActualTCPForce(),
-                         recv.getActualQ()])
-        ctrl.waitPeriod(t_start)
-    ctrl.forceModeStop()
-    if aborted:
-        print(f'    ABORTED: {aborted}')
-    return aborted
+    for rep in range(args.reps):
+        task_frame = list(recv.getActualTCPPose()) if args.task_frame == 'tcp' else [0.0] * 6
+        print(f'    push {rep + 1}/{args.reps}: shove at "{label}" NOW '
+              f'({args.seconds:.0f} s)', flush=True)
+        t0 = time.perf_counter()
+        aborted = ''
+        while time.perf_counter() - t0 < args.seconds:
+            t_start = ctrl.initPeriod()
+            if recv.isProtectiveStopped() or recv.isEmergencyStopped():
+                aborted = 'protective/emergency stop'
+                break
+            pose = np.array(recv.getActualTCPPose())
+            if np.linalg.norm(pose[:3] - home[:3]) > args.max_drift:
+                aborted = 'drift limit'
+                break
+            ctrl.forceMode(task_frame, SELECTION, ZERO_WRENCH, FRAME_TYPE, args.vmax.tolist())
+            log.append(np.r_[time.perf_counter() - t_log, seg, rep, pose,
+                             recv.getActualTCPSpeed(), recv.getActualTCPForce(),
+                             recv.getActualQ()])
+            ctrl.waitPeriod(t_start)
+        ctrl.forceModeStop()
+        if aborted == 'protective/emergency stop':
+            print(f'    ABORTED: {aborted}')
+            return aborted
+        back = np.linalg.norm(np.array(recv.getActualTCPPose())[:3] - home[:3])
+        if back > 2e-3:
+            print(f'      hands off -- returning {1e3 * back:.0f} mm', flush=True)
+            time.sleep(0.8)
+            ctrl.moveL(home.tolist(), args.return_speed, 0.3)
+    return ''
 
 
 def main():
@@ -149,7 +168,12 @@ def main():
     ap.add_argument('--offsets', type=offsets_arg, default='tip=0.03,base=-0.154',
                     help='push points as name=offset_along_tool_z_from_TCP[m], tip positive')
     ap.add_argument('--task-frame', choices=('base', 'tcp'), default='base')
-    ap.add_argument('--seconds', type=float, default=20.0, help='push time per segment')
+    ap.add_argument('--seconds', type=float, default=3.0, help='length of one push [s]')
+    ap.add_argument('--reps', type=int, default=6, help='pushes per point')
+    ap.add_argument('--f-min', type=float, default=3.0,
+                    help='only use samples pushed harder than this [N]')
+    ap.add_argument('--return-speed', type=float, default=0.05,
+                    help='speed for the move back between pushes [m/s]')
     ap.add_argument('--vmax', type=lambda s: np.array([float(x) for x in s.split(',')] * 3
                                                       if len(s.split(',')) == 2 else
                                                       [float(x) for x in s.split(',')]),
@@ -175,15 +199,17 @@ def main():
         ctrl.forceModeSetGainScaling(args.fm_gain)
 
     log, results = [], []
+    t_log = time.perf_counter()
     try:
         for seg, (label, d) in enumerate(args.offsets):
             input(f'\n[{seg + 1}/{len(args.offsets)}] ready to push at "{label}" '
                   f'({1e3 * d:+.0f} mm from TCP along tool z)? press Enter')
-            run_segment(ctrl, recv, args, label, log, seg)
+            run_segment(ctrl, recv, args, label, log, seg, t_log)
             L = np.array([r for r in log if r[1] == seg])
-            s, n, pz = spin_ratio(L[:, 2:8], L[:, 8:14], d, args.v_min)
+            s, n, pz = spin_ratio(L[:, 3:9], L[:, 9:15], L[:, 15:21], d, args.v_min, args.f_min)
             if not np.isfinite(s):
-                print(f'    the tool barely moved ({n} usable samples) -- push harder')
+                print(f'    only {n} usable samples (need >50 with |F| > {args.f_min:.0f} N '
+                      f'while moving) -- push harder, or lower --f-min')
                 continue
             results.append((label, d, s))
             print(f'    spin ratio |w|/|v| at the push point: {s:6.2f} rad/m   (n={n})')
@@ -213,8 +239,9 @@ def main():
     if log:
         L = np.array(log)
         out = args.out or time.strftime(f'forcemode-center-{args.task_frame}-%Y%m%d-%H%M%S.npz')
-        np.savez(out, t=L[:, 0], seg=L[:, 1], pose=L[:, 2:8], twist=L[:, 8:14],
-                 tcp_force=L[:, 14:20], q=L[:, 20:26],
+        np.savez(out, t=L[:, 0], seg=L[:, 1], rep=L[:, 2], pose=L[:, 3:9], twist=L[:, 9:15],
+                 tcp_force=L[:, 15:21], q=L[:, 21:27], f_min=args.f_min, v_min=args.v_min,
+                 seconds=args.seconds, reps=args.reps,
                  labels=np.array([r[0] for r in args.offsets]),
                  push_offsets=np.array([r[1] for r in args.offsets]),
                  task_frame=args.task_frame, tcp_offset=tcp, vmax=args.vmax,
