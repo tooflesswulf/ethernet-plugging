@@ -207,6 +207,11 @@ def build_parser():
 
     g = ap.add_argument_group('teleop')
     g.add_argument('--teleop-hz', type=float, default=100.0)
+    g.add_argument('--teleop-accel', type=csv6, default=csv6('0.5,2.0'),
+                   help='slew limit on the stick target m/s^2, rad/s^2. Unshaped, the stick went '
+                        '0 -> 49 mm/s in 25 ms: the arm buzzed (~125 Hz) on every start and the '
+                        'fade tripped on the arm\'s own acceleration (fdcc-teleop-20260922-172321). '
+                        'Contact reaction is --amax, not this')
     g.add_argument('--teleop-speed', type=csv6, default=csv6('0.08,0.9'),
                    help='DualSense full-stick target speed m/s, rad/s')
 
@@ -702,7 +707,7 @@ def mode_teleop(sess, args, io):
     adm, dt = sess.adm, sess.dt
     every = max(1, round(args.hz / args.teleop_hz))
     sel0, rot_locked = adm.sel.copy(), False
-    vt = np.zeros(6)
+    vt, v_slew = np.zeros(6), np.zeros(6)
     print('running -- Ctrl-C to stop')
     i = 0
     while True:
@@ -710,6 +715,13 @@ def mode_teleop(sess, args, io):
             before = iface.targ_pose.copy()
             if iface.update(every * dt) == -1:
                 iface.targ_pose[:] = before
+            # Slew-limit the stick: move the target at a rate-limited copy of what
+            # the stick asked for, rather than letting it step.
+            h = every * dt
+            stick = twist_between(before, iface.targ_pose, h)
+            v_slew = v_slew + clamp_wrench(stick - v_slew, args.teleop_accel[0] * h, args.teleop_accel[3] * h)
+            iface.targ_pose[:3] = before[:3] + v_slew[:3] * h
+            iface.targ_pose[3:] = (R.from_rotvec(v_slew[3:] * h) * R.from_rotvec(before[3:])).as_rotvec()
             st = iface.dualsense.state
             if edge(st, 'DpadUp'):
                 sess.k_scale *= 1.5
@@ -720,6 +732,7 @@ def mode_teleop(sess, args, io):
             if edge(st, 'Cross'):
                 iface.targ_pose = pose.copy()
                 before = pose.copy()             # a jump, not a velocity
+                v_slew[:] = 0
                 print('\ntarget re-anchored')
             if edge(st, 'Square'):
                 rot_locked = not rot_locked
