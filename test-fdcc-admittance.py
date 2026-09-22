@@ -133,7 +133,7 @@ def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--mode', default='teleop',
-                    choices=('teleop', 'center', 'free', 'tap', 'stall', 'selftest'))
+                    choices=('teleop', 'center', 'free', 'tap', 'stall', 'ramp', 'selftest'))
     ap.add_argument('--replay', default=None, help='re-run the analysis of a saved log')
     ap.add_argument('--ip', default='192.168.0.100')
     ap.add_argument('--hz', type=float, default=500.0)
@@ -239,6 +239,12 @@ def build_parser():
     g.add_argument('--tap-ramp', type=float, default=0.3,
                    help='ramp up to the approach speed over this long [s]. A step reads as a false '
                         'contact: the F/T sees the arm\'s own acceleration as ~20 kg')
+
+    g = ap.add_argument_group('ramp (open-loop speedL, no admittance: does the ARM buzz?)')
+    g.add_argument('--ramp-dir', type=csv3, default=csv3('0,1,0'), help='base frame; out and back')
+    g.add_argument('--ramp-speed', type=float, default=0.05, help='cruise speed [m/s]')
+    g.add_argument('--ramp-accels', type=csvn, default=csvn('0.1,0.5,2'), help='ramp accelerations [m/s^2]')
+    g.add_argument('--ramp-cruise', type=float, default=0.3, help='time at cruise speed [s]')
 
     g = ap.add_argument_group('stall')
     g.add_argument('--stall-dir', type=csv3, default=csv3('0,0,1'), help='base frame; up by default')
@@ -892,7 +898,69 @@ def mode_stall(sess, args, io):
             sess.stop()
 
 
-MODES = {'teleop': mode_teleop, 'center': mode_center, 'free': mode_free,
+def mode_ramp(sess, args, io):
+    """
+    Trapezoidal speedL profiles with NO force feedback: out along --ramp-dir, then
+    back, at each --ramp-accels. If the ~125 Hz buzz seen at teleop starts shows up
+    here too, it is the arm / UR's speed loop, not the admittance.
+    phase 0 = ramping, 1 = cruising, 2 = return to start.
+    """
+    dirn = unit(args.ramp_dir)
+    v, dt = args.ramp_speed, sess.dt
+    travel = max(v * v / a + v * args.ramp_cruise for a in args.ramp_accels)
+    sess.prompt(f'The arm moves up to {1e3 * travel:.0f} mm along {np.round(dirn, 2)} (base) and back, '
+                f'{len(args.ramp_accels)} times. Clear path, hand on the e-stop. Enter ')
+    home = sess.pose()
+    for seg, acc in enumerate(args.ramp_accels):
+        for rep_, sgn in enumerate((1.0, -1.0)):
+            print(f'  {acc:.2f} m/s^2, {"out" if sgn > 0 else "back"}', flush=True)
+            t_ramp = v / acc
+            t_total = 2 * t_ramp + args.ramp_cruise
+            t0 = sess.clock()
+            try:
+                while (tt := sess.clock() - t0) < t_total:
+                    sp = v * min(1.0, tt / t_ramp, max(0.0, (t_total - tt) / t_ramp))
+                    ramping = tt < t_ramp or tt > t_ramp + args.ramp_cruise
+                    sess.cycle(None, None, (seg, rep_, 0 if ramping else 1),
+                               v_override=np.r_[sgn * dirn * sp, 0, 0, 0])
+            finally:
+                sess.stop()
+            sess.idle(0.3)
+        sess.goto(home, (seg, 2, 2))
+
+
+def buzz(err, dt, lo=95.0, hi=160.0, L=32):
+    """rms of err (N, k) in [lo, hi] Hz, from 32-sample Hann windows; per window."""
+    h = np.hanning(L)[:, None]
+    f = np.fft.rfftfreq(L, dt)
+    band = (f > lo) & (f < hi)
+    out = []
+    for s in range(0, len(err) - L + 1, L // 4):
+        e = err[s:s + L] - err[s:s + L].mean(0)
+        out.append(np.sqrt((np.abs(np.fft.rfft(e * h, axis=0))[band] ** 2).sum()) / L * 2)
+    return np.array(out)
+
+
+def analyze_ramp(d, args, meta):
+    dt = float(np.nanmedian(np.diff(d['t'])))
+    err = d['twist'][:, :3] - d['v_cmd'][:, :3]
+    print('\n  95-160 Hz tracking error (measured - commanded), mm/s: median / 90%')
+    print('  accel m/s^2     ramping           cruising')
+    out = {}
+    for seg, acc in enumerate(args.ramp_accels):
+        cells = []
+        for ph in (0, 1):
+            parts = [buzz(err[b], dt) for b in blocks(d, ph) if d['seg'][b[0]] == seg and len(b) >= 32]
+            x = np.concatenate(parts) if parts else np.array([np.nan])
+            cells.append((np.nanmedian(x), np.nanpercentile(x, 90)))
+        out[acc] = cells
+        print(f'  {acc:5.2f}         {1e3 * cells[0][0]:5.2f} / {1e3 * cells[0][1]:5.2f}      '
+              f'{1e3 * cells[1][0]:5.2f} / {1e3 * cells[1][1]:5.2f}')
+    print('  For scale, fdcc-teleop-20260922-172321 (admittance on): speed changes 4.3 / 6.3, cruise 0.3 / 0.5.')
+    return out
+
+
+MODES = {'teleop': mode_teleop, 'center': mode_center, 'free': mode_free, 'ramp': mode_ramp,
          'tap': mode_tap, 'stall': mode_stall}
 
 
@@ -1185,7 +1253,8 @@ def analyze_stall(d, args, meta):
     return out
 
 
-ANALYSES = {'center': analyze_center, 'free': analyze_free, 'tap': analyze_tap, 'stall': analyze_stall}
+ANALYSES = {'center': analyze_center, 'free': analyze_free, 'tap': analyze_tap, 'stall': analyze_stall,
+            'ramp': analyze_ramp}
 
 
 # ----------------------------------------------------------------------- logging
