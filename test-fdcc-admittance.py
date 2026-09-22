@@ -142,8 +142,9 @@ def build_parser():
     g.add_argument('--d', type=csv6, default=csv6('1000,20'),
                    help='damping N s/m, Nm s/rad. 1/D is the free-space admittance: '
                         '1000 N s/m = 1 mm/s per N, forceMode was 0.93')
-    g.add_argument('--m', type=csv6, default=csv6('30,0.6'),
-                   help='virtual mass kg, kg m^2. M/D is the response time constant (30 ms)')
+    g.add_argument('--m', type=csv6, default=csv6('10,0.2'),
+                   help='virtual mass kg, kg m^2. M/D is the response time constant (10 ms). '
+                        '30 kg chattered on a hard surface once amax let it react (fake, 2026-09-22)')
     g.add_argument('--sel', type=csv6, default=csv6('1'),
                    help='1 = compliant, 0 = stiff (position tracking at --stiff-gain). '
                         '"1,0" locks rotation only')
@@ -162,12 +163,16 @@ def build_parser():
                    help='first-order low-pass on the wrench [Hz], 0 = off')
     g.add_argument('--stiff-gain', type=float, default=5.0,
                    help='position gain on stiff axes [1/s]')
+    g.add_argument('--ff-release', type=csvn, default=csvn('3,0.3'),
+                   help='target-velocity feedforward fades to zero as the environment pushes back '
+                        'against the motion by this much [N, Nm]; 0 = never fade')
 
     g = ap.add_argument_group('safety')
     g.add_argument('--vmax', type=csv6, default=csv6('0.08,0.9'),
                    help='speed clamp m/s, rad/s (norms; first and fourth used)')
-    g.add_argument('--amax', type=csv6, default=csv6('0.5,2.0'),
-                   help='acceleration clamp m/s^2, rad/s^2; also bounds how fast contact is shed')
+    g.add_argument('--amax', type=csv6, default=csv6('2,4'),
+                   help='acceleration clamp m/s^2, rad/s^2. It also bounds how fast contact is shed: '
+                        '0.5 could not back off a 27 mm/s impact before 45 N (fdcc-teleop-20260922-164226)')
     g.add_argument('--fmax', type=float, default=25.0, help='force clamp on the controller input [N]')
     g.add_argument('--tmax', type=float, default=2.0, help='torque clamp [Nm]')
     g.add_argument('--f-abort', type=float, default=45.0, help='stop the run above this |F| [N]')
@@ -360,7 +365,7 @@ class Admittance:
     """
 
     def __init__(self, K, D, M, sel, frame, point, tcp_offset, ft_ref, ft_sign, vmax, amax,
-                 deadband, f_cut, stiff_gain, fmax, tmax, dt):
+                 deadband, f_cut, stiff_gain, fmax, tmax, dt, ff_release=(0.0, 0.0)):
         self.K, self.D, self.M = (np.array(x, float) for x in (K, D, M))
         self.sel = np.array(sel, float)
         self.frame, self.point = frame, np.array(point, float)
@@ -369,6 +374,8 @@ class Admittance:
         self.deadband = np.array(deadband, float)
         self.alpha = 1.0 if f_cut <= 0 else 1.0 - np.exp(-2 * np.pi * f_cut * dt)
         self.stiff_gain, self.fmax, self.tmax, self.dt = stiff_gain, fmax, tmax, dt
+        self.ff_release = np.array(ff_release, float)
+        self.ff_gain = np.ones(2)          # last feedforward scale, translation / rotation
         bad = (self.sel != 0) & (self.M + self.D * dt <= 0)
         if bad.any():
             raise ValueError(f'compliant axes {np.flatnonzero(bad)} have M = D = 0')
@@ -396,9 +403,21 @@ class Admittance:
         vt = shift_twist(vt_tcp, target[:3], pt)
         Rc = frame_mats(pose, self.frame)
         wc, ec, vtc, vc = (to_frame(x, Rc) for x in (w, e, vt, self.v))
-        # 3. dynamics
+        # 3. dynamics. The feedforward D v_t is a FORCE in disguise: in contact it
+        # presses at D |v_t| whatever the spring and leash allow -- 27 N at 27 mm/s,
+        # above the 25 N clamp, so the arm could not back off
+        # (fdcc-teleop-20260922-164226). Fade it out as the environment pushes back
+        # against the direction of travel; free-space tracking is unchanged.
         K, D = self.K * k_scale, self.D * np.sqrt(k_scale)
-        v_new = (self.M * vc + self.dt * (wc - K * ec + D * vtc)) / (self.M + D * self.dt)
+        vff = vtc.copy()
+        for j, (sl, rel) in enumerate(((slice(0, 3), self.ff_release[0]), (slice(3, 6), self.ff_release[1]))):
+            n = np.linalg.norm(vff[sl])
+            g = 1.0
+            if rel > 0 and n > 0:
+                g = float(np.clip(1.0 + (wc[sl] @ vff[sl]) / (n * rel), 0.0, 1.0))
+            vff[sl] *= g
+            self.ff_gain[j] = g
+        v_new = (self.M * vc + self.dt * (wc - K * ec + D * vff)) / (self.M + D * self.dt)
         stiff = self.sel == 0
         v_new[stiff] = vtc[stiff] - self.stiff_gain * ec[stiff]
         v_new = from_frame(v_new, Rc)
@@ -416,7 +435,8 @@ def make_admittance(args, tcp, dt):
     if args.mode == 'center':
         db[:] = 0.0                        # a deadband bends s(d); pushes are short, drift is not an issue
     return Admittance(K, args.d, args.m, sel, args.frame, args.point, tcp, args.ft_ref, args.ft_sign,
-                      args.vmax, args.amax, db, args.f_cut, args.stiff_gain, args.fmax, args.tmax, dt)
+                      args.vmax, args.amax, db, args.f_cut, args.stiff_gain, args.fmax, args.tmax, dt,
+                      getattr(args, 'ff_release', (0.0, 0.0)))
 
 
 # ----------------------------------------------------------------------- session
@@ -637,7 +657,6 @@ def mode_teleop(sess, args, io):
             before = iface.targ_pose.copy()
             if iface.update(every * dt) == -1:
                 iface.targ_pose[:] = before
-            vt = twist_between(before, iface.targ_pose, every * dt)
             st = iface.dualsense.state
             if edge(st, 'DpadUp'):
                 sess.k_scale *= 1.5
@@ -647,13 +666,14 @@ def mode_teleop(sess, args, io):
                 print(f'\nstiffness x{sess.k_scale:.2f}  K {np.round(adm.K * sess.k_scale, 2)}')
             if edge(st, 'Cross'):
                 iface.targ_pose = pose.copy()
-                vt[:] = 0
+                before = pose.copy()             # a jump, not a velocity
                 print('\ntarget re-anchored')
             if edge(st, 'Square'):
                 rot_locked = not rot_locked
                 if rot_locked:
                     adm.sel[3:] = 0.0
                     iface.targ_pose[3:] = pose[3:]      # hold where it is, not where the target was
+                    before[3:] = pose[3:]              # a jump, not a velocity
                 else:
                     adm.sel[3:] = sel0[3:]
                 print(f'\nrotation {"LOCKED" if rot_locked else "free"}  sel {adm.sel}')
@@ -662,6 +682,8 @@ def mode_teleop(sess, args, io):
                 sess.zero()
                 print('F/T zeroed')
             leash(iface.targ_pose, pose, args.leash[0], args.leash[3])
+            # after the leash: a target held back by it is not moving, so feeds nothing forward
+            vt = twist_between(before, iface.targ_pose, every * dt)
         pose, twist, wm, info = sess.cycle(iface.targ_pose, vt)
         if i % int(args.hz / 5) == 0:
             e = info['e']
@@ -1637,6 +1659,34 @@ def selftest():
     check('teleop: slow DualSense setup does not trip the watchdog',
           reason == 'interrupted' and 'watchdog-stop' not in fk.calls and moved > 5e-3,
           f'{reason}, followed the stick {1e3 * moved:.1f} mm (target 10)')
+
+    class WallPad(FakePad):
+        """Stick held straight down at 27 mm/s into a 40 N/mm surface 20 mm below."""
+        def update(self, h):
+            self.n -= 1
+            if self.n < 0:
+                raise KeyboardInterrupt
+            self.targ_pose[2] -= 0.027 * h
+
+    def wall_teleop(*extra):
+        a = ap.parse_args(['--mode', 'teleop', '--vmax', '0.08,0.9', '--teleop-speed', '0.08,0.9', *extra])
+        fk = FakeRobot(POSE0, 1 / a.hz, noise=0.1)
+        fk.forces = [wall(np.array(POSE0[:3]) + [0, 0, -0.02], [0, 0, -1], 40000.0)]
+        out, _, reason = quiet(run, a, fk, fk, SimIO(fk), fk.now, os.path.join(tmp, 'wall.npz'),
+                               make_iface=lambda aa, p: WallPad(fk, p, 400))
+        z = np.load(out)
+        F, t = z['tcp_force'][:, 2], z['t']
+        last = F[t > t[-1] - 1.0]
+        return reason, F.max(), np.median(last), last.std()
+
+    r, pk, st, sd = wall_teleop()
+    press = 300 * 0.03 + 1.5                           # K * leash + deadband
+    check('teleop into a wall at 27 mm/s: no abort, no chatter', r == 'interrupted' and pk < 35 and sd < 1.0,
+          f'peak {pk:.1f} N, steady {st:.1f} +- {sd:.1f} N [{r}]')
+    check('contact force capped at K * leash + deadband', abs(st - press) < 1.5, f'{st:.1f} N, expect {press:.1f}')
+    r, pk, st, sd = wall_teleop('--ff-release', '0,0', '--amax', '0.5,2', '--m', '30,0.6')
+    check('old settings reproduce the hardware abort', r.startswith('ABORT: wrench'),
+          f'peak {pk:.1f} N [{r[:40]}]  (fdcc-teleop-20260922-164226: 43.6 N then abort)')
 
     print('validation modes on the fake (analysis code paths)')
     for sensor, flag, point, expect in (('tcp', 'tcp', 0.0, 0.0), ('tcp', 'tcp', 0.03, 0.03),
