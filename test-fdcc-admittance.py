@@ -143,12 +143,14 @@ def build_parser():
     g.add_argument('--d', type=csv6, default=csv6('1000,20'),
                    help='damping N s/m, Nm s/rad. 1/D is the free-space admittance: '
                         '1000 N s/m = 1 mm/s per N, forceMode was 0.93')
-    g.add_argument('--m', type=csv6, default=csv6('15,0.3'),
+    g.add_argument('--m', type=csv6, default=csv6('15,0.6'),
                    help='virtual mass kg, kg m^2; M/D is the response time constant (15 ms). A trade: '
                         'too light and the 25 Hz loop through getActualTCPForce (it reads the arm\'s own '
                         'motion as ~20 kg, 34 ms late) limit-cycles -- 10 kg did, 9 N rms, '
                         'fdcc-tap-20260922-165218; too heavy and hard contact chatters (fakes: >= 17 kg '
-                        'at 27 mm/s). 15 passes both on the fakes, with thin margins')
+                        'at 27 mm/s); 15 was clean in fdcc-tap-20260922-171421. Rotation: the 154 mm '
+                        'flange-TCP lever turns the lateral 25 Hz force into torque; 0.3 kg m^2 rang in '
+                        'teleop, 0.6 did not')
     g.add_argument('--sel', type=csv6, default=csv6('1'),
                    help='1 = compliant, 0 = stiff (position tracking at --stiff-gain). '
                         '"1,0" locks rotation only')
@@ -172,6 +174,10 @@ def build_parser():
     g.add_argument('--ff-release', type=csvn, default=csvn('3,0.3'),
                    help='target-velocity feedforward fades to zero as the environment pushes back '
                         'against the motion by this much [N, Nm]; 0 = never fade')
+    g.add_argument('--ff-recover', type=float, default=0.3,
+                   help='the fade drops at once but takes this long to recover from 0 to 1 [s]. A '
+                        'symmetric fade modulated a 40 mm/s feedforward at 25 Hz -- ~17 mm/s per N of '
+                        'force wobble -- and rang in teleop (fdcc-teleop-20260922-171759)')
 
     g = ap.add_argument_group('safety')
     g.add_argument('--vmax', type=csv6, default=csv6('0.08,0.9'),
@@ -404,7 +410,8 @@ class Admittance:
     """
 
     def __init__(self, K, D, M, sel, frame, point, tcp_offset, ft_ref, ft_sign, vmax, amax,
-                 deadband, f_cut, stiff_gain, fmax, tmax, dt, ff_release=(0.0, 0.0), f_order=1):
+                 deadband, f_cut, stiff_gain, fmax, tmax, dt, ff_release=(0.0, 0.0), f_order=1,
+                 ff_recover=0.0):
         self.K, self.D, self.M = (np.array(x, float) for x in (K, D, M))
         self.sel = np.array(sel, float)
         self.frame, self.point = frame, np.array(point, float)
@@ -414,7 +421,8 @@ class Admittance:
         self.lp = LowPass(f_cut, f_order, dt)
         self.stiff_gain, self.fmax, self.tmax, self.dt = stiff_gain, fmax, tmax, dt
         self.ff_release = np.array(ff_release, float)
-        self.ff_gain = np.ones(2)          # last feedforward scale, translation / rotation
+        self.ff_recover = float(ff_recover)
+        self.ff_gain = np.ones(2)          # feedforward scale, translation / rotation (logged)
         bad = (self.sel != 0) & (self.M + self.D * dt <= 0)
         if bad.any():
             raise ValueError(f'compliant axes {np.flatnonzero(bad)} have M = D = 0')
@@ -447,14 +455,19 @@ class Admittance:
         # (fdcc-teleop-20260922-164226). Fade it out as the environment pushes back
         # against the direction of travel; free-space tracking is unchanged.
         K, D = self.K * k_scale, self.D * np.sqrt(k_scale)
+        # Fast attack, slow release: a symmetric fade turns any force wobble into a
+        # feedforward modulation of |v_t| / release per N (17 mm/s per N at 50 mm/s),
+        # which is what rang at 25 Hz in fdcc-teleop-20260922-171759.
         vff = vtc.copy()
         for j, (sl, rel) in enumerate(((slice(0, 3), self.ff_release[0]), (slice(3, 6), self.ff_release[1]))):
             n = np.linalg.norm(vff[sl])
             g = 1.0
             if rel > 0 and n > 0:
                 g = float(np.clip(1.0 + (wc[sl] @ vff[sl]) / (n * rel), 0.0, 1.0))
-            vff[sl] *= g
+            if self.ff_recover > 0:
+                g = min(g, self.ff_gain[j] + self.dt / self.ff_recover)
             self.ff_gain[j] = g
+            vff[sl] *= g
         v_new = (self.M * vc + self.dt * (wc - K * ec + D * vff)) / (self.M + D * self.dt)
         stiff = self.sel == 0
         v_new[stiff] = vtc[stiff] - self.stiff_gain * ec[stiff]
@@ -474,14 +487,15 @@ def make_admittance(args, tcp, dt):
         db[:] = 0.0                        # a deadband bends s(d); pushes are short, drift is not an issue
     return Admittance(K, args.d, args.m, sel, args.frame, args.point, tcp, args.ft_ref, args.ft_sign,
                       args.vmax, args.amax, db, args.f_cut, args.stiff_gain, args.fmax, args.tmax, dt,
-                      getattr(args, 'ff_release', (0.0, 0.0)), getattr(args, 'f_order', 1))
+                      getattr(args, 'ff_release', (0.0, 0.0)), getattr(args, 'f_order', 1),
+                      getattr(args, 'ff_recover', 0.0))
 
 
 # ----------------------------------------------------------------------- session
 
 COLS = [('t', 1), ('pose', 6), ('target', 6), ('twist', 6), ('v_cmd', 6), ('v_point', 6),
         ('tcp_force', 6), ('ft_raw', 6), ('wrench_point', 6), ('err', 6), ('q', 6),
-        ('k_scale', 1), ('sel', 6), ('loop_dt', 1), ('seg', 1), ('rep', 1), ('phase', 1)]
+        ('k_scale', 1), ('sel', 6), ('loop_dt', 1), ('seg', 1), ('rep', 1), ('phase', 1), ('ff_gain', 2)]
 NCOL = sum(w for _, w in COLS)
 NAN6 = np.full(6, np.nan)
 
@@ -635,7 +649,8 @@ class Session:
             v_cmd = NAN6
         raw = self.recv.getFtRawWrench() if self.has_raw else NAN6
         row = np.r_[now - self.t0, pose, target, twist, v_cmd, self.adm.v, wm, raw, info['w'],
-                    info['e'], self.recv.getActualQ(), self.k_scale, self.adm.sel, loop_dt, tag]
+                    info['e'], self.recv.getActualQ(), self.k_scale, self.adm.sel, loop_dt, tag,
+                    self.adm.ff_gain]
         if self.n == len(self.buf):
             self.buf = np.concatenate([self.buf, np.full_like(self.buf, np.nan)])
         self.buf[self.n] = row
@@ -1219,7 +1234,9 @@ def save_log(sess, args, meta, out):
 
 def load_log(path):
     z = np.load(path, allow_pickle=False)
-    d = {name: z[name] for name, _ in COLS}
+    n = len(z['t'])
+    d = {name: z[name] if name in z.files else np.full((n, w) if w > 1 else n, np.nan)   # older logs
+         for name, w in COLS}
     meta = {k: z[k] for k in z.files if not k.startswith('arg_') and k not in d and k != 'args_json'}
     return d, args_from_json(str(z['args_json'])), meta
 
