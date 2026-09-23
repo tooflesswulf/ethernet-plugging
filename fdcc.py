@@ -70,10 +70,7 @@ class ImpedanceParams:
 
     @classmethod
     def from_toml(cls, path=os.path.join(_HERE, 'fdcc.toml')):
-        try:
-            import tomllib
-        except ImportError:             # python < 3.11
-            import tomli as tomllib
+        import tomllib
         with open(path, 'rb') as f:
             c = tomllib.load(f)
         w, a, ff, lim = c['wrench'], c['admittance'], c['feedforward'], c['limits']
