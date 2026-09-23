@@ -265,6 +265,8 @@ velocity of the point at the base origin, which puts the compliance centre there
 | Fade trips at every stick start | the arm's own acceleration reads as ~5 N of resistance | slew-limit the stick (0.5 m/s², 2 rad/s²) |
 | False contact at tap start | same phantom force on a step start | ramp the approach (0.3 s) |
 | Hand push moved the equilibrium; arm ran to 80 mm/s | leash dragged the target after the arm, and the dragged velocity went into the feedforward | non-dragging leash; $V_t$ only from the stick |
+| Adaptive z-force (Triangle) made the arm go wild | old servoL PID set target z = actual z + kp·err + kd·d(err)/dt: a target that moves with the arm feeds forward, and the kd term turned force noise into target jumps | integrate the force error into the target, rate-limited (`[zforce]`) |
+| Scripted moves stall ~2 mm short of `move_to` tolerance | at teleop K the last mm close with D/K = 3.3 s (2 s rotation) | stiffen during scripted moves (`[scripted]`, via `env.set_gains`) |
 | Force "saturates" when pushing by hand | 25 N / 2 Nm input clamp | open: raise toward the abort limits if wanted |
 
 The M trade-off: lighter reacts to contact better but gives the 25 Hz loop through

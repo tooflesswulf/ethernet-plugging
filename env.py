@@ -143,6 +143,11 @@ class Env:
         self.rest_speed = np.array(rt['rest_speed'], float)
         self.ramp_timeout = rt['ramp_down_timeout_s']
         self.fdcc_halt = None            # reason string once an abort_wrench trip halts motion; see clear_halt()
+        self.scripted_gains = {'K': self.fdcc_cfg['scripted']['stiffness']}   # see set_gains()
+        self._gain_request = None        # applied by the control loop (imp is not thread-safe)
+        zf = self.fdcc_cfg['zforce']
+        self.zforce_gain, self.zforce_max_speed = zf['gain'], zf['max_speed']
+        self._zf_target = None           # adaptive z-force target, see zforce_target()
         self._stats_lock = threading.Lock()
         self._stats = self._new_stats()
         self._check_robot_config()
@@ -354,18 +359,20 @@ class Env:
         self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
         return self._force_filtered
 
-    _prev_force_err = 0.
-
-    def zforce_pid(self, actual_pose, filtered_force):
-        kp = .0007
-        kd = .00001
-        fz = filtered_force.z
-        force_err = fz - self.des_zforce
-        d_force_err = (force_err - self._prev_force_err) / self.dt
-        self._prev_force_err = force_err
-
-        zdes = actual_pose.z + kp * force_err + kd * d_force_err
-        return zdes
+    def zforce_target(self, target_z, filtered_force):
+        """
+        Adaptive z-force: integrate the force error into the z TARGET, rate-limited.
+        The old servoL PID returned actual z + kp*err + kd*d(err)/dt: under the admittance a
+        target built from the actual pose moves with the arm, its velocity feeds forward and
+        cancels the damping, and the kd term turned force noise into target jumps -- the arm
+        went wild on Triangle (logs-debug-fdcc/episode000003, 22.9 s).
+        """
+        if self._zf_target is None:
+            self._zf_target = target_z                  # continue from where the target was
+        err = filtered_force.z - self.des_zforce
+        rate = np.clip(self.zforce_gain * err, -self.zforce_max_speed, self.zforce_max_speed)
+        self._zf_target += rate * self.dt
+        return self._zf_target
     
     def _set_gripstate(self, gs):
         self.gripper_state = gs
@@ -422,6 +429,18 @@ class Env:
                 'v_max_mm_s': 1e3 * s['v_max'], 'vsat_pct': 100 * s['vsat'] / n, 'ff_min': s['ff_min'],
                 'state': last.get('state', '?')}
 
+    def set_gains(self, K=None, D=None, M=None, sel=None):
+        """
+        Change the admittance gains from the next control cycle (thread-safe; fdcc.Impedance
+        is only touched by _control_loop). Same forms as Impedance.set_gains; None keeps.
+        """
+        self._gain_request = {'K': K, 'D': D, 'M': M, 'sel': sel}
+
+    def restore_gains(self):
+        """Back to the fdcc.toml gains."""
+        p = self.imp.p
+        self.set_gains(K=p.K, D=p.D, M=p.M, sel=p.sel)
+
     def clear_halt(self):
         """Resume after an abort_wrench halt (the arm restarts tracking the current target)."""
         self.fdcc_halt = None
@@ -467,10 +486,17 @@ class Env:
 
     def _servo_loop(self, imp, wd):
         v_last, t_prev, was_stopped = np.zeros(6), None, False
+        self.restore_gains()                           # a previous run may have ended stiff
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
             now = time.perf_counter()
             state = 'ok'
+            req, self._gain_request = self._gain_request, None
+            if req is not None:
+                try:
+                    imp.set_gains(**req)
+                except ValueError as ex:
+                    print(f'\nset_gains ignored: {ex}')
             if self._zero_ft_request:
                 v_last = self._v_last = self._ramp_down(v_last)   # zero only at rest
                 self.ctrl.zeroFtSensor()
@@ -524,9 +550,9 @@ class Env:
             # adaptive z-force control
             # ----------------------------
             if self.adaptive_mode:
-                target = target._replace(z=self.zforce_pid(actual_pose, filtered_force))
+                target = target._replace(z=self.zforce_target(target.z, filtered_force))
             else:
-                self._prev_force_err = 0.
+                self._zf_target = None
 
             # ----------------------------
             # safety, then admittance -> speedL
