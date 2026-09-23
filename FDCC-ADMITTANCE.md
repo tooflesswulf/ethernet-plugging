@@ -113,6 +113,9 @@ g^{+} = \min\!\Big(\operatorname{clip}\big(1 + \tfrac{\langle F_{\text{half}},\,
 $$
 
 A negative pairing means resistance. The fade drops instantly and recovers slowly.
+$F$ in this pairing is a 5 Hz low-passed copy (`filter_hz`), not the 30 Hz one the
+dynamics use. With the fast one, the ~28 Hz force wobble after an impact kept the fade
+tripped, and the lost feedforward left a steady lag that kept the wobble going.
 
 **4. Dynamics.** $M, D, K$ are diagonal in the body coordinates of $c$, and $s$ is the
 stiffness-button scale:

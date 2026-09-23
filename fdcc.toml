@@ -32,6 +32,7 @@ stiff_gain = 5.0                        # [1/s] on stiff axes: v = v_t - stiff_g
 # D * v_t is a force in disguise; fade it when the environment resists the motion.
 release = [3.0, 0.3]                    # resisting [N, Nm] at which the feedforward is fully off
 recover_s = 0.3                         # drops instantly, recovers 0 -> 1 over this long (symmetric fade rang at 25 Hz)
+filter_hz = 5.0                         # low-pass on the force the fade reads; the ~28 Hz wobble after an impact kept it tripped
 
 [limits]
 speed = [0.08, 0.9]                     # norm clamp on commanded twist [m/s, rad/s]

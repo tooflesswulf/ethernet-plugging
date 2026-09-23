@@ -73,6 +73,7 @@ class ImpedanceParams:
     stiff_gain: float = 5.0
     ff_release: np.ndarray = field(default_factory=lambda: np.array([3.0, 0.3]))
     ff_recover: float = 0.3
+    ff_filter_hz: float = 0.0           # low-pass on the force the fade sees; 0 = off
     speed: np.ndarray = field(default_factory=lambda: np.array([0.08, 0.9]))
     accel: np.ndarray = field(default_factory=lambda: np.array([2.0, 4.0]))
 
@@ -89,7 +90,8 @@ class ImpedanceParams:
                    deadband=np.array(w['deadband'], float), clamp=np.array(w['clamp'], float),
                    K=_six(a['stiffness']), D=_six(a['damping']), M=_six(a['mass']), sel=_six(a['selection']),
                    stiff_gain=a['stiff_gain'], ff_release=np.array(ff['release'], float),
-                   ff_recover=ff['recover_s'], speed=np.array(lim['speed'], float),
+                   ff_recover=ff['recover_s'], ff_filter_hz=ff.get('filter_hz', 0.0),
+                   speed=np.array(lim['speed'], float),
                    accel=np.array(lim['accel'], float))
 
 
@@ -199,7 +201,9 @@ class Impedance:
         self.T_ec = _T(np.eye(3), self.p.compliance_point)           # TCP -> compliance frame
         self.Ad_ec = adjoint(self.T_ec)
         self.Ad_ec_inv = adjoint(_inv(self.T_ec))
-        self.alpha = 1.0 if self.p.lowpass_hz <= 0 else 1.0 - np.exp(-2 * np.pi * self.p.lowpass_hz * self.p.dt)
+        lp = lambda hz: 1.0 if hz <= 0 else 1.0 - np.exp(-2 * np.pi * hz * self.p.dt)
+        self.alpha = lp(self.p.lowpass_hz)
+        self.alpha_ff = lp(self.p.ff_filter_hz)
         self.K, self.D, self.M, self.sel = (_six(x) for x in (self.p.K, self.p.D, self.p.M, self.p.sel))
         self._check()
         self.reset()
@@ -208,6 +212,7 @@ class Impedance:
         """Zero the state. Call after any motion this object did not command."""
         self.V = np.zeros(6)            # commanded twist of c, body coordinates
         self.F_filt = None
+        self.F_ff = None                # slow copy of F for the fade
         self.g = np.ones(2)             # feedforward fade, [lin, ang]
         self.T_target_prev = None
         self.last = {}
@@ -253,6 +258,7 @@ class Impedance:
         F = adjoint(_inv(T_q) @ T_sc).T @ F_q
         self.F_filt = F if self.F_filt is None else self.F_filt + self.alpha * (F - self.F_filt)
         F = _clamp_halves(_deadband_halves(self.F_filt, *p.deadband), *p.clamp)
+        self.F_ff = F if self.F_ff is None else self.F_ff + self.alpha_ff * (F - self.F_ff)
 
         # 2. error and target twist, body at c
         T_cct = _inv(T_sc) @ T_sct
@@ -269,14 +275,19 @@ class Impedance:
         # compliance coordinates: body (tool axes) or base axes at c
         Q = np.eye(6) if p.frame == 'tool' else _B(R_sc)
         Fq, xq, Vtq, Vq = Q @ F, Q @ xi, Q @ Vt, Q @ self.V
+        Fff = Q @ self.F_ff
 
-        # 3. feedforward fade: instant drop, slow recovery
+        # 3. feedforward fade: instant drop, slow recovery. It reads a slow copy of F:
+        # an impact kicked the ~28 Hz mode, its force wobble (4 N rms) kept tripping
+        # the fade, the lost feedforward left a 10-40 mm lag, and that steady spring
+        # force held the deadband open so the mode kept going
+        # (logs-debug-fdcc/episode000001, 2026-09-23).
         Vff = Vtq.copy()
         for j, (sl, rel) in enumerate(((slice(0, 3), p.ff_release[0]), (slice(3, 6), p.ff_release[1]))):
             n = np.linalg.norm(Vff[sl])
             g = 1.0
             if rel > 0 and n > 0:
-                g = float(np.clip(1.0 + (Fq[sl] @ Vff[sl]) / (n * rel), 0.0, 1.0))
+                g = float(np.clip(1.0 + (Fff[sl] @ Vff[sl]) / (n * rel), 0.0, 1.0))
             if p.ff_recover > 0:
                 g = min(g, self.g[j] + dt / p.ff_recover)
             self.g[j] = g
