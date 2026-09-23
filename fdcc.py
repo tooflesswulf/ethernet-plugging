@@ -278,6 +278,23 @@ class Impedance:
             self.K, self.D, self.M, self.sel = old
             raise
 
+    def bumpless_target(self, pose, target, K_new):
+        """
+        Bumpless gain change: the target pose for which the spring force K xi is the same
+        under K_new as it is now, per axis of `frame` (xi scaled by K_old / K_new in log
+        coordinates, which is what the spring acts on). Call BEFORE set_gains(K=K_new).
+        Axes that are stiff, or whose new K is 0, keep their offset.
+        """
+        K_new = _six(K_new)
+        T_se, T_st = pose_to_T(pose), pose_to_T(target)
+        T_sc, T_sct = T_se @ self.T_ec, T_st @ self.T_ec
+        xi = se3_log(_inv(T_sc) @ T_sct)
+        Q = np.eye(6) if self.p.frame == 'tool' else _B(T_sc[:3, :3])
+        ok = (K_new > 0) & (self.sel != 0)
+        ratio = np.where(ok, self.K / np.where(ok, K_new, 1.0), 1.0)
+        T_new = T_sc @ se3_exp(Q.T @ (ratio * (Q @ xi))) @ _inv(self.T_ec)
+        return np.r_[T_new[:3, 3], _R_to_rotvec(T_new[:3, :3])]
+
     def _check(self):
         bad = (self.sel != 0) & (self.M + self.D * self.p.dt <= 0)
         if bad.any():

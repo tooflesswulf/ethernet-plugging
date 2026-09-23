@@ -514,12 +514,6 @@ class Env:
             t_start = self.ctrl.initPeriod()
             now = time.perf_counter()
             state = 'ok'
-            req, self._gain_request = self._gain_request, None
-            if req is not None:
-                try:
-                    imp.set_gains(**req)
-                except ValueError as ex:
-                    print(f'\nset_gains ignored: {ex}')
             if self._zero_ft_request:
                 v_last = self._v_last = self._ramp_down(v_last)   # zero only at rest
                 self.ctrl.zeroFtSensor()
@@ -527,6 +521,19 @@ class Env:
                 self._zero_ft_request = False
                 t_prev = None                                  # the pause is not a loop stall
             actual_pose = URPose(*self.recv.getActualTCPPose())
+            req, self._gain_request = self._gain_request, None
+            if req is not None:
+                # Bumpless: rescale the leashed target's offset so K*xi, the spring force
+                # the arm is balancing, is unchanged by the new K -- a bare K step moved
+                # the arm at scripted-move starts (logs-debug-fdcc/episode000004).
+                try:
+                    new = (imp.bumpless_target(actual_pose, self._leashed, req['K'])
+                           if req.get('K') is not None and self._leashed is not None else None)
+                    imp.set_gains(**req)
+                    if new is not None:
+                        self._leashed = new
+                except ValueError as ex:
+                    print(f'\nset_gains ignored: {ex}')
             actual_force = URPose(*self.recv.getActualTCPForce())
             filtered_force = URPose(*self.filter_force(actual_force))
             self.robot_obs.append(RobotObs(time=time.time() - self.t0,

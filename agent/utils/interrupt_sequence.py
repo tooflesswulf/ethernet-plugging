@@ -21,6 +21,19 @@ from util import URPose, interpolate
 from promise import Promise
 
 
+MIN_JERK_PEAK = 1.875          # peak / mean speed of the minimum-jerk profile
+
+
+def min_jerk(tau):
+    """
+    Minimum-jerk time scaling s(tau) = 10 tau^3 - 15 tau^4 + 6 tau^5 on [0, 1]: zero speed
+    and acceleration at both ends. A constant-speed line starts and stops the target at
+    full speed -- a step in the admittance's feedforward (jerk at scripted starts/ends).
+    """
+    tau = min(max(tau, 0.0), 1.0)
+    return tau ** 3 * (10 - 15 * tau + 6 * tau ** 2)
+
+
 def pose_error(p, q):
     """(position error [m], orientation error [rad]) between two 6-poses."""
     p, q = np.asarray(p, dtype=float), np.asarray(q, dtype=float)
@@ -204,9 +217,9 @@ class Step:
 class MotionStep(Step):
     """
     Drive the robot to a target pose: interpolates the command (linear
-    position, slerp orientation) from the start pose to the goal over a
-    duration set by `speed` (m/s) and `rot_speed` (rad/s), whichever takes
-    longer. The admittance is stiffened for the move (fdcc.toml [scripted])
+    position, slerp orientation) from the start pose to the goal with a
+    minimum-jerk profile whose PEAK speeds are `speed` (m/s) and `rot_speed`
+    (rad/s), whichever takes longer (about 1.9x a constant-speed move). The admittance is stiffened for the move (fdcc.toml [scripted])
     and restored when it finishes. Finishes when the measured pose converges (pos_tol meters,
     rot_tol radians) or `timeout` seconds elapse.
 
@@ -237,7 +250,9 @@ class MotionStep(Step):
             self.goal = self.target
         print(f'Moving robot to {self.goal} ...')
         dist, ang = pose_error(self.start_pose, self.goal)
-        self.duration = max(dist / self.speed, ang / self.rot_speed, 1e-6)
+        # Minimum-jerk profile peaks at 1.875x its mean speed: stretch the duration so
+        # `speed` / `rot_speed` remain the PEAK speeds (and stay under fdcc's speed clamp).
+        self.duration = MIN_JERK_PEAK * max(dist / self.speed, ang / self.rot_speed, 1e-6)
         # Stiffen the admittance for the move: at the teleop gains the last few mm
         # crawl in with a D/K = 3.3 s time constant against pos_tol (fdcc.toml [scripted]).
         self.env.set_gains(**self.env.scripted_gains)
@@ -252,7 +267,7 @@ class MotionStep(Step):
             self.env.restore_gains()
             return None
         grip = self.env.des_gripper_state if self.gripper_state is None else self.gripper_state
-        return interpolate(self.start_pose, self.goal, t / self.duration), grip, False, 0.
+        return interpolate(self.start_pose, self.goal, min_jerk(t / self.duration)), grip, False, 0.
 
 
 class GripperStep(Step):
