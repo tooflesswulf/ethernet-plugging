@@ -192,7 +192,8 @@ def build_parser():
     g.add_argument('--f-abort', type=float, default=45.0, help='stop the run above this |F| [N]')
     g.add_argument('--t-abort', type=float, default=5.0, help='stop the run above this |tau| [Nm]')
     g.add_argument('--leash', type=csv6, default=csv6('0.03,0.25'),
-                   help='max target-actual offset m, rad')
+                   help='teleop: the stick cannot push the target further than this from the arm [m, rad]. '
+                        'It never drags the target after the arm')
     g.add_argument('--max-drift', type=float, default=0.25,
                    help='stop the run if the TCP gets this far from where it started [m]')
     g.add_argument('--speedl-cycles', type=float, default=1,
@@ -756,8 +757,17 @@ def mode_teleop(sess, args, io):
                 print('\nzeroing F/T -- hands off, out of contact')
                 sess.zero()
                 print('F/T zeroed')
-            leash(iface.targ_pose, pose, args.leash[0], args.leash[3])
-            # after the leash: a target held back by it is not moving, so feeds nothing forward
+            # Leash: stop the STICK winding the target away from the arm, but never
+            # drag the target after the arm. Dragging moved the equilibrium when the
+            # arm was pushed by hand, and the dragged target's velocity went into the
+            # feedforward, cancelled the damping and ran the arm to --vmax, 80 mm/s
+            # (fdcc-teleop-20260922-174455).
+            e0, e1 = pose_error(before, pose), pose_error(iface.targ_pose, pose)
+            for sl, lim in ((slice(0, 3), args.leash[0]), (slice(3, 6), args.leash[3])):
+                if np.linalg.norm(e1[sl]) > lim and np.linalg.norm(e1[sl]) > np.linalg.norm(e0[sl]):
+                    iface.targ_pose[sl] = before[sl]
+                    v_slew[sl] = 0.0
+            # only the stick's own motion of the target feeds forward
             vt = twist_between(before, iface.targ_pose, every * dt)
         pose, twist, wm, info = sess.cycle(iface.targ_pose, vt)
         if i % int(args.hz / 5) == 0:
