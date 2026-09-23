@@ -135,7 +135,9 @@ class Env:
             print(f'WARNING: fdcc.toml rate {1 / self.imp.p.dt:.0f} Hz != servo_frequency {servo_frequency} Hz')
         abort = np.array(self.fdcc_cfg['limits']['abort_wrench'], float)
         self.abort_wrench = np.where(abort > 0, abort, np.inf)          # 0 or inf = no limit
-        self.leash = np.array(self.fdcc_cfg['teleop']['leash'], float)  # diagnostics only, see fdcc_stats()
+        self.leash_N = np.array(self.fdcc_cfg['teleop']['leash_N'], float)  # [N, Nm], see _leash()
+        self._leashed = None             # the leashed target fed to fdcc (None = restart from the arm)
+        self._leash_held = False
         rt = self.fdcc_cfg['rtde']
         self.speedl_time = rt['speedl_time_cycles'] * self.imp.p.dt       # ONE cycle: 8 ms buzzed at 125 Hz
         self.watchdog_hz = rt['watchdog_hz']
@@ -410,7 +412,7 @@ class Env:
           hz, dt_max_ms, work_max_ms, slow  : loop rate, worst period, worst compute, cycles > 2 dt
           F, tau / F_max, tau_max           : raw getActualTCPForce now / window max
           F_c                               : processed wrench at c (after filter/deadband/clamp)
-          e_mm, e_deg / leash_pct           : error of the target FDCC tracks; % of cycles beyond teleop.leash
+          e_mm, e_deg / leash_pct           : error of the target FDCC tracks; % of cycles the leash held it back
           v_mm_s, v_max_mm_s / vsat_pct     : commanded speed now / max; % of cycles at the speed clamp
           ff_min                            : lowest feedforward fade (1 = full feedforward)
           state                             : 'ok', 'PSTOP', or 'HALT: <reason>'
@@ -441,6 +443,27 @@ class Env:
         p = self.imp.p
         self.set_gains(K=p.K, D=p.D, M=p.M, sel=p.sel)
 
+    def _reset_ctrl(self):
+        """Controller from rest; the leashed target restarts from the arm."""
+        self.imp.reset()
+        self._leashed = None
+
+    def _leash(self, actual_pose, des_pose):
+        """
+        Non-dragging leash in NEWTONS: the target chases des_pose (at most the speed limit
+        per cycle) but may not get further from the arm than leash_N / K -- the spring then
+        pushes at most leash_N, the only push left in contact once the feedforward fades.
+        Uses the current K (scripted gains shrink the distance), the largest K of each half
+        so no axis exceeds the limit. It never drags the target after the arm, so pushing
+        the arm by hand does not move the equilibrium. See fdcc.leash_step.
+        """
+        K = self.imp.K
+        radius = self.leash_N / np.array([K[:3].max(), K[3:].max()])
+        prev = np.asarray(actual_pose if self._leashed is None else self._leashed, float)
+        self._leashed, held = fdcc.leash_step(prev, des_pose, actual_pose, radius, self.imp.p.speed * self.dt)
+        self._leash_held = any(held)
+        return URPose(*self._leashed)
+
     def clear_halt(self):
         """Resume after an abort_wrench halt (the arm restarts tracking the current target)."""
         self.fdcc_halt = None
@@ -470,7 +493,7 @@ class Env:
 
     def _control_loop(self):
         imp = self.imp
-        imp.reset()
+        self._reset_ctrl()
         wd = self.watchdog_hz > 0
         if wd:
             self.ctrl.setWatchdog(self.watchdog_hz)     # speedL keeps the last velocity if this thread stalls
@@ -500,7 +523,7 @@ class Env:
             if self._zero_ft_request:
                 v_last = self._v_last = self._ramp_down(v_last)   # zero only at rest
                 self.ctrl.zeroFtSensor()
-                imp.reset()
+                self._reset_ctrl()
                 self._zero_ft_request = False
                 t_prev = None                                  # the pause is not a loop stall
             actual_pose = URPose(*self.recv.getActualTCPPose())
@@ -543,7 +566,7 @@ class Env:
             if self.last_step_t > 0:
                 # Received at least 1 input
                 des_pose = self.interpolate()
-            target = des_pose                                                   # FDCC: track the target itself
+            target = self._leash(actual_pose, des_pose)                         # FDCC: non-dragging leash, in newtons
             # target = clamp(actual_pose, des_pose, self.max_position_step, self.max_orientation_step)  # old servoL leash: DRAGS the target after the arm
 
             # ----------------------------
@@ -574,10 +597,10 @@ class Env:
                     self.ctrl.reuploadScript()
                 if wd:
                     self.ctrl.setWatchdog(self.watchdog_hz)
-                imp.reset()
+                self._reset_ctrl()
                 was_stopped, state = False, 'resumed after pstop'
             if stopped or self.fdcc_halt is not None:
-                imp.reset()
+                self._reset_ctrl()
                 v_last = np.zeros(6)
                 if not stopped:
                     state = f'HALT: {self.fdcc_halt}'
@@ -605,7 +628,7 @@ class Env:
                     s['slow'] += (now - t_prev) > 2 * self.dt
                 s['work_max'] = max(s['work_max'], work)
                 s['f_max'], s['t_max'] = max(s['f_max'], f), max(s['t_max'], tq)
-                s['leash'] += (e_lin > self.leash[0]) or (e_ang > self.leash[1])
+                s['leash'] += self._leash_held
                 s['e_max'] = np.maximum(s['e_max'], [e_lin, e_ang])
                 s['vsat'] += v_lin > 0.999 * imp.p.speed[0]
                 s['v_max'] = max(s['v_max'], v_lin)

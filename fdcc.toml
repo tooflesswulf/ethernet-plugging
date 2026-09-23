@@ -61,4 +61,5 @@ ramp_down_timeout_s = 0.5
 rest_speed = [0.0005, 0.005]            # "at rest" for ramp-down [m/s, rad/s]
 
 [teleop]
-leash = [0.03, 0.25]                    # env diagnostics: % of cycles the target is further than this from the arm [m, rad]
+leash_N = [30.0, 2.5]                   # [N, Nm] the most the spring may push: the stick target is held within leash_N / K of the arm.
+                                        # 30 N = 100 mm at K 300; the old 30 mm leash capped insertion at ~9 N

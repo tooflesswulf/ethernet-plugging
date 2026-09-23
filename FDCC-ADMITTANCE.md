@@ -168,7 +168,12 @@ between updates.
    $V_{\text{slew}} \leftarrow V_{\text{slew}} + \operatorname{clamp}_{\|\cdot\|}(V_{\text{stick}} - V_{\text{slew}},\ a_{\text{stick}}\,h)$,
    with $a_{\text{stick}}$ = 0.5 m/s², 2 rad/s² (tested),
    then $T_{\text{new}} = T_{sc^\star}\exp(h\hat V_{\text{slew}})$.
-3. **Non-dragging leash.** Let $\xi_{\text{new}} = \log(T_{sc}^{-1}T_{\text{new}})^\vee$.
+3. **Non-dragging leash**, limit in newtons: the leash distance is
+   `leash_N / K` per half (largest K of the half), so the spring can push at most
+   `leash_N`; in contact that is the only push left once the feedforward fades. A fixed
+   30 mm at K 300 capped insertion at ~9 N. (`env.py` implements this as a target that
+   chases `des_pose` under that limit, `fdcc.leash_step`.)
+   Let $\xi_{\text{new}} = \log(T_{sc}^{-1}T_{\text{new}})^\vee$.
    If the linear half has norm above `leash[0]` **and** larger than before this update,
    undo that half of the step and zero that half of $V_{\text{slew}}$. Do the same for
    the angular half with `leash[1]`. Never move the target toward the arm.
