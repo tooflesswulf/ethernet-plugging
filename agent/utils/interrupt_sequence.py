@@ -160,6 +160,7 @@ class InterruptSequence:
 
     def _uninstall(self):
         rexec, iface = self.rexec, self.rexec.iface
+        rexec.env.restore_gains()          # in case a MotionStep was cut short
         del rexec.get_action
         rexec._interrupt_sequence = None
 
@@ -205,8 +206,8 @@ class MotionStep(Step):
     Drive the robot to a target pose: interpolates the command (linear
     position, slerp orientation) from the start pose to the goal over a
     duration set by `speed` (m/s) and `rot_speed` (rad/s), whichever takes
-    longer; the control loop's clamp() still limits per-servo step size for
-    safety. Finishes when the measured pose converges (pos_tol meters,
+    longer. The admittance is stiffened for the move (fdcc.toml [scripted])
+    and restored when it finishes. Finishes when the measured pose converges (pos_tol meters,
     rot_tol radians) or `timeout` seconds elapse.
 
     With `relative=True`, `target_pose` is a delta [dx, dy, dz, drx, dry, drz]
@@ -237,13 +238,18 @@ class MotionStep(Step):
         print(f'Moving robot to {self.goal} ...')
         dist, ang = pose_error(self.start_pose, self.goal)
         self.duration = max(dist / self.speed, ang / self.rot_speed, 1e-6)
+        # Stiffen the admittance for the move: at the teleop gains the last few mm
+        # crawl in with a D/K = 3.3 s time constant against pos_tol (fdcc.toml [scripted]).
+        self.env.set_gains(**self.env.scripted_gains)
 
     def tick(self, t):
         pos_err, rot_err = pose_error(self.actual_pose(), self.goal)
         if pos_err < self.pos_tol and rot_err < self.rot_tol:
+            self.env.restore_gains()
             return None
         if t > self.timeout:
             print(f'motion to {self.goal} timed out (pos_err={pos_err:.4f} m, rot_err={rot_err:.4f} rad)')
+            self.env.restore_gains()
             return None
         grip = self.env.des_gripper_state if self.gripper_state is None else self.gripper_state
         return interpolate(self.start_pose, self.goal, t / self.duration), grip, False, 0.
