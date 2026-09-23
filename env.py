@@ -147,6 +147,7 @@ class Env:
         self.fdcc_halt = None            # reason string once an abort_wrench trip halts motion; see clear_halt()
         self.scripted_gains = {'K': self.fdcc_cfg['scripted']['stiffness']}   # see set_gains()
         self._gain_request = None        # applied by the control loop (imp is not thread-safe)
+        self._reanchor_request = False   # see reanchor()
         zf = self.fdcc_cfg['zforce']
         self.zforce_gain, self.zforce_max_speed = zf['gain'], zf['max_speed']
         self._zf_target = None           # adaptive z-force target, see zforce_target()
@@ -438,6 +439,14 @@ class Env:
         """
         self._gain_request = {'K': K, 'D': D, 'M': M, 'sel': sel}
 
+    def reanchor(self):
+        """
+        Restart the leashed target at the arm's pose on the next cycle (thread-safe).
+        For scripted starts: MotionStep begins at the arm, and walking the stale teleop
+        target back to it at the speed limit was fed forward as a lurch (episode000005, 25.3 s).
+        """
+        self._reanchor_request = True
+
     def restore_gains(self):
         """Back to the fdcc.toml gains."""
         p = self.imp.p
@@ -521,6 +530,10 @@ class Env:
                 self._zero_ft_request = False
                 t_prev = None                                  # the pause is not a loop stall
             actual_pose = URPose(*self.recv.getActualTCPPose())
+            if self._reanchor_request:
+                self._reanchor_request = False
+                self._leashed = np.asarray(actual_pose, float)
+                imp.note_target_jump(self._leashed)
             req, self._gain_request = self._gain_request, None
             if req is not None:
                 # Bumpless: rescale the leashed target's offset so K*xi, the spring force
@@ -532,6 +545,7 @@ class Env:
                     imp.set_gains(**req)
                     if new is not None:
                         self._leashed = new
+                        imp.note_target_jump(new)       # a rescale, not a velocity
                 except ValueError as ex:
                     print(f'\nset_gains ignored: {ex}')
             actual_force = URPose(*self.recv.getActualTCPForce())

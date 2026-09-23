@@ -278,11 +278,21 @@ class Impedance:
             self.K, self.D, self.M, self.sel = old
             raise
 
+    def note_target_jump(self, target):
+        """
+        Tell the controller the target was MOVED on purpose (bumpless rescale, re-anchor),
+        so the finite-difference target twist does not read the jump as velocity and feed
+        it forward (it did: a one-cycle bumpless jump became an 80 mm/s feedforward kick,
+        logs-debug-fdcc/episode000005 12.7 s).
+        """
+        self.T_target_prev = pose_to_T(target)
+
     def bumpless_target(self, pose, target, K_new):
         """
         Bumpless gain change: the target pose for which the spring force K xi is the same
         under K_new as it is now, per axis of `frame` (xi scaled by K_old / K_new in log
-        coordinates, which is what the spring acts on). Call BEFORE set_gains(K=K_new).
+        coordinates, which is what the spring acts on). Call BEFORE set_gains(K=K_new),
+        then note_target_jump() with the result.
         Axes that are stiff, or whose new K is 0, keep their offset.
         """
         K_new = _six(K_new)

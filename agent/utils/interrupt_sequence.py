@@ -253,13 +253,17 @@ class MotionStep(Step):
         # Minimum-jerk profile peaks at 1.875x its mean speed: stretch the duration so
         # `speed` / `rot_speed` remain the PEAK speeds (and stay under fdcc's speed clamp).
         self.duration = MIN_JERK_PEAK * max(dist / self.speed, ang / self.rot_speed, 1e-6)
-        # Stiffen the admittance for the move: at the teleop gains the last few mm
-        # crawl in with a D/K = 3.3 s time constant against pos_tol (fdcc.toml [scripted]).
+        # The move starts at the arm: restart the leashed target there (else the stale
+        # teleop target is walked back and fed forward), then stiffen -- at the teleop
+        # gains the last mm crawl in with D/K = 3.3 s against pos_tol (fdcc.toml [scripted]).
+        self.env.reanchor()
         self.env.set_gains(**self.env.scripted_gains)
 
     def tick(self, t):
         pos_err, rot_err = pose_error(self.actual_pose(), self.goal)
-        if pos_err < self.pos_tol and rot_err < self.rot_tol:
+        # Only after the profile has finished: converging inside the tolerance while the
+        # target is still decelerating stopped it in one tick -- a clunk every transition.
+        if t >= self.duration and pos_err < self.pos_tol and rot_err < self.rot_tol:
             self.env.restore_gains()
             return None
         if t > self.timeout:
