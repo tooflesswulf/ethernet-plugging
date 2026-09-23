@@ -14,6 +14,7 @@ import os
 from net_isup import is_network_up
 from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
 from camera import Camera
+import fdcc
 import wsg
 
 # Gripper command states (des_gripper_state / gripper_state)
@@ -123,6 +124,28 @@ class Env:
         self.max_orientation_step = max_orientation_step
         self.lookahead_time = lookahead_time
         self.servo_gain = servo_gain
+
+        # ============================================================
+        # FDCC admittance over speedL (fdcc.py, numbers in fdcc.toml)
+        # ============================================================
+        self.fdcc_cfg = fdcc.load_config()
+        self.imp = fdcc.Impedance(fdcc.ImpedanceParams.from_config(self.fdcc_cfg),
+                                  tcp_offset=self.ctrl.getTCPOffset())
+        if abs(self.imp.p.dt - self.dt) > 1e-9:
+            print(f'WARNING: fdcc.toml rate {1 / self.imp.p.dt:.0f} Hz != servo_frequency {servo_frequency} Hz')
+        abort = np.array(self.fdcc_cfg['limits']['abort_wrench'], float)
+        self.abort_wrench = np.where(abort > 0, abort, np.inf)          # 0 or inf = no limit
+        self.leash = np.array(self.fdcc_cfg['teleop']['leash'], float)  # diagnostics only, see fdcc_stats()
+        rt = self.fdcc_cfg['rtde']
+        self.speedl_time = rt['speedl_time_cycles'] * self.imp.p.dt       # ONE cycle: 8 ms buzzed at 125 Hz
+        self.watchdog_hz = rt['watchdog_hz']
+        self.stop_decel = rt['stop_decel']
+        self.rest_speed = np.array(rt['rest_speed'], float)
+        self.ramp_timeout = rt['ramp_down_timeout_s']
+        self.fdcc_halt = None            # reason string once an abort_wrench trip halts motion; see clear_halt()
+        self._stats_lock = threading.Lock()
+        self._stats = self._new_stats()
+        self._check_robot_config()
 
         print("Initializing environment...")
         print(f"Robot IP:   {robot_ip}")
@@ -258,6 +281,10 @@ class Env:
         # ============================================================
         # Move robot home (blocking)
         # ============================================================
+        # _control_loop stops the RTDE script on exit, which also clears its
+        # watchdog -- otherwise this blocking moveL would trip it (C207A0).
+        if not self.ctrl.isProgramRunning():
+            self.ctrl.reuploadScript()
         self.ctrl.moveL(home_pose, 0.1, 0.1)
         self.des_pose = home_pose  # Ensure robot doesn't move after homing
         self.last_step_t = -1
@@ -353,12 +380,103 @@ class Env:
         """
         self._zero_ft_request = True
 
+    # ================================================================
+    # FDCC helpers
+    # ================================================================
+    def _check_robot_config(self):
+        """Warn if the controller's payload / TCP differ from fdcc.toml (an unsaved pendant edit once did)."""
+        r = self.fdcc_cfg['robot']
+        mass, tcp = self.recv.getPayload(), np.array(self.ctrl.getTCPOffset())
+        if abs(mass - r['payload_kg']) > r['payload_tolerance_kg']:
+            print(f'WARNING: payload {mass:.3f} kg, fdcc.toml says {r["payload_kg"]:.3f}')
+        if np.linalg.norm(tcp - np.array(r['tcp_offset'])) > r['tcp_tolerance_m']:
+            print(f'WARNING: TCP offset {np.round(tcp, 4)}, fdcc.toml says {r["tcp_offset"]}')
+
+    def _new_stats(self):
+        return {'n': 0, 't0': None, 't1': None, 'dt_max': 0.0, 'work_max': 0.0, 'slow': 0,
+                'f_max': 0.0, 't_max': 0.0, 'leash': 0, 'e_max': np.zeros(2), 'vsat': 0,
+                'v_max': 0.0, 'ff_min': 1.0, 'last': {}}
+
+    def fdcc_stats(self):
+        """
+        Control-loop diagnostics since the last call (then reset), for printing.
+          hz, dt_max_ms, work_max_ms, slow  : loop rate, worst period, worst compute, cycles > 2 dt
+          F, tau / F_max, tau_max           : raw getActualTCPForce now / window max
+          F_c                               : processed wrench at c (after filter/deadband/clamp)
+          e_mm, e_deg / leash_pct           : error of the target FDCC tracks; % of cycles beyond teleop.leash
+          v_mm_s, v_max_mm_s / vsat_pct     : commanded speed now / max; % of cycles at the speed clamp
+          ff_min                            : lowest feedforward fade (1 = full feedforward)
+          state                             : 'ok', 'PSTOP', or 'HALT: <reason>'
+        """
+        with self._stats_lock:
+            s, self._stats = self._stats, self._new_stats()
+        n, last = max(s['n'], 1), s['last']
+        span = (s['t1'] - s['t0']) if s['n'] > 1 else float('nan')
+        return {'hz': (s['n'] - 1) / span if s['n'] > 1 else float('nan'),
+                'dt_max_ms': 1e3 * s['dt_max'], 'work_max_ms': 1e3 * s['work_max'], 'slow': s['slow'],
+                'F': last.get('F', np.nan), 'tau': last.get('tau', np.nan),
+                'F_max': s['f_max'], 'tau_max': s['t_max'], 'F_c': last.get('F_c', np.nan),
+                'e_mm': last.get('e_mm', np.nan), 'e_deg': last.get('e_deg', np.nan),
+                'e_max_mm': 1e3 * s['e_max'][0], 'e_max_deg': np.degrees(s['e_max'][1]),
+                'leash_pct': 100 * s['leash'] / n, 'v_mm_s': last.get('v_mm_s', np.nan),
+                'v_max_mm_s': 1e3 * s['v_max'], 'vsat_pct': 100 * s['vsat'] / n, 'ff_min': s['ff_min'],
+                'state': last.get('state', '?')}
+
+    def clear_halt(self):
+        """Resume after an abort_wrench halt (the arm restarts tracking the current target)."""
+        self.fdcc_halt = None
+
+    def _ramp_down(self, v):
+        """
+        Bring the arm to rest through speedL, feeding the watchdog every cycle.
+        speedStop()/moveL from speed block the host long enough to trip the watchdog.
+        """
+        dt, a = self.imp.p.dt, self.imp.p.accel
+        v = np.array(v, float)
+        t_end = time.perf_counter() + self.ramp_timeout
+        while time.perf_counter() < t_end:
+            t_start = self.ctrl.initPeriod()
+            if self.recv.isProtectiveStopped() or self.recv.isEmergencyStopped():
+                break
+            for sl, am in ((slice(0, 3), a[0]), (slice(3, 6), a[1])):
+                n = np.linalg.norm(v[sl])
+                v[sl] *= max(n - am * dt, 0.0) / n if n > 0 else 0.0
+            if self.ctrl.speedL(v.tolist(), a[0], self.speedl_time) is False:
+                break
+            self.ctrl.waitPeriod(t_start)
+            tw = np.array(self.recv.getActualTCPSpeed())
+            if not v.any() and np.linalg.norm(tw[:3]) < self.rest_speed[0] and np.linalg.norm(tw[3:]) < self.rest_speed[1]:
+                break
+        return np.zeros(6)
+
     def _control_loop(self):
+        imp = self.imp
+        imp.reset()
+        wd = self.watchdog_hz > 0
+        if wd:
+            self.ctrl.setWatchdog(self.watchdog_hz)     # speedL keeps the last velocity if this thread stalls
+        self._v_last = np.zeros(6)
+        try:
+            self._servo_loop(imp, wd)
+        finally:
+            try:
+                self._ramp_down(self._v_last)
+                self.ctrl.speedStop(self.stop_decel)
+            finally:
+                self.ctrl.stopScript()                  # also clears the watchdog; reset() re-uploads
+
+    def _servo_loop(self, imp, wd):
+        v_last, t_prev, was_stopped = np.zeros(6), None, False
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
+            now = time.perf_counter()
+            state = 'ok'
             if self._zero_ft_request:
+                v_last = self._v_last = self._ramp_down(v_last)   # zero only at rest
                 self.ctrl.zeroFtSensor()
+                imp.reset()
                 self._zero_ft_request = False
+                t_prev = None                                  # the pause is not a loop stall
             actual_pose = URPose(*self.recv.getActualTCPPose())
             actual_force = URPose(*self.recv.getActualTCPForce())
             filtered_force = URPose(*self.filter_force(actual_force))
@@ -394,34 +512,83 @@ class Env:
                         ))
 
             # ----------------------------
-            # blend + servo
+            # blend -> admittance target
             # ----------------------------
             if self.last_step_t > 0:
                 # Received at least 1 input
                 des_pose = self.interpolate()
-            command = clamp(
-                actual_pose,
-                des_pose,
-                self.max_position_step,
-                self.max_orientation_step,
-            )
+            target = des_pose                                                   # FDCC: track the target itself
+            # target = clamp(actual_pose, des_pose, self.max_position_step, self.max_orientation_step)  # old servoL leash: DRAGS the target after the arm
 
             # ----------------------------
             # adaptive z-force control
             # ----------------------------
             if self.adaptive_mode:
-                command = command._replace(z=self.zforce_pid(actual_pose, filtered_force))
+                target = target._replace(z=self.zforce_pid(actual_pose, filtered_force))
             else:
                 self._prev_force_err = 0.
 
-            self.ctrl.servoL(
-                command,
-                0.0,
-                0.0,
-                self.dt,
-                self.lookahead_time,
-                self.servo_gain,
-            )
+            # ----------------------------
+            # safety, then admittance -> speedL
+            # ----------------------------
+            W = np.asarray(actual_force, float)
+            f, tq = np.linalg.norm(W[:3]), np.linalg.norm(W[3:])
+            stopped = self.recv.isProtectiveStopped() or self.recv.isEmergencyStopped()
+            if self.fdcc_halt is None and (f > self.abort_wrench[0] or tq > self.abort_wrench[1]):
+                self.fdcc_halt = f'|F| {f:.1f} N, |tau| {tq:.2f} Nm over abort_wrench'
+                print(f'\nFDCC HALT: {self.fdcc_halt} -- env.clear_halt() to resume')
+                v_last = self._ramp_down(v_last)
+            if stopped:
+                was_stopped = True
+                state = 'PSTOP'
+            elif was_stopped:
+                # Cleared on the pendant: the RTDE script died with the stop. Start it again
+                # (a fresh script has no watchdog) and restart from rest.
+                if not self.ctrl.isProgramRunning():
+                    self.ctrl.reuploadScript()
+                if wd:
+                    self.ctrl.setWatchdog(self.watchdog_hz)
+                imp.reset()
+                was_stopped, state = False, 'resumed after pstop'
+            if stopped or self.fdcc_halt is not None:
+                imp.reset()
+                v_last = np.zeros(6)
+                if not stopped:
+                    state = f'HALT: {self.fdcc_halt}'
+                    if wd:
+                        self.ctrl.kickWatchdog()        # holding still, not stalled
+            else:
+                v_last = imp.step(actual_pose, W, target)
+                self.ctrl.speedL(v_last.tolist(), imp.p.accel[0], self.speedl_time)
+
+            # ----------------------------
+            # diagnostics (read with fdcc_stats())
+            # ----------------------------
+            xi = imp.last.get('xi', np.zeros(6))
+            e_lin, e_ang = np.linalg.norm(xi[:3]), np.linalg.norm(xi[3:])
+            v_lin = np.linalg.norm(v_last[:3])
+            work = time.perf_counter() - now
+            with self._stats_lock:
+                s = self._stats
+                if s['t0'] is None:
+                    s['t0'] = now
+                s['t1'] = now
+                s['n'] += 1
+                if t_prev is not None:
+                    s['dt_max'] = max(s['dt_max'], now - t_prev)
+                    s['slow'] += (now - t_prev) > 2 * self.dt
+                s['work_max'] = max(s['work_max'], work)
+                s['f_max'], s['t_max'] = max(s['f_max'], f), max(s['t_max'], tq)
+                s['leash'] += (e_lin > self.leash[0]) or (e_ang > self.leash[1])
+                s['e_max'] = np.maximum(s['e_max'], [e_lin, e_ang])
+                s['vsat'] += v_lin > 0.999 * imp.p.speed[0]
+                s['v_max'] = max(s['v_max'], v_lin)
+                s['ff_min'] = min(s['ff_min'], float(np.min(imp.g)))
+                s['last'] = {'F': f, 'tau': tq, 'F_c': float(np.linalg.norm(imp.last.get('F_c', np.zeros(6))[:3])),
+                             'e_mm': 1e3 * e_lin, 'e_deg': np.degrees(e_ang), 'v_mm_s': 1e3 * v_lin,
+                             'state': state}
+            t_prev = now
+            self._v_last = v_last
 
             self.ctrl.waitPeriod(t_start)
 

@@ -22,7 +22,7 @@ NOT handled here (the caller's job; see FDCC-ADMITTANCE.md §7-8):
     dragged target's velocity feeds forward, cancels the damping and ran the arm to
     vmax. env.py's clamp() (8 mm / 0.05 rad from actual) drags -- don't feed its output
     here as the target;
-  * aborts (|F| > 45 N, |tau| > 5 Nm, drift), protective-stop checks, F/T zeroing;
+  * wrench aborts ([limits] abort_wrench), protective-stop checks, F/T zeroing;
   * stopping: ramp the command to zero through speedL, THEN speedStop. With the RTDE
     watchdog armed, speedStop-from-speed and moveL block the host and trip C207A0;
   * speedL's time argument must be one cycle: 8 ms fed an 8 ms staircase (125 Hz buzz).
@@ -34,6 +34,14 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(_HERE, 'fdcc.toml')
+
+
+def load_config(path=CONFIG_PATH):
+    """The whole fdcc.toml as a dict (the caller needs [limits], [rtde], [teleop] too)."""
+    import tomllib
+    with open(path, 'rb') as f:
+        return tomllib.load(f)
 
 
 def _six(x):
@@ -69,10 +77,11 @@ class ImpedanceParams:
     accel: np.ndarray = field(default_factory=lambda: np.array([2.0, 4.0]))
 
     @classmethod
-    def from_toml(cls, path=os.path.join(_HERE, 'fdcc.toml')):
-        import tomllib
-        with open(path, 'rb') as f:
-            c = tomllib.load(f)
+    def from_toml(cls, path=CONFIG_PATH):
+        return cls.from_config(load_config(path))
+
+    @classmethod
+    def from_config(cls, c):
         w, a, ff, lim = c['wrench'], c['admittance'], c['feedforward'], c['limits']
         return cls(dt=1.0 / c['robot']['rate_hz'], tcp_offset=np.array(c['robot']['tcp_offset'], float),
                    compliance_point=np.array(a['compliance_point'], float), frame=a['frame'],

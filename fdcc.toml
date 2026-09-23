@@ -1,14 +1,12 @@
 # FDCC-style Cartesian admittance over speedL, UR16e.
-# Every number the controller needs. The algorithm is in FDCC-ADMITTANCE.md.
+# Only keys read by fdcc.py / env.py. The algorithm, and the measurements behind
+# these numbers, are in FDCC-ADMITTANCE.md (§11 for the measured facts).
 # Units SI, angles in radians. [trans, rot] pairs are [m-based, rad-based].
-# These are the defaults of test-fdcc-admittance.py as of 2026-09-22.
 
 [robot]
-ip = "192.168.0.100"
 rate_hz = 500                           # control loop; dt = 0.002 s
-tcp_offset = [0.0, 0.0, 0.1537, 0.0, 0.0, 0.0]   # check getTCPOffset() at startup, refuse on mismatch
-payload_kg = 1.551                      # check getPayload() at startup; tolerance below
-payload_cog = [0.006, 0.006, 0.048]
+tcp_offset = [0.0, 0.0, 0.1537, 0.0, 0.0, 0.0]   # compared with getTCPOffset() at startup
+payload_kg = 1.551                      # compared with getPayload() at startup
 payload_tolerance_kg = 0.02             # an unsaved pendant edit once left 1.67 kg for a week
 tcp_tolerance_m = 0.001
 
@@ -20,17 +18,15 @@ sign = 1.0
 lowpass_hz = 30.0                       # first order. 2nd-order at 10-12 Hz cut 25 Hz but its lag made contact worse
 deadband = [1.5, 0.15]                  # soft deadband on |F| [N], |tau| [Nm]; F/T error is ~1.8 N median
 clamp = [25.0, 2.0]                     # input clamp [N, Nm]. Hand pushes reach ~39 N and feel "saturated" here
-zero_settle_s = 0.3                     # wait before and after zeroFtSensor; zero only out of contact
 
 [admittance]
 frame = "tool"                          # K, D, M, selection act on TCP axes ("base" = fixed axes)
 compliance_point = [0.0, 0.0, 0.0]      # in TCP frame [m]
 stiffness = [300.0, 10.0]               # K  [N/m, Nm/rad]
 damping = [1000.0, 20.0]                # D  [N s/m, Nm s/rad]; 1/D = 1 mm/s per N free-space
-mass = [15.0, 0.6]                      # M  [kg, kg m^2]. See [measured] mode_25hz: 10 kg / 0.3 kg m^2 rang
+mass = [15.0, 0.6]                      # M  [kg, kg m^2]. 10 kg / 0.3 kg m^2 rang at 25 Hz (md §8, §11)
 selection = [1, 1, 1, 1, 1, 1]          # 1 compliant, 0 stiff (position tracking)
 stiff_gain = 5.0                        # [1/s] on stiff axes: v = v_t - stiff_gain * e
-stiffness_button_factor = 1.5           # Dpad up/down: K *= f, D *= sqrt(f)
 
 [feedforward]
 # D * v_t is a force in disguise; fade it when the environment resists the motion.
@@ -39,43 +35,15 @@ recover_s = 0.3                         # drops instantly, recovers 0 -> 1 over 
 
 [limits]
 speed = [0.08, 0.9]                     # norm clamp on commanded twist [m/s, rad/s]
-accel = [2.0, 4.0]                      # norm clamp on change of commanded twist [m/s^2, rad/s^2]; 2 was clean in the tap test (0.5 only tried with the feedforward bug present)
-abort_wrench = [45.0, 5.0]              # stop the run above |F| [N], |tau| [Nm] (raw getActualTCPForce)
-max_drift_m = 0.25                      # stop the run if the TCP leaves a sphere around the start
+accel = [2.0, 4.0]                      # norm clamp on change of commanded twist [m/s^2, rad/s^2]; also speedL's acceleration argument
+abort_wrench = [inf, inf]               # halt above |F| [N], |tau| [Nm] (raw getActualTCPForce). inf (or 0) = no limit; tested value was [45.0, 5.0]
 
 [rtde]
 speedl_time_cycles = 1                  # time argument = 1 cycle. 4 cycles (8 ms) -> 125 Hz buzz on speed changes
-speedl_accel = 2.0                      # acceleration argument of speedL = limits.accel[0]
 watchdog_hz = 20.0                      # setWatchdog: host silence > 50 ms -> protective stop C207A0
 stop_decel = 1.0                        # speedStop(a) -- only ever called once the arm is already at rest
 ramp_down_timeout_s = 0.5
 rest_speed = [0.0005, 0.005]            # "at rest" for ramp-down [m/s, rad/s]
-idle_kick_period_s = 0.01               # while waiting/prompting with the watchdog armed
 
 [teleop]
-rate_hz = 100                           # DualSense / target update
-stick_speed = [0.08, 0.9]               # full-stick target speed [m/s, rad/s]
-stick_accel = [0.5, 2.0]                # slew limit on the target velocity [m/s^2, rad/s^2]
-leash = [0.03, 0.25]                    # stick may not push target further than this from the arm [m, rad]
-
-[tap]                                   # hard-surface approach test
-speeds_mm_s = [5, 10, 15, 20, 25]
-ramp_s = 0.3                            # ramp to approach speed; a step reads as false contact
-contact_N = 5.0
-press_N = 5.0                           # after contact the target sits press/K inside the surface
-hold_s = 2.0
-travel_m = 0.03
-
-[measured]
-# Facts, not settings. Logs are fdcc-*.npz in the repo.
-forcemode_gain_mm_s_per_N = 0.93        # UR forceMode baseline, centred on the flange
-forcemode_lag_s = 0.090
-forcemode_impact_N_per_mm_s = 2.0
-fdcc_impact_N_per_mm_s = 1.08           # fdcc-tap-20260922-171421, 5-17 mm/s real approach, M 15
-fdcc_impact_intercept_N = 1.5
-fdcc_settle_s = [0.05, 0.25]            # after impact; 10 mm/s -> ~50 ms, 20-25 cmd -> 120-250 ms
-mode_25hz_phantom_kg = 20.0             # getActualTCPForce reads the arm's own accel as ~20 kg ...
-mode_25hz_phantom_delay_s = 0.034       # ... this late. Loop gain was 1.55 at M 10 kg
-speedl_tracking_delay_s = 0.026         # speedL command -> measured TCP velocity, at 25 Hz
-start_accel_phantom_N = 4.9             # apparent resistance while accelerating at ~2 m/s^2 (low frequency)
-joint1_stiction_Nm = [12.0, 22.0]       # why direct torque mode failed; speedL absorbs it
+leash = [0.03, 0.25]                    # env diagnostics: % of cycles the target is further than this from the arm [m, rad]

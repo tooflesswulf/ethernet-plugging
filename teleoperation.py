@@ -3,6 +3,7 @@ import robot_execution
 from env import URPose, GRIP_OPEN, GRIP_CLOSED
 import argparse
 import numpy as np
+import time
 import os
 
 GRIP_WIDTH_MM = 10
@@ -80,15 +81,21 @@ class Teleoperation(robot_execution.RobotExecution):
             .then(lambda _: self.stop())
         return self.get_action()
 
+    _info_t = 0.
+
     def runtime_info(self):
-        obs = self.last_obs
-        st = obs['state']
-        p = st['actual_pose']
-        force = obs['state']['filtered_force']
-        # print(f"Pose: {st['actual_pose']}", end='\r')
-        # print(f'URPose(x={p.x:.4f}, y={p.y:.4f}, z={p.z:.4f}, rx={p.rx:.4f}, ry={p.ry:.4f}, rz={p.rz:.4f})', end='\r')
-        zf = self.last_obs['state']['filtered_force']
-        print(f'Network is: {self.last_obs['network_status']}, Force={zf[2]:.05f}', end='\r')
+        """FDCC diagnostics every 0.5 s, one scrolling line per window (see Env.fdcc_stats)."""
+        now = time.perf_counter()
+        if now - self._info_t < 0.5:
+            return
+        self._info_t = now
+        s = self.env.fdcc_stats()
+        net = self.last_obs['network_status']
+        print(f"loop {s['hz']:4.0f} Hz  dt<={s['dt_max_ms']:4.1f} ms  cpu<={s['work_max_ms']:3.1f} ms  slow {s['slow']:3d} | "
+              f"F {s['F']:4.1f} N (max {s['F_max']:4.1f})  tau {s['tau']:4.2f} Nm  F@c {s['F_c']:4.1f} N | "
+              f"err {s['e_mm']:4.1f} mm {s['e_deg']:4.1f} deg (max {s['e_max_mm']:4.1f} mm)  leash {s['leash_pct']:3.0f}% | "
+              f"v {s['v_mm_s']:4.1f} mm/s (max {s['v_max_mm_s']:4.1f})  at vmax {s['vsat_pct']:3.0f}%  ff {s['ff_min']:.2f} | "
+              f"{s['state']}  net {int(net)}")
 
     def __init__(self, args):
         control_freq = 100

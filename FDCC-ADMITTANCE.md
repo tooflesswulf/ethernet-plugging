@@ -1,7 +1,8 @@
 # FDCC-style Cartesian admittance over speedL (UR16e)
 
-This is a spec for rebuilding the controller from scratch. All numbers live in
-[`fdcc.toml`](fdcc.toml); this file uses their names. Poses are elements of
+This is a spec for rebuilding the controller from scratch. The controller's numbers
+live in [`fdcc.toml`](fdcc.toml) and this file uses their names; teleop shaping values
+are given inline, and the measurements behind the numbers are in §11. Poses are elements of
 $SE(3)$, twists of $\mathfrak{se}(3)$, and wrenches of $\mathfrak{se}(3)^*$.
 The reference implementation, `test-fdcc-admittance.py`, is a first-order
 approximation of what's written here; §6 lists the differences.
@@ -154,14 +155,15 @@ pose-dependent.
 
 ## 4. Teleop target
 
-Update the target $T_{sc^\star}$ at `teleop.rate_hz` ($h$ = 10 ms). Hold $V^b_{c^\star}$
+Update the target $T_{sc^\star}$ at the teleop rate (100 Hz, $h$ = 10 ms). Hold $V^b_{c^\star}$
 between updates.
 
 1. **Stick twist.** Let the DualSense move a copy of the target to $T_{\text{stick}}$.
    Then $V_{\text{stick}} = \log(T_{sc^\star}^{-1}T_{\text{stick}})^\vee/h$, a body twist.
    `interface.py` composes rotations on the left, in base axes; the log turns that into a body twist.
 2. **Slew limit.**
-   $V_{\text{slew}} \leftarrow V_{\text{slew}} + \operatorname{clamp}_{\|\cdot\|}(V_{\text{stick}} - V_{\text{slew}},\ \texttt{stick\_accel}\,h)$,
+   $V_{\text{slew}} \leftarrow V_{\text{slew}} + \operatorname{clamp}_{\|\cdot\|}(V_{\text{stick}} - V_{\text{slew}},\ a_{\text{stick}}\,h)$,
+   with $a_{\text{stick}}$ = 0.5 m/s², 2 rad/s² (tested),
    then $T_{\text{new}} = T_{sc^\star}\exp(h\hat V_{\text{slew}})$.
 3. **Non-dragging leash.** Let $\xi_{\text{new}} = \log(T_{sc}^{-1}T_{\text{new}})^\vee$.
    If the linear half has norm above `leash[0]` **and** larger than before this update,
@@ -257,8 +259,8 @@ velocity of the point at the base origin, which puts the compliance centre there
 | 25 Hz limit cycle, 9 N rms, with a steady force on | getActualTCPForce reads the arm's own accel as ~20 kg, 34 ms late; M 10 kg → loop gain 1.55 | $M \ge$ ~15 kg |
 | 25 Hz ringing at 40–50 mm/s | symmetric fade: force wobble × $\|V_t\|/f_r$ = 17 mm/s per N | fast-attack / slow-release fade |
 | Rotation ringing at 25 Hz | lateral force × 154 mm flange lever → torque ($\mathrm{Ad}^\top$ from $f$ to $c$); I = 0.3 kg m² too light | $I = 0.6$ |
-| Fade trips at every stick start | the arm's own acceleration reads as ~5 N of resistance | slew-limit the stick (`stick_accel`) |
-| False contact at tap start | same phantom force on a step start | ramp the approach (`tap.ramp_s`) |
+| Fade trips at every stick start | the arm's own acceleration reads as ~5 N of resistance | slew-limit the stick (0.5 m/s², 2 rad/s²) |
+| False contact at tap start | same phantom force on a step start | ramp the approach (0.3 s) |
 | Hand push moved the equilibrium; arm ran to 80 mm/s | leash dragged the target after the arm, and the dragged velocity went into the feedforward | non-dragging leash; $V_t$ only from the stick |
 | Force "saturates" when pushing by hand | 25 N / 2 Nm input clamp | open: raise toward the abort limits if wanted |
 
@@ -278,7 +280,8 @@ test. Contact at masses of 17 kg and up has not been checked on the arm.
    If it doesn't, the moment reference is at $z_{\text{ref,assumed}} + (z_c - z_{\text{point}})$.
 2. **Free space.** $K = 0$; push by hand. Fit $v(t) = g\,f(t - L)$, picking $L$ by $R^2$.
    Compare with $g = 1/D$ and with forceMode's 0.93 mm/s per N and 90 ms.
-3. **Tap.** Ramp toward a hard surface at 5–25 mm/s. Report peak force, rise time,
+3. **Tap.** Ramp toward a hard surface at 5–25 mm/s (0.3 s ramp, give up after 30 mm).
+   Contact = 5 N; then the target sits `press`/K inside the surface (press 5 N) for 2 s. Report peak force, rise time,
    force reversals over 2 N in the 0.5 s after the peak, time below 1 N (lost contact),
    settling time and final force. The final force should be `press + deadband` = 6.5 N.
 4. **Ramp (open loop).** Send trapezoid `speedL` profiles with no admittance. Compare
@@ -311,3 +314,20 @@ The script logs **mixed** coordinates, as UR reports them:
 Also save every setting (the whole config), the payload, CoG and TCP offset read at
 startup, the git revision, the end reason, and the maximum loop gap. Earlier logs were
 hard to compare because the settings weren't recorded.
+
+## 11. Measured facts
+
+Facts, not settings (they used to be `[measured]` in the toml). Logs are
+`fdcc-*.npz` in the repo.
+
+| quantity | value | source / note |
+|---|---|---|
+| forceMode free-space gain | 0.93 mm/s per N | UR forceMode baseline, centred on the flange |
+| forceMode lag | 90 ms | |
+| forceMode impact slope | 2.0 N per mm/s above the commanded force | |
+| FDCC impact slope | 1.08 N per mm/s, intercept 1.5 N | `fdcc-tap-20260922-171421`, 5–17 mm/s real approach, M 15 kg |
+| FDCC settling after impact | 0.05–0.25 s | ~50 ms at 10 mm/s; 120–250 ms at 20–25 mm/s commanded |
+| 25 Hz phantom mass in getActualTCPForce | ~20 kg, 34 ms late | the arm's own acceleration; loop gain 1.55 at M 10 kg |
+| speedL tracking delay | 26 ms | command → measured TCP velocity, at 25 Hz |
+| apparent resistance while accelerating | 4.9 N at ~2 m/s² | low frequency; trips the fade at stick starts |
+| joint 1 stiction breakaway | 12–22 Nm | why direct-torque mode failed; speedL's joint loops absorb it |
