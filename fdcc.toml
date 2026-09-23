@@ -16,7 +16,7 @@ tcp_tolerance_m = 0.001
 reference_point = "flange"
 sign = 1.0
 lowpass_hz = 30.0                       # first order. 2nd-order at 10-12 Hz cut 25 Hz but its lag made contact worse
-deadband = [1.5, 0.15]                  # soft deadband on |F| [N], |tau| [Nm]; F/T error is ~1.8 N median
+deadband = [1.5, 0.4]                  # soft deadband on |F| [N], |tau| [Nm]; F/T error is ~1.8 N median
 clamp = [25.0, 2.0]                     # input clamp [N, Nm]. Hand pushes reach ~39 N and feel "saturated" here
 
 [admittance]
@@ -30,7 +30,7 @@ stiff_gain = 5.0                        # [1/s] on stiff axes: v = v_t - stiff_g
 
 [feedforward]
 # D * v_t is a force in disguise; fade it when the environment resists the motion.
-release = [3.0, 0.3]                    # resisting [N, Nm] at which the feedforward is fully off
+release = [3.0, 0.8]                    # resisting [N, Nm] at which the feedforward is fully off
 recover_s = 0.3                         # drops instantly, recovers 0 -> 1 over this long (symmetric fade rang at 25 Hz)
 filter_hz = 5.0                         # low-pass on the force the fade reads; the ~28 Hz wobble after an impact kept it tripped
 
