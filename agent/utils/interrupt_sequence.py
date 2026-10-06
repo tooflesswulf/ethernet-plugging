@@ -21,6 +21,39 @@ from util import URPose, interpolate
 from promise import Promise
 
 
+MIN_JERK_PEAK = 1.875          # peak / mean speed of the minimum-jerk profile
+MOTION_PROFILE = 'trapezoid'   # MotionStep time scaling: 'linear', 'trapezoid' or 'min_jerk'
+TRAPEZOID_ACCEL_S = 0.2        # trapezoid: time to reach the peak speed (and to stop from it)
+
+
+def min_jerk(tau):
+    """
+    Minimum-jerk time scaling s(tau) = 10 tau^3 - 15 tau^4 + 6 tau^5 on [0, 1]: zero speed
+    and acceleration at both ends. A constant-speed line starts and stops the target at
+    full speed -- a step in the admittance's feedforward (jerk at scripted starts/ends).
+    """
+    tau = min(max(tau, 0.0), 1.0)
+    return tau ** 3 * (10 - 15 * tau + 6 * tau ** 2)
+
+
+def trapezoid(b):
+    """
+    Trapezoidal time scaling on [0, 1]: constant acceleration over the first fraction
+    `b` (<= 0.5), constant speed, constant deceleration over the last `b`. Peak speed
+    1 / (1 - b) of the mean; b = 0.5 is a triangle.
+    """
+    vp = 1.0 / (1.0 - b)
+
+    def s(tau):
+        tau = min(max(tau, 0.0), 1.0)
+        if tau < b:
+            return vp * tau * tau / (2 * b)
+        if tau > 1 - b:
+            return 1 - vp * (1 - tau) ** 2 / (2 * b)
+        return vp * (tau - b / 2)
+    return s
+
+
 def pose_error(p, q):
     """(position error [m], orientation error [rad]) between two 6-poses."""
     p, q = np.asarray(p, dtype=float), np.asarray(q, dtype=float)
@@ -160,6 +193,7 @@ class InterruptSequence:
 
     def _uninstall(self):
         rexec, iface = self.rexec, self.rexec.iface
+        rexec.env.restore_gains()          # in case a MotionStep was cut short
         del rexec.get_action
         rexec._interrupt_sequence = None
 
@@ -203,10 +237,11 @@ class Step:
 class MotionStep(Step):
     """
     Drive the robot to a target pose: interpolates the command (linear
-    position, slerp orientation) from the start pose to the goal over a
-    duration set by `speed` (m/s) and `rot_speed` (rad/s), whichever takes
-    longer; the control loop's clamp() still limits per-servo step size for
-    safety. Finishes when the measured pose converges (pos_tol meters,
+    position, slerp orientation) from the start pose to the goal with the
+    MOTION_PROFILE time scaling (constant speed, trapezoid with TRAPEZOID_ACCEL_S
+    ramps, or minimum-jerk), whose PEAK speeds are `speed` (m/s) and `rot_speed`
+    (rad/s), whichever takes longer (min-jerk takes about 1.9x as long as linear). The admittance is stiffened for the move (fdcc.toml [scripted])
+    and restored when it finishes. Finishes when the measured pose converges (pos_tol meters,
     rot_tol radians) or `timeout` seconds elapse.
 
     With `relative=True`, `target_pose` is a delta [dx, dy, dz, drx, dry, drz]
@@ -236,17 +271,37 @@ class MotionStep(Step):
             self.goal = self.target
         print(f'Moving robot to {self.goal} ...')
         dist, ang = pose_error(self.start_pose, self.goal)
-        self.duration = max(dist / self.speed, ang / self.rot_speed, 1e-6)
+        # `speed` / `rot_speed` are PEAK speeds (and stay under fdcc's speed clamp), so
+        # stretch the duration by each profile's peak / mean speed.
+        cruise = max(dist / self.speed, ang / self.rot_speed, 1e-6)   # at peak speed throughout
+        if MOTION_PROFILE == 'min_jerk':
+            self.profile, self.duration = min_jerk, MIN_JERK_PEAK * cruise
+        elif MOTION_PROFILE == 'trapezoid':
+            ta = TRAPEZOID_ACCEL_S
+            # same acceleration (peak / ta) either way; too short to reach the peak -> triangle
+            self.duration = cruise + ta if cruise >= ta else 2 * np.sqrt(cruise * ta)
+            self.profile = trapezoid(min(ta / self.duration, 0.5))
+        else:
+            self.profile, self.duration = (lambda tau: min(max(tau, 0.0), 1.0)), cruise
+        # The move starts at the arm: restart the leashed target there (else the stale
+        # teleop target is walked back and fed forward), then stiffen -- at the teleop
+        # gains the last mm crawl in with D/K = 3.3 s against pos_tol (fdcc.toml [scripted]).
+        self.env.reanchor()
+        self.env.set_gains(**self.env.scripted_gains)
 
     def tick(self, t):
         pos_err, rot_err = pose_error(self.actual_pose(), self.goal)
-        if pos_err < self.pos_tol and rot_err < self.rot_tol:
+        # Only after the profile has finished: converging inside the tolerance while the
+        # target is still decelerating stopped it in one tick -- a clunk every transition.
+        if t >= self.duration and pos_err < self.pos_tol and rot_err < self.rot_tol:
+            self.env.restore_gains()
             return None
         if t > self.timeout:
             print(f'motion to {self.goal} timed out (pos_err={pos_err:.4f} m, rot_err={rot_err:.4f} rad)')
+            self.env.restore_gains()
             return None
         grip = self.env.des_gripper_state if self.gripper_state is None else self.gripper_state
-        return interpolate(self.start_pose, self.goal, t / self.duration), grip, False, 0.
+        return interpolate(self.start_pose, self.goal, self.profile(t / self.duration)), grip, False, 0.
 
 
 class GripperStep(Step):
