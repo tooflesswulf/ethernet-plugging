@@ -94,7 +94,7 @@ def dict2hdf5(h5group, data: dict):
     for key, value in data.items():
         if isinstance(value, dict):
             subgroup = h5group.create_group(str(key))
-            dict2hdf5(subgroup, data)
+            dict2hdf5(subgroup, value)
         else:
             h5group.create_dataset(str(key), data=value)
 

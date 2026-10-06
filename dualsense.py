@@ -277,6 +277,7 @@ class DualSense:
         print_command("Square button", "reset simulation")
         print_command("Circle button", "toggle gripper")
         print_command("Triangle button", "toggle z-force mode")
+        print_command("Cross button", "toggle stiff base z (pushing the plug in)")
         print_command("Square", "quit")
         print("")
 
@@ -450,6 +451,7 @@ class DualSense:
 
     last_triangle = False
     last_circle = False
+    last_cross = False
 
     def input2action(self):
         """
@@ -474,9 +476,11 @@ class DualSense:
             'right_delta': np.concatenate([dpos, drotation]),
             'right_gripper': self.state.Circle and not self.last_circle,
             'toggle_zforce': self.state.Triangle and not self.last_triangle,
+            'toggle_stiff_z': self.state.Cross and not self.last_cross,
         }
         self.last_circle = self.state.Circle
         self.last_triangle = self.state.Triangle
+        self.last_cross = self.state.Cross
         return act
 
 
