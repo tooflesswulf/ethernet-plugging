@@ -101,7 +101,10 @@ class DualSenseInterface:
         self.targ_zforce = self.latest_obs['state']['filtered_force'].z
 
     def deactivate_adaptive_mode(self):
-        self.targ_pose = np.array(self.latest_obs['state']['actual_pose'])
+        # Continue from the target the spring was pulling toward (z-force z included), not
+        # the arm: the force held in contact stays, and the leash has nothing to walk.
+        st = self.latest_obs['state']
+        self.targ_pose = np.array(st.get('target_pose', st['actual_pose']))
         self.targ_zforce = 0.
 
     def store_obs(self, obs):
