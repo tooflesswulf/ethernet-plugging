@@ -62,5 +62,5 @@ ramp_down_timeout_s = 0.5
 rest_speed = [0.0005, 0.005]            # "at rest" for ramp-down [m/s, rad/s]
 
 [teleop]
-leash_N = [40.0, 2.5]                   # [N, Nm] the most the spring may push: the stick target is held within leash_N / K of the arm.
-                                        # 30 N = 100 mm at K 300; the old 30 mm leash capped insertion at ~9 N
+leash_N = [40.0, 2.5]                   # [N, Nm] the most the spring may push: |K * error| per half, in imp's frame, hold included.
+                                        # 40 N = 133 mm at K 300, 13 mm on a 3000 N/m axis; the old 30 mm leash capped insertion at ~9 N

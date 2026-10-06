@@ -518,16 +518,17 @@ class Env:
     def _leash(self, actual_pose, des_pose):
         """
         Non-dragging leash in NEWTONS: the target chases des_pose (at most the speed limit
-        per cycle) but may not get further from the arm than leash_N / K -- the spring then
-        pushes at most leash_N, the only push left in contact once the feedforward fades.
-        Uses the current K (scripted gains shrink the distance), the largest K of each half
-        so no axis exceeds the limit. It never drags the target after the arm, so pushing
-        the arm by hand does not move the equilibrium. See fdcc.leash_step.
+        per cycle) but the spring may not push harder than leash_N ([N, Nm]: norm of
+        K * error per half, in imp's frame, to the target WITH imp's hold offset) -- the
+        only push left in contact once the feedforward fades. A stiff axis gets all of
+        leash_N, the soft axes their own share. It never drags the target after the arm,
+        so pushing the arm by hand does not move the equilibrium. See fdcc.leash_step.
         """
-        K = self.imp.K
-        radius = self.leash_N / np.array([K[:3].max(), K[3:].max()])
+        imp = self.imp
         prev = np.asarray(actual_pose if self._leashed is None else self._leashed, float)
-        self._leashed, held = fdcc.leash_step(prev, des_pose, actual_pose, radius, self.imp.p.speed * self.dt)
+        self._leashed, held = fdcc.leash_step(prev, des_pose, actual_pose, self.leash_N,
+                                              imp.p.speed * self.dt, weight=imp.K,
+                                              frame=imp.frame, hold=imp.T_hold)
         self._leash_held = any(held)
         return URPose(*self._leashed)
 

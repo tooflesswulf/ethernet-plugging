@@ -198,11 +198,19 @@ def _deadband_halves(x, fdb, tdb):
     return x
 
 
-def leash_step(prev, des, actual, radius, max_step):
+def leash_step(prev, des, actual, limit, max_step, weight=None, frame='tool', hold=None):
     """
     Non-dragging leash: move the leashed target `prev` toward `des`, at most `max_step`
-    ([m, rad] per call), without ending further from `actual` than
-    max(radius, where prev already is) -- position and rotation separately.
+    ([m, rad] per call), without ending with a larger |weight * e| than
+    max(limit, the one `prev` already has) -- position and rotation separately.
+
+    e is the error from `actual` to the target the spring really pulls toward: `prev`
+    moved by `hold` (Impedance.T_hold, the gain-change hold; None = none), in `frame`
+    axes ('tool' or 'base', Impedance.frame). With weight = Impedance.K that bounds the
+    spring FORCE and torque per axis of the gains, so a stiff axis gets the whole limit
+    and soft axes do not eat it: one 3D radius of leash_N / max(K) stopped the arm short
+    of the seat with stiff z, and with the hold offset measured against it the spring
+    reached 14 N of 40 (ethernet-impedance episode 49, 14.3 s). weight None = distance.
 
     It never moves the target toward the arm unless `des` lies that way, so pushing the
     arm by hand does not move the equilibrium, and a held target has no velocity to feed
@@ -210,32 +218,43 @@ def leash_step(prev, des, actual, radius, max_step):
     reached exactly. Poses are UR [p; rotvec]. Returns (new_pose, (lin_held, ang_held)).
     """
     prev, des, actual = (np.asarray(x, float) for x in (prev, des, actual))
+    wt = np.ones(6) if weight is None else np.asarray(weight, float)
+    H = np.eye(4) if hold is None else np.asarray(hold, float)
     out, held = prev.copy(), [False, False]
+    Rp, Ra = _rotvec_to_R(prev[3:]), _rotvec_to_R(actual[3:])
 
-    # position: largest s in [0, 1] with |u + s w| <= r
+    # position: largest s in [0, 1] with |W (u + s w)| <= r, W = diag(weight) A. The error
+    # in `frame` axes is A (p_target - p_arm), small-angle (the leash is a bound, not a law)
     w = _clamp_halves(np.r_[des[:3] - prev[:3], 0, 0, 0], max_step[0], 1)[:3]
-    u = prev[:3] - actual[:3]
-    r = max(radius[0], np.linalg.norm(u))
-    if np.linalg.norm(u + w) > r:
-        ww, uw = w @ w, u @ w
-        s = (-uw + np.sqrt(max(uw * uw - ww * (u @ u - r * r), 0.0))) / ww if ww > 0 else 0.0
+    u = prev[:3] + Rp @ H[:3, 3] - actual[:3]
+    W = wt[:3, None] * (Ra.T if frame == 'tool' else np.eye(3))
+    a, b = W @ u, W @ w
+    r = max(limit[0], np.linalg.norm(a))
+    if np.linalg.norm(a + b) > r:
+        bb, ab = b @ b, a @ b
+        s = (-ab + np.sqrt(max(ab * ab - bb * (a @ a - r * r), 0.0))) / bb if bb > 0 else 1.0
         w, held[0] = np.clip(s, 0.0, 1.0) * w, True
     out[:3] = prev[:3] + w
 
-    # rotation: along the geodesic prev -> des, bisect for the same condition on the angle
-    Rp, Ra = _rotvec_to_R(prev[3:]), _rotvec_to_R(actual[3:])
+    # rotation: along the geodesic prev -> des, bisect for the same condition on the
+    # weighted rotation error, measured as Impedance.step measures xi in `frame` axes
     d = _R_to_rotvec(_rotvec_to_R(des[3:]) @ Rp.T)
     th = np.linalg.norm(d)
     if th > max_step[1]:
         d *= max_step[1] / th
-    ang = lambda s: np.linalg.norm(_R_to_rotvec(_rotvec_to_R(s * d) @ Rp @ Ra.T))
-    r = max(radius[1], ang(0.0))
+    Rh = H[:3, :3]
+
+    def tq(s):
+        Re = _rotvec_to_R(s * d) @ Rp @ Rh
+        e = _R_to_rotvec(Ra.T @ Re) if frame == 'tool' else _R_to_rotvec(Re @ Ra.T)
+        return np.linalg.norm(wt[3:] * e)
+    r = max(limit[1], tq(0.0))
     s = 1.0
-    if ang(1.0) > r:
+    if tq(1.0) > r:
         lo, hi = 0.0, 1.0
         for _ in range(12):
             mid = 0.5 * (lo + hi)
-            lo, hi = (mid, hi) if ang(mid) <= r else (lo, mid)
+            lo, hi = (mid, hi) if tq(mid) <= r else (lo, mid)
         s, held[1] = lo, True
     out[3:] = _R_to_rotvec(_rotvec_to_R(s * d) @ Rp)
     return out, tuple(held)
