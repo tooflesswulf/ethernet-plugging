@@ -45,9 +45,20 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         action_mode: ActionMode = 'local_delta',
         predict_done=True,
         end_signal_steps=None,
+        pose_target='pose',
+        impedance_fields=(),
         transform=None,
         device="cuda:0",
     ):
+        """
+        pose_target:      dataset field the pose actions come from. 'pose' clones the actual
+                          TCP pose (stiff controller); 'target_pose' clones the impedance
+                          controller's spring target. Delta action modes are always relative
+                          to the ACTUAL pose at the chunk start, which is what eval integrates
+                          from, so a target's offset from the arm (the force) is kept.
+        impedance_fields: gain fields appended to each action as log10, e.g.
+                          ('stiffness', 'damping', 'mass'); 6 base-frame diagonal values each.
+        """
         assert img_cond_steps <= cond_steps, 'consider using more cond_steps than img_cond_steps'
         self.horizon_steps = horizon_steps
         self.cond_steps = cond_steps  # states (proprio, etc.)
@@ -55,6 +66,8 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.device = device
         self.action_mode = action_mode
         self.transform = transform
+        self.pose_target = pose_target
+        self.impedance_fields = tuple(impedance_fields)
 
         self.predict_done = predict_done
         self.end_signal_steps = end_signal_steps if end_signal_steps is not None else horizon_steps
@@ -83,6 +96,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             # Actions
             poses = np.array(f['pose'][:total_num_steps])  # (N, 6)
             g_widths = np.array(f['gripper_width'][:total_num_steps])  # (N,)
+            action_poses = np.array(f[pose_target][:total_num_steps])  # (N, 6)
+            gains = [np.array(f[k][:total_num_steps]) for k in self.impedance_fields]
+            log_gains = np.log10(np.concatenate(gains, axis=1)) if gains else np.zeros((total_num_steps, 0))
 
             if f['images'].attrs['stored_as'] == 'image':
                 self.h5_image = True
@@ -116,7 +132,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.indices = self.make_indices(traj_lengths, horizon_steps)
         self.obs = all_obs  # (N, obs_dim)
         self.h5 = None
-        self._precompute_actions(poses, g_widths)
+        self._precompute_actions(poses, g_widths, action_poses, log_gains)
 
         self.obs_dim = self.obs.shape[1]
         self.act_dim = self.actions.shape[-1]
@@ -176,7 +192,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             traj_start += traj_length
         return np.array(indices)
 
-    def _precompute_actions(self, poses, g_widths):
+    def _precompute_actions(self, poses, g_widths, action_poses, log_gains):
         g_thr = (np.amax(g_widths) + np.amin(g_widths)) / 2  # threshold for binary gripper action
 
         actions = []
@@ -188,13 +204,14 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
 
             g_width = g_widths[start:end]
-            pose = poses[start:end]
 
             g_action = self.gripper_action(g_width, threshold=g_thr)
-            pose_action = self.pose_action(pose)
+            pose_action = self.pose_action(action_poses[start:end], ref_pose=poses[start])
             chunk = np.c_[pose_action, g_action]
             if self.predict_done:
                 chunk = np.c_[chunk, self.done_action(start, end, ep_end)]
+            # [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field)]
+            chunk = np.c_[chunk, log_gains[start:end]]
             actions.append(chunk)
         self.actions = np.array(actions)
         return self.actions
@@ -215,19 +232,24 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         done = abs_t >= (ep_end - self.end_signal_steps)
         return 2 * done.astype(int).reshape(-1, 1) - 1
 
-    def _pose_action_absolute(self, poses):
+    # The delta modes encode `poses` relative to `ref_pose`, the actual pose at the chunk
+    # start (DiffusionPolicy.integrate_actions integrates from the live actual pose). When
+    # cloning the actual pose, ref_pose == poses[0].
+
+    def _pose_action_absolute(self, poses, ref_pose):
         # Returns (N, 6): [tx, ty, tz, rx, ry, rz]
         return poses
 
-    def _pose_action_local_delta(self, poses):
+    def _pose_action_local_delta(self, poses, ref_pose):
         # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
         transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
-        t0 = transforms[0]
+        t0 = Tf.from_components(ref_pose[:3], R.from_rotvec(ref_pose[3:]))
         deltas = [t0.inv() * t for t in transforms]
         return np.array([delta.as_exp_coords() for delta in deltas])
 
-    def _pose_action_umi(self, poses):
+    def _pose_action_umi(self, poses, ref_pose):
         # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
+        poses = np.concatenate([ref_pose[None], poses[1:]])  # first entry is the reference
         delta_xyz = poses[1:, :3] - poses[:1, :3]
         eulers = np.array([R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:]])
         # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
@@ -237,22 +259,24 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
         return np.concatenate([delta_umi, delta_umi[-1:]])  # poor decision here, pad by 1 by repeating last one.
 
-    def _pose_action_global_delta(self, poses):
+    def _pose_action_global_delta(self, poses, ref_pose):
         # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
         transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
-        t0 = transforms[0]
+        t0 = Tf.from_components(ref_pose[:3], R.from_rotvec(ref_pose[3:]))
         deltas = [t * t0.inv() for t in transforms]
         return np.array([delta.as_exp_coords() for delta in deltas])
 
-    def pose_action(self, poses):
+    def pose_action(self, poses, ref_pose=None):
+        if ref_pose is None:
+            ref_pose = poses[0]
         if self.action_mode == 'absolute':
-            return self._pose_action_absolute(poses)
+            return self._pose_action_absolute(poses, ref_pose)
         elif self.action_mode == 'local_delta':
-            return self._pose_action_local_delta(poses)
+            return self._pose_action_local_delta(poses, ref_pose)
         elif self.action_mode == 'global_delta':
-            return self._pose_action_global_delta(poses)
+            return self._pose_action_global_delta(poses, ref_pose)
         elif self.action_mode == 'umi':
-            return self._pose_action_umi(poses)
+            return self._pose_action_umi(poses, ref_pose)
         else:
             raise ValueError(f"Invalid action_mode: {self.action_mode}")
 

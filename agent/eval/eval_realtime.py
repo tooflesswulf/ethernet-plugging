@@ -1,9 +1,10 @@
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
-from agent.utils.robot_utils import get_actions, build_states, wait_for_circle
+from agent.utils.robot_utils import get_actions, build_states, wait_for_circle, apply_gains
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
 import robot_execution
 import collections
+import numpy as np
 import threading
 import argparse
 import torch
@@ -51,16 +52,23 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
 
     def runtime_info(self):
         zf = self.last_obs['state']['filtered_force']
-       
-        print(self.buffer._chunk_count / (time.time() - self.env.t0), f'zforce: {zf[2]:.05f}', end='\r')
+        kz = f'  Kz: {self.env.imp.K[2]:6.0f}' if self.policy.impedance_fields else ''
+        print(self.buffer._chunk_count / (time.time() - self.env.t0), f'zforce: {zf[2]:.05f}{kz}', end='\r')
 
     def get_action(self):
         if self.buffer.is_empty():
             return None
-        act = self.buffer.get_action(time.time())
+        # Env.step blends from the previous command to this one over control_dt, so this
+        # command is only reached a period from now: ask for the action due then.
+        act = self.buffer.get_action(time.time() + self.control_dt)
         if act is None:
             return None
-        des_pose, des_width, done = act
+        des_pose, des_width, done, log_gains = act
+        # Predicted impedance, split back into fields and blended over one command period
+        # (no-op without an impedance head)
+        apply_gains(self.env, {f: log_gains[6 * i:6 * (i + 1)]
+                               for i, f in enumerate(self.policy.impedance_fields)},
+                    ramp_s=self.control_dt)
         # End-of-episode signal: stop once the executed action's done score crosses the threshold.
         if self.policy.predict_done and done > self.done_threshold:
             print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
@@ -80,7 +88,11 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
 
             # get_actions builds images + the obs_fields state vector from the deque.
             with torch.no_grad():
-                des_poses, des_grips, des_done = get_actions(self.policy, obs_deque, self.device)
+                des_poses, des_grips, des_done, des_gains = get_actions(
+                    self.policy, obs_deque, self.device, return_gains=True)
+            # (H, 6 * n_fields) log10 gains, in policy.impedance_fields order
+            des_gains = np.concatenate([des_gains[f] for f in self.policy.impedance_fields], axis=1) \
+                if des_gains else None
 
             # the executable chunk starts at index obs_horizon-1, which aligns with t_obs.
             # The done score rides through the buffer so it's ensembled and thresholded at
@@ -88,7 +100,8 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             start = obs_horizon - 1
             end = start + action_horizon
             chnk = self.buffer.add_chunk(
-                t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end])
+                t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end],
+                None if des_gains is None else des_gains[start:end])
             obs_state = build_states(obs_deque, self.policy.obs_fields)  # for offline logging
             self.buffer.dolog(chnk, obs_state, time.time())
 
