@@ -32,23 +32,26 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
+          obs_fields=None, pose_target='pose', impedance_fields=(),
           use_wandb=False, log_interval=10, save_interval=10,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
-    obs_fields = ['pose', 'gripper_width']
-    if 'force' in name:
-        obs_fields += ['force']
+    if obs_fields is None:
+        obs_fields = ['pose', 'gripper_width']
+        if 'force' in name:
+            obs_fields += ['force']
     obs_horizon = 1
+    action_kwargs = dict(predict_done=predict_done, end_signal_steps=end_signal_steps,
+                         pose_target=pose_target, impedance_fields=impedance_fields)
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                       cond_steps=obs_horizon, img_cond_steps=obs_horizon,
-                                      predict_done=predict_done, end_signal_steps=end_signal_steps,
                                       horizon_steps=16, action_mode=action_mode, device=device,
-                                      max_n_episodes=50)
+                                      max_n_episodes=50, **action_kwargs)
 
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                           cond_steps=obs_horizon, img_cond_steps=obs_horizon,
-                                          predict_done=predict_done, end_signal_steps=end_signal_steps,
-                                          horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
+                                          horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device,
+                                          **action_kwargs)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=128,
@@ -65,6 +68,8 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                              action_mode=dataset.action_mode,
                              grip_stats=dataset.grip_stats,
                              framerate=dataset.framerate,
+                             predict_done=predict_done,
+                             impedance_fields=dataset.impedance_fields,
                              obs_fields=obs_fields).to(device)
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
@@ -110,7 +115,8 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
         def binary_correctness(pred, tgt):
             return (torch.sign(pred) == torch.sign(tgt)).float().mean().item()
 
-        val_mses, gripper_correctness, done_correctness = [], [], []
+        val_mses, pose_mses, gripper_correctness, done_correctness = [], [], [], []
+        imp_logmses = {f: [] for f in policy.impedance_fields}
         for i, batch in enumerate(val_dataloader):
             with torch.no_grad():
                 batch = batch_to_device(batch, device)
@@ -119,12 +125,19 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                 naction = policy.predict_action(batch.conditions)
 
                 val_mses.append(nn.functional.mse_loss(naction, actions).mean().item())
+                pose_mses.append(nn.functional.mse_loss(naction[:, :, :6], actions[:, :, :6]).item())
+                # impedance gains are log10 values, 6 per field
+                imp = policy.impedance_slice
+                for j, f in enumerate(policy.impedance_fields):
+                    sl = slice(imp.start + 6 * j, imp.start + 6 * (j + 1))
+                    imp_logmses[f].append(nn.functional.mse_loss(naction[:, :, sl], actions[:, :, sl]).item())
                 # gripper is channel 6; the optional end-of-episode signal is channel 7.
                 gripper_correctness.append(binary_correctness(naction[:, :, 6], actions[:, :, 6]))
                 if policy.predict_done:
                     done_correctness.append(binary_correctness(naction[:, :, 7], actions[:, :, 7]))
 
-        val_log = {"val/mse_loss": np.mean(val_mses),
+        val_log = {"val/mse_loss": np.mean(val_mses), "val/pose_mse": np.mean(pose_mses),
+                   **{f"val/{f}_logmse": np.mean(v) for f, v in imp_logmses.items()},
                    "val/gripper_correctness": np.mean(gripper_correctness), "val/epoch": epoch}
         if done_correctness:
             val_log["val/done_correctness"] = np.mean(done_correctness)
@@ -144,7 +157,22 @@ def parse_args():
     parser.add_argument('--ckpt_dir', type=str, default='logs')
     parser.add_argument('--end_signal', action='store_true', default=True)
     parser.add_argument('--end_steps', type=int, default=None)
-    return parser.parse_args()
+    parser.add_argument('--obs_fields', nargs='+', default=None,
+                        help="state observation fields (default: pose gripper_width, + force if 'force' in --name)")
+    parser.add_argument('--pose_target', type=str, default='pose', choices=['pose', 'target_pose'],
+                        help="pose actions: actual TCP pose, or the impedance controller's spring target")
+    parser.add_argument('--impedance_fields', nargs='*', default=[],
+                        choices=['stiffness', 'damping', 'mass'],
+                        help='impedance gains to predict (log10, base-frame diagonals)')
+    parser.add_argument('--impedance', action='store_true', default=False,
+                        help='shorthand for --pose_target target_pose --impedance_fields stiffness damping mass '
+                             'with pose gripper_width force observations')
+    args = parser.parse_args()
+    if args.impedance:
+        args.pose_target = 'target_pose'
+        args.impedance_fields = args.impedance_fields or ['stiffness', 'damping', 'mass']
+        args.obs_fields = args.obs_fields or ['pose', 'gripper_width', 'force']
+    return args
 
 
 if __name__ == '__main__':
@@ -168,4 +196,5 @@ if __name__ == '__main__':
     print('Saving checkpoints to:', ckpt_path)
     train(name=args.name, dataset_path=dataset_path, ckpt_dir=ckpt_path,
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
+          obs_fields=args.obs_fields, pose_target=args.pose_target, impedance_fields=args.impedance_fields,
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)

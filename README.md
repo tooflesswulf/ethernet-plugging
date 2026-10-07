@@ -141,5 +141,7 @@ options:
 ### Training
 Train using `python agent/pretrain/train.py`. The action mode & observation fields can be changed by editing the strings at the top of `train()`.
 
+For impedance-controller data (logged by the FDCC env, e.g. `ethernet-impedance`), pass `--impedance`: the policy clones the controller's spring target (`control/target`) instead of the actual pose, and additionally predicts log10 K, D, M (base-frame diagonals), with `pose, gripper_width, force` observations. `--pose_target`, `--impedance_fields` and `--obs_fields` set these individually.
+
 ### Evaluation
-`python agent/eval/eval.py --ckpt path/to/file.ckpt`. Make sure `obs_state` includes the right fields in the right order, and the `GRIP_*` settings match the teleoperation data.
+`python agent/eval/eval.py --ckpt path/to/file.ckpt`. Policies trained with impedance fields also command their predicted gains each step (`env.set_gains(..., frame='base')`). Make sure `obs_state` includes the right fields in the right order, and the `GRIP_*` settings match the teleoperation data.

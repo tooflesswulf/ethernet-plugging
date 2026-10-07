@@ -471,13 +471,15 @@ class Env:
                 'v_max_mm_s': 1e3 * s['v_max'], 'vsat_pct': 100 * s['vsat'] / n, 'ff_min': s['ff_min'],
                 'state': last.get('state', '?')}
 
-    def set_gains(self, K=None, D=None, M=None, sel=None, frame=None):
+    def set_gains(self, K=None, D=None, M=None, sel=None, frame=None, ramp_s=None):
         """
         Change the admittance gains from the next control cycle (thread-safe; fdcc.Impedance
         is only touched by _control_loop). Same forms as Impedance.set_gains; None keeps.
-        K, D, M blend over fdcc.toml [admittance] gain_ramp_s.
+        K, D, M blend over ramp_s (None = fdcc.toml [admittance] gain_ramp_s). A caller that
+        streams gains every command should ramp over one command period: each call restarts
+        the smoothstep from zero slope, so a 0.1 s ramp restarted every 50 ms lags.
         """
-        self._gain_request = {'K': K, 'D': D, 'M': M, 'sel': sel, 'frame': frame}
+        self._gain_request = {'K': K, 'D': D, 'M': M, 'sel': sel, 'frame': frame, 'ramp_s': ramp_s}
 
     def reanchor(self):
         """

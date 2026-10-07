@@ -38,13 +38,15 @@ def build_states(obs_deque, obs_fields):
     return np.stack(states)  # (T, state_dim)
 
 
-def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda'):
+def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda', return_gains=False):
     """
     obs_deque: sequence of env obs dicts (len == policy.obs_horizon), each with
                'image' and 'state'. Images and the proprio state vector are built
                here; the state follows policy.obs_fields so it matches training.
     Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,),
     des_done (H,) end-of-episode score in [0, 1]) ready to execute.
+    With return_gains, also the predicted impedance as {field: (H, 6) log10 gains}
+    ({} for a policy without an impedance head); see apply_gains.
     """
     img_size = policy.img_size
     images = np.stack([resize_image(o['image'], (img_size, img_size), flip_channel=True) for o in obs_deque])
@@ -66,7 +68,31 @@ def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda'):
     naction = naction.detach().to('cpu').numpy()[0]
 
     # integrate deltas (per the policy's action_mode) into absolute poses + widths
-    return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
+    des_poses, des_widths, des_done = policy.integrate_actions(naction, curr_pose, curr_gripper_width)
+    if return_gains:
+        return des_poses, des_widths, des_done, policy.decode_impedance(naction, log=True)
+    return des_poses, des_widths, des_done
+
+
+# Impedance field (StitchedSequenceDataset.impedance_fields) -> Env.set_gains keyword
+GAIN_KWARGS = {'stiffness': 'K', 'damping': 'D', 'mass': 'M'}
+
+
+def apply_gains(env: Env, log_gains: dict, ramp_s=None):
+    """
+    Command predicted impedance gains. log_gains: {field: (6,) log10 gains}, one timestep
+    of get_actions(..., return_gains=True). Gains are base-frame diagonals (see
+    scripts/rawdata_to_dataset.py); the first call moves the controller from fdcc.toml's
+    isotropic tool-frame gains to base axes. The env keeps its hold offset across the
+    change, as it did for teleop. No-op for an empty dict.
+
+    ramp_s: blend time; pass the command period (1 / control_freq) when calling every
+    command, so the gains blend between commands like the pose does (Env.interpolate).
+    """
+    if not log_gains:
+        return
+    env.set_gains(frame='base', ramp_s=ramp_s,
+                  **{GAIN_KWARGS[k]: 10 ** np.asarray(v, float) for k, v in log_gains.items()})
 
 
 def interrupt(rexec):
