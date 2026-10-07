@@ -8,6 +8,7 @@ from env import URPose, Env, GRIP_CLOSED
 from interface import DualSenseInterface
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
+from agent.dataset.sequence import target_offset
 from agent.utils.interrupt_sequence import InterruptSequence
 
 
@@ -22,6 +23,10 @@ OBS_FIELD_GETTERS = {
     'force': lambda s: np.asarray(s['filtered_force'], dtype=np.float32),
     'gripper_width': lambda s: np.asarray([s['gripper_width']], dtype=np.float32),
     'gripper_force': lambda s: np.asarray([s['gripper_force']], dtype=np.float32),
+    # the controller's current K (6 diagonals, as dataset 'stiffness'), in log10
+    'log_stiffness': lambda s: np.log10(np.asarray(s['stiffness'], dtype=np.float32)),
+    # spring target relative to the arm (dataset DERIVED_OBS_FIELDS['target_offset'])
+    'target_offset': lambda s: target_offset(s['target_pose'], s['actual_pose']).astype(np.float32),
 }
 
 
@@ -52,9 +57,10 @@ def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda', return_gains=
     images = np.stack([resize_image(o['image'], (img_size, img_size), flip_channel=True) for o in obs_deque])
     states = build_states(obs_deque, policy.obs_fields)  # (T, state_dim)
 
-    # current absolute pose/width to integrate the (possibly delta) actions from
+    # current absolute pose/width to integrate the (possibly delta) actions from: the actual
+    # pose, or the spring target for policies trained target-anchored (policy.action_anchor)
     last = obs_deque[-1]['state']
-    curr_pose, curr_gripper_width = np.asarray(last['actual_pose']), last['gripper_width']
+    curr_pose, curr_gripper_width = policy.anchor_pose(last), last['gripper_width']
 
     nimages = einops.rearrange(
         torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')

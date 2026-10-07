@@ -20,6 +20,24 @@ GripperStats = namedtuple('GripperStats', ['grip_width_mm', 'grip_force_n', 'gri
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
 
+def target_offset(target_pose, actual_pose):
+    """
+    Where the impedance spring target sits relative to the arm, in base axes:
+    [t_target - t_actual, rotvec(R_target R_actual^-1)]. (..., 6) poses in, (..., 6) out.
+    Observed as its own field ('target_offset') rather than the absolute target: min-max
+    normalized over the workspace, a few mm between two absolute poses all but vanishes.
+    """
+    target_pose, actual_pose = np.asarray(target_pose, float), np.asarray(actual_pose, float)
+    rot = (R.from_rotvec(target_pose[..., 3:]) * R.from_rotvec(actual_pose[..., 3:]).inv()).as_rotvec()
+    return np.concatenate([target_pose[..., :3] - actual_pose[..., :3], rot], axis=-1)
+
+
+# Observation fields computed from stored dataset fields: name -> fn(h5 file, n steps)
+DERIVED_OBS_FIELDS = {
+    'target_offset': lambda f, n: target_offset(f['target_pose'][:n], f['pose'][:n]),
+}
+
+
 class StitchedSequenceDataset(torch.utils.data.Dataset):
     """
     From: https://github.com/irom-princeton/dppo
@@ -46,6 +64,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         predict_done=True,
         end_signal_steps=None,
         pose_target='pose',
+        action_anchor=None,
         impedance_fields=(),
         transform=None,
         device="cuda:0",
@@ -53,9 +72,17 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         """
         pose_target:      dataset field the pose actions come from. 'pose' clones the actual
                           TCP pose (stiff controller); 'target_pose' clones the impedance
-                          controller's spring target. Delta action modes are always relative
-                          to the ACTUAL pose at the chunk start, which is what eval integrates
-                          from, so a target's offset from the arm (the force) is kept.
+                          controller's spring target.
+        action_anchor:    dataset field the delta action modes are relative to at the chunk
+                          start, and what eval integrates from (DiffusionPolicy.anchor_pose);
+                          None = pose_target. Anchoring a target chunk to the ACTUAL pose made
+                          overlapping chunks disagree by the arm's lag behind the target, and
+                          the realtime ensemble snapped back to the arm at every new chunk (a
+                          20 Hz sawtooth, fed forward as D * v_t). Anchored to the target, each
+                          chunk continues the target the controller already has.
+        obs_fields:       dataset fields of the state observation; 'log_<field>' is log10 of
+                          <field> (e.g. 'log_stiffness', the current K); DERIVED_OBS_FIELDS
+                          (e.g. 'target_offset') are computed from stored fields.
         impedance_fields: gain fields appended to each action as log10, e.g.
                           ('stiffness', 'damping', 'mass'); 6 base-frame diagonal values each.
         """
@@ -67,6 +94,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.action_mode = action_mode
         self.transform = transform
         self.pose_target = pose_target
+        self.action_anchor = pose_target if action_anchor is None else action_anchor
         self.impedance_fields = tuple(impedance_fields)
 
         self.predict_done = predict_done
@@ -89,14 +117,18 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                     vals_rep = [np.repeat(val[None], traj_len, axis=0)
                                 for val, traj_len in zip(meta_vals, traj_lengths)]
                     all_obs.append(np.concatenate(vals_rep, axis=0))
+                elif key in DERIVED_OBS_FIELDS:
+                    all_obs.append(DERIVED_OBS_FIELDS[key](f, total_num_steps))
+                elif key.startswith('log_'):
+                    all_obs.append(np.log10(f[key[len('log_'):]][:total_num_steps]))
                 else:
                     all_obs.append(f[key][:total_num_steps])
             all_obs = np.c_[*all_obs]
 
             # Actions
-            poses = np.array(f['pose'][:total_num_steps])  # (N, 6)
             g_widths = np.array(f['gripper_width'][:total_num_steps])  # (N,)
             action_poses = np.array(f[pose_target][:total_num_steps])  # (N, 6)
+            anchor_poses = np.array(f[self.action_anchor][:total_num_steps])  # (N, 6)
             gains = [np.array(f[k][:total_num_steps]) for k in self.impedance_fields]
             log_gains = np.log10(np.concatenate(gains, axis=1)) if gains else np.zeros((total_num_steps, 0))
 
@@ -132,7 +164,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.indices = self.make_indices(traj_lengths, horizon_steps)
         self.obs = all_obs  # (N, obs_dim)
         self.h5 = None
-        self._precompute_actions(poses, g_widths, action_poses, log_gains)
+        self._precompute_actions(g_widths, action_poses, anchor_poses, log_gains)
 
         self.obs_dim = self.obs.shape[1]
         self.act_dim = self.actions.shape[-1]
@@ -192,7 +224,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             traj_start += traj_length
         return np.array(indices)
 
-    def _precompute_actions(self, poses, g_widths, action_poses, log_gains):
+    def _precompute_actions(self, g_widths, action_poses, anchor_poses, log_gains):
         g_thr = (np.amax(g_widths) + np.amin(g_widths)) / 2  # threshold for binary gripper action
 
         actions = []
@@ -206,7 +238,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             g_width = g_widths[start:end]
 
             g_action = self.gripper_action(g_width, threshold=g_thr)
-            pose_action = self.pose_action(action_poses[start:end], ref_pose=poses[start])
+            pose_action = self.pose_action(action_poses[start:end], ref_pose=anchor_poses[start])
             chunk = np.c_[pose_action, g_action]
             if self.predict_done:
                 chunk = np.c_[chunk, self.done_action(start, end, ep_end)]
@@ -232,9 +264,9 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         done = abs_t >= (ep_end - self.end_signal_steps)
         return 2 * done.astype(int).reshape(-1, 1) - 1
 
-    # The delta modes encode `poses` relative to `ref_pose`, the actual pose at the chunk
-    # start (DiffusionPolicy.integrate_actions integrates from the live actual pose). When
-    # cloning the actual pose, ref_pose == poses[0].
+    # The delta modes encode `poses` relative to `ref_pose`, the action_anchor pose at the
+    # chunk start (DiffusionPolicy.integrate_actions integrates from the live one). When
+    # the anchor is the cloned field itself, ref_pose == poses[0].
 
     def _pose_action_absolute(self, poses, ref_pose):
         # Returns (N, 6): [tx, ty, tz, rx, ry, rz]

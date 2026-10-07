@@ -226,6 +226,11 @@ class Env:
                     # what the spring pulls toward (z-force z included): leaving force mode
                     # continues from here (interface.deactivate_adaptive_mode)
                     'target_pose': self.fdcc_target if self.fdcc_target is not None else self.robot_obs[-1].actual_pose,
+                    # admittance K diagonals now (mid-ramp included), on imp.frame's axes; the
+                    # same as base axes whenever they differ only by isotropic halves, as logged
+                    # 'stiffness' (scripts/rawdata_to_dataset.py base_frame_gains). imp swaps
+                    # in new arrays rather than writing into K, so the copy is consistent.
+                    'stiffness': self.imp.K.copy(),
                 },
                 'network_status': self.network_status
             }
