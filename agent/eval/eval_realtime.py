@@ -53,7 +53,8 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
     def runtime_info(self):
         zf = self.last_obs['state']['filtered_force']
         kz = f'  Kz: {self.env.imp.K[2]:6.0f}' if self.policy.impedance_fields else ''
-        print(self.buffer._chunk_count / (time.time() - self.env.t0), f'zforce: {zf[2]:.05f}{kz}', end='\r')
+        chunk_rate = self.buffer._chunk_count / (time.time() - self.env.t0)
+        print(f'Chunk rate: {chunk_rate:.2f}/s, zforce: {zf[2]:.03f}{kz}', end='\r')
 
     def get_action(self):
         if self.buffer.is_empty():
