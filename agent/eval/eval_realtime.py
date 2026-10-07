@@ -1,4 +1,4 @@
-from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
+from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer, CommandLowpass
 from agent.eval.policy_worker import PolicyWorker
 from agent.utils.robot_utils import build_states, wait_for_circle, apply_gains
 from agent.dataset.sequence import GripperStats
@@ -13,8 +13,8 @@ import os
 
 
 class EvalRealtimeChunking(robot_execution.RobotExecution):
-    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=None, weight_decay=0.5, taper=0.15,
-                 done_threshold=0.5):
+    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=100.0, weight_decay=0.5, taper=0.15,
+                 lpf_hz=3.0, done_threshold=0.5):
         # Inference runs in its own process (see policy_worker); it loads the policy while
         # the robot homes. This CPU copy only answers config questions (fields, horizons).
         self.worker = PolicyWorker(ckpt, device)
@@ -25,14 +25,12 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         self.done_threshold = done_threshold
         grip = GripperStats(*self.policy.grip_stats)
 
-        # Actions are spaced at the framerate the policy was trained on, and the chunking
-        # buffer times them by control_dt, so mismatched rates replay the chunk too
-        # fast/slow. Only override deliberately.
+        # Commands go out at control_freq, independent of the policy's framerate: the buffer
+        # spaces each chunk's actions at 1 / framerate and interpolates them in time. At
+        # 20 Hz the env's linear blend made the target velocity step every 50 ms, and fdcc
+        # fed each step forward (teleop commands at 100 Hz).
         if control_freq is None:
             control_freq = self.policy.framerate
-        elif control_freq != self.policy.framerate:
-            print(f'Warning: running at {control_freq}Hz, but the policy was trained at '
-                  f'{self.policy.framerate}Hz. Actions will execute at the wrong speed.')
 
         # super().__init__() resets & starts the robot.
         super().__init__(
@@ -44,31 +42,39 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             gpullback=grip.grip_pullback_mm,
         )
 
-        self.buffer = RealtimeActionChunkingBuffer(action_dt=self.control_dt, weight_decay=weight_decay,
-                                                   taper=taper)
+        self.buffer = RealtimeActionChunkingBuffer(action_dt=1.0 / self.policy.framerate,
+                                                   weight_decay=weight_decay, taper=taper)
+        # Low-pass on the commanded pose (None = off); the buffer is read its delay ahead
+        self.lowpass = CommandLowpass(lpf_hz) if lpf_hz else None
         self.prediction_thread = threading.Thread(target=self.prediction_loop)
 
     def pre_run(self):
         wait_for_circle(self.env, self.iface, close_gripper=False)
         self.worker.wait_ready()
         print("Starting real-time chunked evaluation loop...")
+        self._t_pred_start = time.time()
 
         self.prediction_thread.start()
 
     def runtime_info(self):
         zf = self.last_obs['state']['filtered_force']
         kz = f'  Kz: {self.env.imp.K[2]:6.0f}' if self.policy.impedance_fields else ''
-        print(self.buffer._chunk_count / (time.time() - self.env.t0), f'zforce: {zf[2]:.05f}{kz}', end='\r')
+        rate = self.buffer._chunk_count / max(time.time() - self._t_pred_start, 1e-3)    # chunks/s
+        print(f'{rate:5.1f} chunks/s  zforce: {zf[2]:.05f}{kz}', end='\r')
 
     def get_action(self):
         if self.buffer.is_empty():
             return None
         # Env.step blends from the previous command to this one over control_dt, so this
         # command is only reached a period from now: ask for the action due then.
-        act = self.buffer.get_action(time.time() + self.control_dt)
+        now = time.time()
+        act = self.buffer.get_action(now + self.control_dt, t_now=now,
+                                     pose_lead=self.lowpass.lead if self.lowpass else 0.0)
         if act is None:
             return None
         des_pose, des_width, done, log_gains = act
+        if self.lowpass:
+            des_pose = self.lowpass(des_pose, now)
         # Predicted impedance, split back into fields and blended over one command period
         # (no-op without an impedance head)
         apply_gains(self.env, {f: log_gains[6 * i:6 * (i + 1)]
@@ -137,14 +143,16 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_dir', type=str, default=None,
                         help='where to save robot log data + evaluation video (None disables logging)')
-    parser.add_argument('--control_freq', '--hz', type=float, default=None,
-                        help='control/command frequency (Hz) for the real-time loop '
-                             "(default: the policy's training framerate)")
+    parser.add_argument('--control_freq', '--hz', type=float, default=100.0,
+                        help='command frequency (Hz) of the real-time loop; chunks are interpolated in '
+                             "time, so it need not match the policy's framerate")
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
     parser.add_argument('--taper', type=float, default=0.15,
                         help='seconds over which a chunk\'s weight ramps in after it arrives and out '
                              'before its horizon ends (0 = off)')
+    parser.add_argument('--lpf', type=float, default=3.0,
+                        help='cutoff (Hz) of the low-pass on the commanded pose, delay-compensated (0 = off)')
     return parser.parse_args()
 
 
@@ -159,6 +167,7 @@ if __name__ == '__main__':
         control_freq=args.control_freq,
         weight_decay=args.weight_decay,
         taper=args.taper,
+        lpf_hz=args.lpf,
         device=args.device,
     )
     evaluation.run()

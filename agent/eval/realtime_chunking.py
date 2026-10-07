@@ -141,11 +141,32 @@ class RealtimeActionChunkingBuffer:
             self._chunk_count += 1
         return chunk
 
-    def get_action(self, t_query, t_now=None):
+    def _interp_all(self, chunks, t):
+        """
+        Every chunk interpolated to time t at once (clamped to its first / last action),
+        as _Chunk.interp does one at a time: the per-chunk Slerp cost ~0.1 ms each, too
+        much at a 100 Hz command rate. Returns (trans (n, 3), rot Rotation (n,), k, i, u)
+        with k the fractional action index, i/u the segment and the fraction along it.
+        """
+        P = np.stack([c.poses for c in chunks])                          # (n, H, 6)
+        H = P.shape[1]
+        k = np.clip((t - np.array([c.t_obs for c in chunks])) / self.action_dt, 0.0, H - 1)
+        i = np.minimum(k.astype(int), H - 2)
+        u = k - i
+        n = np.arange(len(chunks))
+        p0, p1 = P[n, i], P[n, i + 1]
+        trans = p0[:, :3] + u[:, None] * (p1[:, :3] - p0[:, :3])
+        r0 = R.from_rotvec(p0[:, 3:])
+        rot = r0 * R.from_rotvec(u[:, None] * (r0.inv() * R.from_rotvec(p1[:, 3:])).as_rotvec())
+        return trans, rot, i, u
+
+    def get_action(self, t_query, t_now=None, pose_lead=0.0):
         """
         Recency-weighted, tapered average of every chunk still active at ``t_query``.
-        t_now: the current time (default time.time()), for the ramp-in; ``t_query`` may
-        look ahead of it.
+        t_now:     the current time (default time.time()), for the ramp-in; ``t_query``
+                   may look ahead of it.
+        pose_lead: take the pose this much further ahead than the other channels, to
+                   cancel the delay of a filter downstream (see CommandLowpass).
 
         Returns ``(des_pose (6,), des_width float, done float, gains (P,))`` or ``None``
         when no chunk covers the query time (e.g. before the first prediction lands, or
@@ -158,44 +179,34 @@ class RealtimeActionChunkingBuffer:
             # prune expired / stale chunks while we hold the lock
             self._chunks = [c for c in self._chunks if c.t_end > t_query]
             chunks = list(self._chunks)
-
-        t_now = time.time() if t_now is None else t_now
-        poses, widths, dones, gains, log_w, taper = [], [], [], [], [], []
-        for c in chunks:
-            interp = c.interp(t_query)
-            if interp is None:
-                continue
-            pose, width, done, gain = interp
-            age = max(t_query - c.t_obs, 0.0)
-            poses.append(pose)
-            widths.append(width)
-            dones.append(done)
-            gains.append(gain)
-            log_w.append(-self.weight_decay * age)
-            if self.taper > 0:
-                taper.append(np.clip((t_now - c.t_add) / self.taper, 0.0, 1.0)
-                             * np.clip((c.t_end - t_query) / self.taper, 0.0, 1.0))
-
-        if not poses:
+        if not chunks:
             return None
 
+        t_now = time.time() if t_now is None else t_now
+        age = np.maximum(t_query - np.array([c.t_obs for c in chunks]), 0.0)
         # Relative to the freshest chunk: exp(-weight_decay * age) alone underflowed to all
         # zeros for a large weight_decay, and the normalization below made NaN poses.
-        log_w = np.asarray(log_w, dtype=float)
+        log_w = -self.weight_decay * age
         weights = np.exp(log_w - log_w.max())
-        if taper and np.dot(weights, taper) > 0:
-            # all-zero only with every chunk just arrived (the first one) or about to end
-            # (a prediction stall): then plain recency weights, rather than no action
-            weights = weights * np.asarray(taper)
+        if self.taper > 0:
+            taper = (np.clip((t_now - np.array([c.t_add for c in chunks])) / self.taper, 0.0, 1.0)
+                     * np.clip((np.array([c.t_end for c in chunks]) - t_query) / self.taper, 0.0, 1.0))
+            if np.dot(weights, taper) > 0:
+                # all-zero only with every chunk just arrived (the first one) or about to end
+                # (a prediction stall): then plain recency weights, rather than no action
+                weights = weights * taper
         weights /= weights.sum()
-        poses = np.asarray(poses)
 
-        trans = (weights[:, None] * poses[:, :3]).sum(axis=0)
-        rot = R.from_rotvec(poses[:, 3:]).mean(weights=weights).as_rotvec()
-        width = float(np.dot(weights, widths))
-        done = float(np.dot(weights, dones))
-        gain = weights @ np.asarray(gains)
-        return np.concatenate([trans, rot]), width, done, gain
+        trans, rot, i, u = self._interp_all(chunks, t_query + pose_lead)
+        if pose_lead:
+            _, _, i, u = self._interp_all(chunks, t_query)     # the other channels: at t_query
+        n = np.arange(len(chunks))
+        lerp = lambda x: x[n, i] + (u[:, None] if x.ndim == 3 else u) * (x[n, i + 1] - x[n, i])
+        width = float(weights @ lerp(np.stack([c.widths for c in chunks])))
+        done = float(weights @ lerp(np.stack([c.dones for c in chunks])))
+        gain = weights @ lerp(np.stack([c.gains for c in chunks]))
+        pose = np.concatenate([weights @ trans, rot.mean(weights=weights).as_rotvec()])
+        return pose, width, done, gain
 
     def is_empty(self):
         with self._lock:
@@ -204,3 +215,46 @@ class RealtimeActionChunkingBuffer:
     def clear(self):
         with self._lock:
             self._chunks.clear()
+
+
+class CommandLowpass:
+    """
+    Critically damped 2nd-order low-pass on the commanded pose, at the command rate.
+
+    fdcc feeds the target's velocity forward (D * v_t) and the arm follows it within
+    M / D ~ 15 ms, so the step-to-step scatter of the ensembled policy target (diffusion
+    sampling noise, ~0.2 mm per 50 ms while moving) reached the arm as a 4-15 Hz buzz
+    (logs-policy-imp/offset, 2026-10-07). Teleop targets come from a stick and have
+    none. Translation is filtered as a vector, rotation on SO(3) (the error is the
+    base-frame rotation vector from the filter state to the input).
+
+    The filter lags a ramp by 2 / (2 pi cutoff_hz) (``lead``); query the chunk buffer
+    that far ahead (RealtimeActionChunkingBuffer.get_action(pose_lead=...)) to cancel it.
+    """
+
+    def __init__(self, cutoff_hz):
+        self.w = 2 * np.pi * float(cutoff_hz)
+        self.lead = 2.0 / self.w
+        self.reset()
+
+    def reset(self):
+        self._t = self._p = self._r = None
+
+    def __call__(self, pose, t):
+        """pose (6,) [trans, rotvec] at time t (s) -> filtered pose (6,)."""
+        pose = np.asarray(pose, dtype=float)
+        if self._t is None:
+            self._t, self._p, self._r = t, pose[:3].copy(), R.from_rotvec(pose[3:])
+            self._v, self._om = np.zeros(3), np.zeros(3)
+        else:
+            dt = min(max(t - self._t, 0.0), 0.05)      # a stalled loop must not blow the step up
+            self._t = t
+            w = self.w
+            # semi-implicit Euler: x'' = w^2 (u - x) - 2 w x'
+            self._v += dt * (w * w * (pose[:3] - self._p) - 2 * w * self._v)
+            self._p = self._p + dt * self._v
+            e = (R.from_rotvec(pose[3:]) * self._r.inv()).as_rotvec()
+            self._om += dt * (w * w * e - 2 * w * self._om)
+            self._r = R.from_rotvec(self._om * dt) * self._r
+        return np.concatenate([self._p, self._r.as_rotvec()])
+
