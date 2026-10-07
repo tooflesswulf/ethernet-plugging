@@ -1,5 +1,6 @@
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
-from agent.utils.robot_utils import get_actions, build_states, wait_for_circle, apply_gains
+from agent.eval.policy_worker import PolicyWorker
+from agent.utils.robot_utils import build_states, wait_for_circle, apply_gains
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
 import robot_execution
@@ -7,15 +8,17 @@ import collections
 import numpy as np
 import threading
 import argparse
-import torch
 import time
 import os
 
 
 class EvalRealtimeChunking(robot_execution.RobotExecution):
-    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=None, weight_decay=0.5, done_threshold=0.5):
-        # Architecture config, weights, and normalization stats all come from the checkpoint.
-        self.policy = DiffusionPolicy.from_checkpoint(ckpt, device)
+    def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=None, weight_decay=0.5, taper=0.15,
+                 done_threshold=0.5):
+        # Inference runs in its own process (see policy_worker); it loads the policy while
+        # the robot homes. This CPU copy only answers config questions (fields, horizons).
+        self.worker = PolicyWorker(ckpt, device)
+        self.policy = DiffusionPolicy.from_checkpoint(ckpt, 'cpu')
         self.policy.eval()
         self.device = device
         # End the episode once the policy's predicted completion score crosses this.
@@ -41,11 +44,13 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             gpullback=grip.grip_pullback_mm,
         )
 
-        self.buffer = RealtimeActionChunkingBuffer(action_dt=self.control_dt, weight_decay=weight_decay)
+        self.buffer = RealtimeActionChunkingBuffer(action_dt=self.control_dt, weight_decay=weight_decay,
+                                                   taper=taper)
         self.prediction_thread = threading.Thread(target=self.prediction_loop)
 
     def pre_run(self):
         wait_for_circle(self.env, self.iface, close_gripper=False)
+        self.worker.wait_ready()
         print("Starting real-time chunked evaluation loop...")
 
         self.prediction_thread.start()
@@ -86,10 +91,9 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             if len(obs_deque) < obs_horizon:
                 continue
 
-            # get_actions builds images + the obs_fields state vector from the deque.
-            with torch.no_grad():
-                des_poses, des_grips, des_done, des_gains = get_actions(
-                    self.policy, obs_deque, self.device, return_gains=True)
+            # get_actions (in the worker process) builds images + the obs_fields state vector
+            # from the deque; waiting on it releases the GIL for the control loop.
+            des_poses, des_grips, des_done, des_gains = self.worker.get_actions(obs_deque)
             # (H, 6 * n_fields) log10 gains, in policy.impedance_fields order
             des_gains = np.concatenate([des_gains[f] for f in self.policy.impedance_fields], axis=1) \
                 if des_gains else None
@@ -105,6 +109,27 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             obs_state = build_states(obs_deque, self.policy.obs_fields)  # for offline logging
             self.buffer.dolog(chnk, obs_state, time.time())
 
+    def close(self):
+        if self.prediction_thread.is_alive():
+            self.prediction_thread.join(timeout=2.0)
+        self.worker.close()
+        super().close()     # Env.close saves rawdata.h5 into env.epi_path
+        self.save_chunks()
+
+    def save_chunks(self):
+        """Every predicted chunk, for offline debugging: chunks.npz next to rawdata.h5."""
+        logs = self.buffer._logs
+        if self.env.dataset_path is None or not logs:
+            return
+        c = [l['chunk'] for l in logs]
+        np.savez_compressed(
+            self.env.epi_path / 'chunks.npz',
+            t_obs=np.array([x.t_obs for x in c]) - self.env.t0,   # same clock as rawdata.h5 times
+            t_add=np.array([l['t'] for l in logs]) - self.env.t0,
+            poses=np.stack([x.poses for x in c]), widths=np.stack([x.widths for x in c]),
+            dones=np.stack([x.dones for x in c]), log_gains=np.stack([x.gains for x in c]),
+            obs=np.stack([l['obs'] for l in logs]), obs_fields=np.array(self.policy.obs_fields))
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Diffusion Policy Evaluation.')
@@ -117,6 +142,9 @@ def parse_args():
                              "(default: the policy's training framerate)")
     parser.add_argument('--weight_decay', type=float, default=0.5,
                         help='recency-weighting rate (1/s) for ensembling overlapping chunks')
+    parser.add_argument('--taper', type=float, default=0.15,
+                        help='seconds over which a chunk\'s weight ramps in after it arrives and out '
+                             'before its horizon ends (0 = off)')
     return parser.parse_args()
 
 
@@ -130,6 +158,7 @@ if __name__ == '__main__':
         log_dir=args.log_dir,
         control_freq=args.control_freq,
         weight_decay=args.weight_decay,
+        taper=args.taper,
         device=args.device,
     )
     evaluation.run()
