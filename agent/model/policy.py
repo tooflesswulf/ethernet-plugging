@@ -10,6 +10,8 @@ from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
 from env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
+# action_anchor (a dataset field) -> the live env obs['state'] key holding the same pose
+ANCHOR_STATE_KEYS = {'pose': 'actual_pose', 'target_pose': 'target_pose'}
 
 
 class DiffusionPolicy(nn.Module):
@@ -42,6 +44,7 @@ class DiffusionPolicy(nn.Module):
         predict_done: bool | None = None,
         framerate: float = DEFAULT_FRAMERATE,
         impedance_fields: list[str] | tuple = (),
+        action_anchor: str = 'pose',
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
@@ -54,6 +57,11 @@ class DiffusionPolicy(nn.Module):
         self.predict_done = (action_dim > 7) if predict_done is None else predict_done
         imp_start = 7 + int(self.predict_done)
         self.impedance_slice = slice(imp_start, imp_start + 6 * len(self.impedance_fields))
+        # Dataset field the delta actions are relative to at the chunk start (see
+        # StitchedSequenceDataset.action_anchor): 'pose' (the actual TCP pose; checkpoints
+        # from before this was saved) or 'target_pose' (the impedance spring target).
+        assert action_anchor in ANCHOR_STATE_KEYS, action_anchor
+        self.action_anchor = action_anchor
         assert self.impedance_slice.stop == action_dim, (
             f'action_dim {action_dim} != pose(6) + gripper(1) + done({int(self.predict_done)}) '
             f'+ 6 * {len(self.impedance_fields)} impedance fields')
@@ -76,6 +84,7 @@ class DiffusionPolicy(nn.Module):
             predict_done=self.predict_done,
             framerate=float(framerate),
             impedance_fields=list(self.impedance_fields),
+            action_anchor=self.action_anchor,
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
@@ -238,6 +247,11 @@ class DiffusionPolicy(nn.Module):
         return {field: (log_gains[:, 6 * i:6 * (i + 1)] if log else 10 ** log_gains[:, 6 * i:6 * (i + 1)])
                 for i, field in enumerate(self.impedance_fields)}
 
+    def anchor_pose(self, state):
+        """The pose a live env obs['state'] gives integrate_actions: the one the chunk's
+        deltas were trained relative to (actual pose, or the spring target)."""
+        return np.asarray(state[ANCHOR_STATE_KEYS[self.action_anchor]], dtype=float)
+
     def integrate_actions(self, actions, curr_pose, curr_gripper_width):
         """
         Convert a predicted action chunk into absolute desired poses + gripper widths,
@@ -250,7 +264,8 @@ class DiffusionPolicy(nn.Module):
         Args:
             actions:            (horizon, action_dim) unnormalized actions from
                                 predict_action; last dim is the gripper (+1=open, -1=closed).
-            curr_pose:          (6,) current pose [tx, ty, tz, rx, ry, rz] (rotvec).
+            curr_pose:          (6,) pose the deltas start from [tx, ty, tz, rx, ry, rz]
+                                (rotvec); see anchor_pose.
             curr_gripper_width: current physical gripper width, used as fallback when
                                 width stats are unavailable.
 

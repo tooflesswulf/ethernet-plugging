@@ -12,3 +12,4 @@ python agent/pretrain/train.py \
 #     --name ethernet-impedance-force \
 #     --ckpt_dir ../ckpts \
 #     --data_dir ../data/ethernet-impedance_dataset
+# Variants: --obs_fields pose gripper_width (no force), --obs_fields pose gripper_width log_stiffness (observe K)

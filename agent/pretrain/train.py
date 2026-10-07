@@ -32,7 +32,7 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
-          obs_fields=None, pose_target='pose', impedance_fields=(),
+          obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(),
           use_wandb=False, log_interval=10, save_interval=10,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
@@ -42,7 +42,8 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
             obs_fields += ['force']
     obs_horizon = 1
     action_kwargs = dict(predict_done=predict_done, end_signal_steps=end_signal_steps,
-                         pose_target=pose_target, impedance_fields=impedance_fields)
+                         pose_target=pose_target, action_anchor=action_anchor,
+                         impedance_fields=impedance_fields)
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                       cond_steps=obs_horizon, img_cond_steps=obs_horizon,
                                       horizon_steps=16, action_mode=action_mode, device=device,
@@ -70,6 +71,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                              framerate=dataset.framerate,
                              predict_done=predict_done,
                              impedance_fields=dataset.impedance_fields,
+                             action_anchor=dataset.action_anchor,
                              obs_fields=obs_fields).to(device)
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
@@ -158,9 +160,14 @@ def parse_args():
     parser.add_argument('--end_signal', action='store_true', default=True)
     parser.add_argument('--end_steps', type=int, default=None)
     parser.add_argument('--obs_fields', nargs='+', default=None,
-                        help="state observation fields (default: pose gripper_width, + force if 'force' in --name)")
+                        help="state observation fields (default: pose gripper_width, + force if 'force' in --name); "
+                             "log_<field> is log10 of a field, e.g. log_stiffness for the current K; "
+                             "target_offset is the spring target relative to the arm")
     parser.add_argument('--pose_target', type=str, default='pose', choices=['pose', 'target_pose'],
                         help="pose actions: actual TCP pose, or the impedance controller's spring target")
+    parser.add_argument('--action_anchor', type=str, default=None, choices=['pose', 'target_pose'],
+                        help='pose the delta actions are relative to at the chunk start, and eval integrates '
+                             'from (default: --pose_target, i.e. the cloned trajectory continues itself)')
     parser.add_argument('--impedance_fields', nargs='*', default=[],
                         choices=['stiffness', 'damping', 'mass'],
                         help='impedance gains to predict (log10, base-frame diagonals)')
@@ -196,5 +203,6 @@ if __name__ == '__main__':
     print('Saving checkpoints to:', ckpt_path)
     train(name=args.name, dataset_path=dataset_path, ckpt_dir=ckpt_path,
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
-          obs_fields=args.obs_fields, pose_target=args.pose_target, impedance_fields=args.impedance_fields,
+          obs_fields=args.obs_fields, pose_target=args.pose_target, action_anchor=args.action_anchor,
+          impedance_fields=args.impedance_fields,
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
