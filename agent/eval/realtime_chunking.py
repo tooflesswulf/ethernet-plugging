@@ -20,9 +20,16 @@ via weighted rotation averaging), so the chunks must already be integrated into
 absolute poses (see ``DiffusionPolicy.integrate_actions``). Impedance gains, when the
 policy predicts them, ride along as log10 values and are averaged linearly in log space
 (a weighted geometric mean of the gains).
+
+Each chunk's weight is also tapered: it ramps in from zero over ``taper`` seconds after
+the chunk arrives, and out to zero over the last ``taper`` seconds of its horizon. An
+untapered chunk enters and leaves the average at full weight, so the command steps by its
+share of how far it disagrees with the rest -- at 3-4 chunks/s that was most of the
+4-10 Hz target jitter in logs-policy-imp (2026-10-07; halved by a 0.15 s taper in replay).
 """
 
 import threading
+import time
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R, Slerp
@@ -31,10 +38,11 @@ from scipy.spatial.transform import Rotation as R, Slerp
 class _Chunk:
     """A single predicted action chunk, anchored at its observation time."""
 
-    __slots__ = ('t_obs', 'poses', 'widths', 'dones', 'gains', 'times')
+    __slots__ = ('t_obs', 't_add', 'poses', 'widths', 'dones', 'gains', 'times')
 
-    def __init__(self, t_obs, poses, widths, dones, action_dt, gains=None):
+    def __init__(self, t_obs, poses, widths, dones, action_dt, gains=None, t_add=None):
         self.t_obs = t_obs
+        self.t_add = t_obs if t_add is None else t_add  # when it reached the buffer
         self.poses = np.asarray(poses, dtype=float)    # (H, 6) [tx,ty,tz, rx,ry,rz]
         self.widths = np.asarray(widths, dtype=float)  # (H,)
         self.dones = np.asarray(dones, dtype=float)    # (H,) end-of-episode score in [0, 1]
@@ -93,15 +101,16 @@ class RealtimeActionChunkingBuffer:
                       a chunk whose observation is ``age`` seconds old at query time
                       is ``exp(-weight_decay * age)``. Larger -> trust fresh chunks
                       more / older chunks fade faster. ``0`` gives a plain average.
-        max_age:      drop chunks whose observation is older than this many seconds.
+        taper:        seconds over which a chunk's weight ramps in after it arrives and
+                      out before its last action (see the module docstring). ``0`` = off.
         max_chunks:   hard cap on retained chunks (oldest dropped first).
     """
 
-    def __init__(self, action_dt, weight_decay=2.0, max_chunks=32):
+    def __init__(self, action_dt, weight_decay=2.0, taper=0.15, max_chunks=32):
         self.action_dt = float(action_dt)
         self.weight_decay = float(weight_decay)
+        self.taper = float(taper)
         self.max_chunks = int(max_chunks)
-        self.rm_age = -np.log(.1) / weight_decay
 
         self._chunks: list[_Chunk] = []
         self._chunk_count: int = 0
@@ -115,12 +124,14 @@ class RealtimeActionChunkingBuffer:
             't': time  # Time of chunk add
         })
 
-    def add_chunk(self, t_obs, des_poses, des_widths, des_dones, des_gains=None):
+    def add_chunk(self, t_obs, des_poses, des_widths, des_dones, des_gains=None, t_add=None):
         """
         Insert a freshly predicted chunk anchored at observation time ``t_obs``.
         des_gains: optional (H, P) log10 impedance gains.
+        t_add:     arrival time, where its taper starts (default: time.time() now).
         """
-        chunk = _Chunk(t_obs, des_poses, des_widths, des_dones, self.action_dt, des_gains)
+        chunk = _Chunk(t_obs, des_poses, des_widths, des_dones, self.action_dt, des_gains,
+                       time.time() if t_add is None else t_add)
         with self._lock:
             self._chunks.append(chunk)
             # keep newest first; bound memory
@@ -130,9 +141,11 @@ class RealtimeActionChunkingBuffer:
             self._chunk_count += 1
         return chunk
 
-    def get_action(self, t_query):
+    def get_action(self, t_query, t_now=None):
         """
-        Recency-weighted average of every chunk still active at ``t_query``.
+        Recency-weighted, tapered average of every chunk still active at ``t_query``.
+        t_now: the current time (default time.time()), for the ramp-in; ``t_query`` may
+        look ahead of it.
 
         Returns ``(des_pose (6,), des_width float, done float, gains (P,))`` or ``None``
         when no chunk covers the query time (e.g. before the first prediction lands, or
@@ -143,13 +156,11 @@ class RealtimeActionChunkingBuffer:
         """
         with self._lock:
             # prune expired / stale chunks while we hold the lock
-            self._chunks = [
-                c for c in self._chunks
-                if c.t_end > t_query #or t_query - c.t_obs < self.rm_age
-            ]
+            self._chunks = [c for c in self._chunks if c.t_end > t_query]
             chunks = list(self._chunks)
 
-        poses, widths, dones, gains, weights = [], [], [], [], []
+        t_now = time.time() if t_now is None else t_now
+        poses, widths, dones, gains, log_w, taper = [], [], [], [], [], []
         for c in chunks:
             interp = c.interp(t_query)
             if interp is None:
@@ -160,12 +171,22 @@ class RealtimeActionChunkingBuffer:
             widths.append(width)
             dones.append(done)
             gains.append(gain)
-            weights.append(np.exp(-self.weight_decay * age))
+            log_w.append(-self.weight_decay * age)
+            if self.taper > 0:
+                taper.append(np.clip((t_now - c.t_add) / self.taper, 0.0, 1.0)
+                             * np.clip((c.t_end - t_query) / self.taper, 0.0, 1.0))
 
         if not poses:
             return None
 
-        weights = np.asarray(weights, dtype=float)
+        # Relative to the freshest chunk: exp(-weight_decay * age) alone underflowed to all
+        # zeros for a large weight_decay, and the normalization below made NaN poses.
+        log_w = np.asarray(log_w, dtype=float)
+        weights = np.exp(log_w - log_w.max())
+        if taper and np.dot(weights, taper) > 0:
+            # all-zero only with every chunk just arrived (the first one) or about to end
+            # (a prediction stall): then plain recency weights, rather than no action
+            weights = weights * np.asarray(taper)
         weights /= weights.sum()
         poses = np.asarray(poses)
 
