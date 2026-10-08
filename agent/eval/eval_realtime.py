@@ -4,6 +4,7 @@ from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
 import robot_execution
 import collections
+import numpy as np
 import threading
 import argparse
 import torch
@@ -91,6 +92,26 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
                 t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end])
             obs_state = build_states(obs_deque, self.policy.obs_fields)  # for offline logging
             self.buffer.dolog(chnk, obs_state, time.time())
+
+    def close(self):
+        if self.prediction_thread.is_alive():
+            self.prediction_thread.join(timeout=2.0)
+        super().close()     # Env.close saves rawdata.h5 into env.epi_path
+        self.save_chunks()
+
+    def save_chunks(self):
+        """Every predicted chunk, for offline debugging: chunks.npz next to rawdata.h5."""
+        logs = self.buffer._logs
+        if self.env.dataset_path is None or not logs:
+            return
+        c = [l['chunk'] for l in logs]
+        np.savez_compressed(
+            self.env.epi_path / 'chunks.npz',
+            t_obs=np.array([x.t_obs for x in c]) - self.env.t0,   # same clock as rawdata.h5 times
+            t_add=np.array([l['t'] for l in logs]) - self.env.t0,
+            poses=np.stack([x.poses for x in c]), widths=np.stack([x.widths for x in c]),
+            dones=np.stack([x.dones for x in c]),
+            obs=np.stack([l['obs'] for l in logs]), obs_fields=np.array(self.policy.obs_fields))
 
 
 def parse_args():
