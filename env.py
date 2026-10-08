@@ -204,6 +204,7 @@ class Env:
         self.commands: list[Command] = []
         self.control_log: list[ControlLog] = []
         self.speedl_log: list[SpeedLCmd] = []
+        self.network_log: list[tuple[float, bool]] = []   # (time, link up) at every network poll
         self.save_eps = save_eps
         self.image_idx = 0
         self.metadata = metadata
@@ -362,6 +363,7 @@ class Env:
         self.commands: list[Command] = []
         self.control_log: list[ControlLog] = []
         self.speedl_log: list[SpeedLCmd] = []
+        self.network_log: list[tuple[float, bool]] = []   # (time, link up) at every network poll
         self.ctrl.zeroFtSensor()
 
         print('payload kg', self.recv.getPayload())
@@ -789,6 +791,7 @@ class Env:
             t0 = time.perf_counter()
             status = is_network_up(self.network_iface)
             self.network_status = status
+            self.network_log.append((time.time() - self.t0, bool(status)))
             sleep_dur = max(0, 1.0 / self.network_query_frequency - (time.perf_counter() - t0))
             time.sleep(sleep_dur)
 
@@ -905,6 +908,14 @@ class Env:
                 if rows:
                     for i, name in enumerate(fields):
                         f.create_dataset(f'{group}/{name}', data=np.asarray([r[i] for r in rows]))
+
+            # Link state of network_iface (the plugged-in cable), polled at network_query_frequency:
+            # teleop's unplug script starts on it, and it tells a seated plug from a near miss
+            if self.network_log:
+                f.create_dataset('network/time', data=np.asarray([t for t, _ in self.network_log]))
+                f.create_dataset('network/status', data=np.asarray([up for _, up in self.network_log]))
+                f['network'].attrs['iface'] = self.network_iface
+                f['network'].attrs['query_frequency'] = self.network_query_frequency
 
             c = f.create_group('config')
             c.attrs['fdcc_toml'] = self.fdcc_toml
