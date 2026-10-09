@@ -168,6 +168,7 @@ class Env:
         self.scripted_gains = {'K': self.fdcc_cfg['scripted']['stiffness']}   # see set_gains()
         self._gain_request = None        # applied by the control loop (imp is not thread-safe)
         self._reanchor_request = False   # see reanchor()
+        self._feedforward = True         # see set_feedforward()
         zf = self.fdcc_cfg['zforce']
         self.zforce_gain, self.zforce_max_speed = zf['gain'], zf['max_speed']
         self._zf_target = None           # adaptive z-force target, see zforce_target()
@@ -495,6 +496,30 @@ class Env:
         self.last_step_t = time.perf_counter()
         self._reanchor_request = True
 
+    def restart_at_target(self):
+        """
+        Restart des_pose, and the 1/input_frequency interpolate() blend, at the leashed
+        target -- where the spring pulls now -- and return it (thread-safe). A scripted
+        step started from here moves the target on from where it is: no jump, no hold
+        change, and nothing for the leash to walk back from a stale des_pose (what
+        reanchor() snapped to the ARM for, which also dropped any preload in one cycle).
+        """
+        pose = self.fdcc_target
+        if pose is None:
+            pose = self.robot_obs[-1].actual_pose if self.robot_obs else URPose(*self.recv.getActualTCPPose())
+        self.last_step_end = self.des_pose = URPose(*pose)
+        self.last_step_t = time.perf_counter()
+        return self.des_pose
+
+    def set_feedforward(self, on=True):
+        """
+        Off: the target's motion is not fed forward (every cycle's move is a
+        note_target_jump), so the arm follows it through the spring alone (D/K). For the
+        scripted release in contact, where the target walks back to the pressed arm: fed
+        forward, that motion lifted the arm off with it while the spring still pulled down.
+        """
+        self._feedforward = on
+
     def restore_gains(self):
         """Back to the fdcc.toml gains and frame."""
         p = self.imp.p
@@ -530,7 +555,7 @@ class Env:
         prev = np.asarray(actual_pose if self._leashed is None else self._leashed, float)
         self._leashed, held = fdcc.leash_step(prev, des_pose, actual_pose, self.leash_N,
                                               imp.p.speed * self.dt, weight=imp.K,
-                                              frame=imp.frame, hold=imp.T_hold)
+                                              frame=imp.frame, hold=imp.hold)
         self._leash_held = any(held)
         return URPose(*self._leashed)
 
@@ -702,6 +727,8 @@ class Env:
                     if wd:
                         self.ctrl.kickWatchdog()        # holding still, not stalled
             else:
+                if not self._feedforward:
+                    imp.note_target_jump(target)    # see set_feedforward()
                 v_last = imp.step(actual_pose, W, target)
                 self._speedL(v_last, imp.p.accel[0], SPEEDL_ADMITTANCE)
 
