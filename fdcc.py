@@ -205,7 +205,7 @@ def leash_step(prev, des, actual, limit, max_step, weight=None, frame='tool', ho
     max(limit, the one `prev` already has) -- position and rotation separately.
 
     e is the error from `actual` to the target the spring really pulls toward: `prev`
-    moved by `hold` (Impedance.T_hold, the gain-change hold; None = none), in `frame`
+    moved by `hold` (Impedance.hold, the gain-change hold; None = none), in `frame`
     axes ('tool' or 'base', Impedance.frame). With weight = Impedance.K that bounds the
     spring FORCE and torque per axis of the gains, so a stiff axis gets the whole limit
     and soft axes do not eat it: one 3D radius of leash_N / max(K) stopped the arm short
@@ -219,14 +219,14 @@ def leash_step(prev, des, actual, limit, max_step, weight=None, frame='tool', ho
     """
     prev, des, actual = (np.asarray(x, float) for x in (prev, des, actual))
     wt = np.ones(6) if weight is None else np.asarray(weight, float)
-    H = np.eye(4) if hold is None else np.asarray(hold, float)
+    hp, Rh = (np.zeros(3), np.eye(3)) if hold is None else hold
     out, held = prev.copy(), [False, False]
     Rp, Ra = _rotvec_to_R(prev[3:]), _rotvec_to_R(actual[3:])
 
     # position: largest s in [0, 1] with |W (u + s w)| <= r, W = diag(weight) A. The error
     # in `frame` axes is A (p_target - p_arm), small-angle (the leash is a bound, not a law)
     w = _clamp_halves(np.r_[des[:3] - prev[:3], 0, 0, 0], max_step[0], 1)[:3]
-    u = prev[:3] + Rp @ H[:3, 3] - actual[:3]
+    u = prev[:3] + hp - actual[:3]
     W = wt[:3, None] * (Ra.T if frame == 'tool' else np.eye(3))
     a, b = W @ u, W @ w
     r = max(limit[0], np.linalg.norm(a))
@@ -242,7 +242,6 @@ def leash_step(prev, des, actual, limit, max_step, weight=None, frame='tool', ho
     th = np.linalg.norm(d)
     if th > max_step[1]:
         d *= max_step[1] / th
-    Rh = H[:3, :3]
 
     def tq(s):
         Re = _rotvec_to_R(s * d) @ Rp @ Rh
@@ -291,8 +290,23 @@ class Impedance:
 
     def clear_hold(self):
         """Drop the hold offset: the spring again pulls toward pose_target itself."""
-        self.T_hold = np.eye(4)         # target -> held target, see step() 2a
+        # target -> held target (step() 2a): (shift of the TCP point in BASE axes, rotation
+        # on the target's axes). One tuple, swapped whole, so other threads read a
+        # consistent pair (held(), unheld()).
+        self.hold = (np.zeros(3), np.eye(3))
         self._K_used = None             # K of the previous step; a change rescales the hold
+
+    def held(self, pose_target):
+        """The pose the spring pulls toward when the caller commands `pose_target` (UR pose)."""
+        hp, Rh = self.hold
+        pose_target = np.asarray(pose_target, float)
+        return np.r_[pose_target[:3] + hp, _R_to_rotvec(_rotvec_to_R(pose_target[3:]) @ Rh)]
+
+    def unheld(self, pose):
+        """Inverse of held(): the pose_target that makes the spring pull toward `pose`."""
+        hp, Rh = self.hold
+        pose = np.asarray(pose, float)
+        return np.r_[pose[:3] - hp, _R_to_rotvec(_rotvec_to_R(pose[3:]) @ Rh.T)]
 
     def set_gains(self, K=None, D=None, M=None, sel=None, ramp_s=None, frame=None):
         """
@@ -375,7 +389,8 @@ class Impedance:
         if self._ramp is not None:
             self._advance_ramp()
         T_se, T_st_in = pose_to_T(pose), pose_to_T(pose_target)
-        T_st = T_st_in @ self.T_hold
+        hp, Rh = self.hold
+        T_st = _T(T_st_in[:3, :3] @ Rh, T_st_in[:3, 3] + hp)
         T_sc, T_sct = T_se @ self.T_ec, T_st @ self.T_ec
         R_sc = T_sc[:3, :3]
         Q = np.eye(6) if self.frame == 'tool' else _B(R_sc)  # compliance coordinates
@@ -396,8 +411,12 @@ class Impedance:
         # that part of xi is scaled by K_old / K_new. The rest (lag behind a moving
         # target, F ~ 0) is left alone; scaling it too turned a 3 deg tracking lag at a
         # scripted end into a ~30 deg preload in free space (logs-debug-fdcc/bug2, 10.1 s).
-        # The offset lives in T_hold, applied on top of every later target: moving the
+        # The offset lives in self.hold, applied on top of every later target: moving the
         # caller's target let the leash walk it back at the speed limit, fed forward.
+        # Its shift is kept in BASE axes, not the target's: on the target's axes a later
+        # rotation of the target swung the held point around the target's TCP, |hold| away
+        # from the arm (up to 41 mm in 2 s in logs-policy-imp). In base axes the held point
+        # turns about itself, and a preload stays along the axis it was built on.
         # Stiff axes and K = 0 on either side keep xi.
         if self._K_used is not None and not np.array_equal(self._K_used, self.K):
             xi = se3_log(_inv(T_sc) @ T_sct)
@@ -408,7 +427,8 @@ class Impedance:
             dx = np.where(ok, S_hold * (1 / np.where(ok, self.K, 1.0) - 1 / np.where(ok, self._K_used, 1.0)), 0.0)
             T_sct = T_sc @ se3_exp(Q.T @ (xq + dx))
             T_st = T_sct @ _inv(self.T_ec)
-            self.T_hold = _inv(T_st_in) @ T_st
+            hp, Rh = T_st[:3, 3] - T_st_in[:3, 3], T_st_in[:3, :3].T @ T_st[:3, :3]
+            self.hold = (hp, Rh)
         self._K_used = self.K.copy()
 
         # 2. error and target twist, body at c
@@ -422,7 +442,9 @@ class Impedance:
         else:
             Vb_et = _B(T_st_in[:3, :3]).T @ np.asarray(twist_target, float)
         self.T_target_prev = T_st_in
-        Vb_et = adjoint(_inv(self.T_hold)) @ Vb_et                 # same motion, held target
+        # same motion, held target: a base shift moves the held point with the target's
+        # TCP (no w x hold term), so only the axes change
+        Vb_et = _B(Rh.T) @ Vb_et
         Vt = adjoint(T_cct) @ (self.Ad_ec_inv @ Vb_et)
 
         xq, Vtq, Vq = Q @ xi, Q @ Vt, Q @ self.V
@@ -456,5 +478,5 @@ class Impedance:
         v_tcp = _clamp_halves(_B(T_se[:3, :3]) @ (self.Ad_ec @ self.V), *p.speed)
 
         self.last = {'F_c': F, 'xi': xi, 'V': self.V.copy(), 'ff_gain': self.g.copy(), 'V_t': Vt,
-                     'hold': se3_log(self.T_hold)}
+                     'hold': np.r_[hp, _R_to_rotvec(Rh)]}     # [base shift; rotvec on target axes]
         return v_tcp
