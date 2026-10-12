@@ -111,7 +111,7 @@ class DualSenseInterface:
         self.latest_obs = obs
 
     def residual_action(self, des_pose, dt):
-        delta = self.act['right_delta'] * 5
+        delta = self.act['right_delta'] * 10
 
         # Position: simple addition
         dpos = delta[:3] * self.speed[:3] * dt

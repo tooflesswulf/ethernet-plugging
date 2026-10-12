@@ -89,7 +89,8 @@ class InterruptSequence:
         self.rexec = rexec
         self.queue = []  # list of (step, Promise)
         obs = rexec.env.get_obs()
-        self.last_action = (URPose(*obs['state']['actual_pose']),
+        # the leashed target, not the arm: an empty queue must not move the target
+        self.last_action = (URPose(*obs['state']['target_pose']),
                             rexec.env.des_gripper_state, False, 0.)
         rexec.get_action = self._tick  # shadows the class method until the queue drains
         rexec._interrupt_sequence = self
@@ -194,6 +195,7 @@ class InterruptSequence:
     def _uninstall(self):
         rexec, iface = self.rexec, self.rexec.iface
         rexec.env.restore_gains()          # in case a MotionStep was cut short
+        rexec.env.set_feedforward(True)    # likewise, mid-release
         del rexec.get_action
         rexec._interrupt_sequence = None
 
@@ -236,22 +238,33 @@ class Step:
 
 class MotionStep(Step):
     """
-    Drive the robot to a target pose: interpolates the command (linear
-    position, slerp orientation) from the start pose to the goal with the
-    MOTION_PROFILE time scaling (constant speed, trapezoid with TRAPEZOID_ACCEL_S
-    ramps, or minimum-jerk), whose PEAK speeds are `speed` (m/s) and `rot_speed`
-    (rad/s), whichever takes longer (min-jerk takes about 1.9x as long as linear). The admittance is stiffened for the move (fdcc.toml [scripted])
-    and restored when it finishes. Finishes when the measured pose converges (pos_tol meters,
-    rot_tol radians) or `timeout` seconds elapse.
+    Drive the robot to a target pose, in two phases.
+
+    Release: the commanded target walks back, at `release_speed`, to the one whose held
+    pose (fdcc hold offset included) is the arm, at the current gains and without
+    feedforward -- whatever the spring was pressing with drops to zero while the arm stays
+    put. Done once within `release_tol`; immediate in free space. This replaces the old
+    reanchor(), which snapped the target to the arm in one cycle: the same release, but a
+    jump in the logged target that a policy cloning it cannot reproduce.
+
+    Move: stiffen (fdcc.toml [scripted]), then interpolate the command (linear position,
+    slerp orientation) from the leashed target to the goal with the MOTION_PROFILE time
+    scaling (constant speed, trapezoid with TRAPEZOID_ACCEL_S ramps, or minimum-jerk), whose
+    PEAK speeds are `speed` (m/s) and `rot_speed` (rad/s), whichever takes longer (min-jerk
+    takes about 1.9x as long as linear). The goal is where the ARM should end up: the
+    command aims at fdcc's unheld(goal), so a hold offset left by an earlier gain change
+    under load does not shift it. Gains are restored when it finishes. Finishes when the
+    measured pose converges (pos_tol meters, rot_tol radians) or `timeout` seconds elapse.
 
     With `relative=True`, `target_pose` is a delta [dx, dy, dz, drx, dry, drz]
     (base-frame translation, tool-frame rotation) applied to wherever the
-    robot is when the step starts. `gripper_state` of None holds the last
-    commanded gripper state.
+    robot is when the move starts (after the release). `gripper_state` of None holds the
+    last commanded gripper state.
     """
 
     def __init__(self, rexec, target_pose, gripper_state=None, relative=False,
-                 speed=0.08, rot_speed=0.5, pos_tol=2e-3, rot_tol=0.02, timeout=15.0):
+                 speed=0.08, rot_speed=0.5, pos_tol=2e-3, rot_tol=0.02, timeout=15.0,
+                 release_speed=(0.05, 0.5), release_tol=(1e-3, 0.01), release_timeout=3.0):
         super().__init__(rexec)
         self.target = URPose(*target_pose)
         self.gripper_state = gripper_state
@@ -259,18 +272,53 @@ class MotionStep(Step):
         self.speed, self.rot_speed = speed, rot_speed
         self.pos_tol, self.rot_tol = pos_tol, rot_tol
         self.timeout = timeout
+        self.release_speed, self.release_tol = release_speed, release_tol
+        self.release_timeout = release_timeout
 
     def on_start(self):
-        self.start_pose = self.actual_pose()
+        # Continue from the leashed target, not the arm: no jump, the hold is kept.
+        self.cmd = np.array(self.env.restart_at_target(), float)
+        self.t_last = 0.
+        self.t_move = None                  # set when the move phase starts
+        self.env.set_feedforward(False)     # release: see env.set_feedforward()
+
+    def _grip(self):
+        return self.env.des_gripper_state if self.gripper_state is None else self.gripper_state
+
+    def _release(self, t):
+        """One release tick: the action, or None once released."""
+        imp, arm = self.env.imp, np.array(self.actual_pose(), float)
+        pos_err, rot_err = pose_error(imp.held(self.cmd), arm)
+        if (pos_err < self.release_tol[0] and rot_err < self.release_tol[1]) or t > self.release_timeout:
+            if t > self.release_timeout:
+                print(f'release timed out (pos_err={pos_err:.4f} m, rot_err={rot_err:.4f} rad)')
+            return None
+        # Step toward the target that makes the spring pull toward the arm. The arm unloads
+        # a little as the force drops, so the goal is re-read every tick.
+        goal, dt = imp.unheld(arm), t - self.t_last
+        self.t_last = t
+        dp, dr = goal[:3] - self.cmd[:3], (R.from_rotvec(goal[3:]) * R.from_rotvec(self.cmd[3:]).inv()).as_rotvec()
+        lp, la = np.linalg.norm(dp), np.linalg.norm(dr)
+        sp = min(1.0, self.release_speed[0] * dt / lp) if lp > 0 else 1.0
+        sa = min(1.0, self.release_speed[1] * dt / la) if la > 0 else 1.0
+        self.cmd = np.r_[self.cmd[:3] + sp * dp, (R.from_rotvec(sa * dr) * R.from_rotvec(self.cmd[3:])).as_rotvec()]
+        return URPose(*map(float, self.cmd)), self._grip(), False, 0.
+
+    def _start_move(self, t):
+        self.env.set_feedforward(True)      # the move starts from rest: nothing to kick
+        self.t_move = t
+        self.start_pose = URPose(*map(float, self.cmd))
+        arm = self.actual_pose()
         if self.relative:
             self.goal = URPose(*map(float, np.r_[
-                np.array(self.start_pose[:3]) + np.array(self.target[:3]),
-                (R.from_rotvec(self.start_pose[3:]) * R.from_rotvec(self.target[3:])).as_rotvec(),
+                np.array(arm[:3]) + np.array(self.target[:3]),
+                (R.from_rotvec(arm[3:]) * R.from_rotvec(self.target[3:])).as_rotvec(),
             ]))
         else:
             self.goal = self.target
+        self.cmd_goal = URPose(*map(float, self.env.imp.unheld(self.goal)))
         print(f'Moving robot to {self.goal} ...')
-        dist, ang = pose_error(self.start_pose, self.goal)
+        dist, ang = pose_error(self.start_pose, self.cmd_goal)
         # `speed` / `rot_speed` are PEAK speeds (and stay under fdcc's speed clamp), so
         # stretch the duration by each profile's peak / mean speed.
         cruise = max(dist / self.speed, ang / self.rot_speed, 1e-6)   # at peak speed throughout
@@ -283,13 +331,18 @@ class MotionStep(Step):
             self.profile = trapezoid(min(ta / self.duration, 0.5))
         else:
             self.profile, self.duration = (lambda tau: min(max(tau, 0.0), 1.0)), cruise
-        # The move starts at the arm: restart the leashed target there (else the stale
-        # teleop target is walked back and fed forward), then stiffen -- at the teleop
-        # gains the last mm crawl in with D/K = 3.3 s against pos_tol (fdcc.toml [scripted]).
-        self.env.reanchor()
+        # Stiffen -- at the teleop gains the last mm crawl in with D/K = 3.3 s against
+        # pos_tol (fdcc.toml [scripted]). After the release nothing is pressed, so the gain
+        # change leaves the hold as it is (fdcc.py step 2a only rescales a loaded spring).
         self.env.set_gains(**self.env.scripted_gains)
 
     def tick(self, t):
+        if self.t_move is None:
+            action = self._release(t)
+            if action is not None:
+                return action
+            self._start_move(t)
+        t -= self.t_move
         pos_err, rot_err = pose_error(self.actual_pose(), self.goal)
         # Only after the profile has finished: converging inside the tolerance while the
         # target is still decelerating stopped it in one tick -- a clunk every transition.
@@ -300,8 +353,7 @@ class MotionStep(Step):
             print(f'motion to {self.goal} timed out (pos_err={pos_err:.4f} m, rot_err={rot_err:.4f} rad)')
             self.env.restore_gains()
             return None
-        grip = self.env.des_gripper_state if self.gripper_state is None else self.gripper_state
-        return interpolate(self.start_pose, self.goal, self.profile(t / self.duration)), grip, False, 0.
+        return interpolate(self.start_pose, self.cmd_goal, self.profile(t / self.duration)), self._grip(), False, 0.
 
 
 class GripperStep(Step):
