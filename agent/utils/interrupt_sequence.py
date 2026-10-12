@@ -140,9 +140,21 @@ class InterruptSequence:
                             speed=speed, rot_speed=rot_speed, pos_tol=pos_tol,
                             rot_tol=rot_tol, timeout=timeout)
 
+    def release(self, gripper_state=None, speed=(0.05, 0.5), tol=(1e-3, 0.01), timeout=3.0):
+        """
+        Queue a release: walk the spring target back to the arm at the current gains, so
+        whatever it was pressing with drops to ~0 while the arm stays put (see ReleaseStep).
+        Every move_to/move_relative starts with one; queue it on its own before a gripper
+        step that lets go of something the arm is pushing on, e.g. a seated plug.
+        """
+        return self.add(ReleaseStep(self.rexec, gripper_state=gripper_state, speed=speed,
+                                    tol=tol, timeout=timeout))
+
     def gripper(self, gripper_state, settle_time=0.3, width_eps=0.1, timeout=5.0):
         """
-        Queue a gripper move, holding the current pose while it executes.
+        Queue a gripper move, holding the current pose while it executes. It does not
+        release first: opening on a pushed plug drops the arm onto the spring target
+        (queue release() before it).
 
         Args:
             gripper_state: GRIP_OPEN (0) or GRIP_CLOSED (1)
@@ -236,16 +248,58 @@ class Step:
         return URPose(*self.env.get_obs()['state']['actual_pose'])
 
 
+class ReleaseStep(Step):
+    """
+    Walk the commanded target back, at `speed` ([m/s, rad/s]), to the one whose held pose
+    (fdcc hold offset included) is the arm, at the current gains and without feedforward
+    -- whatever the spring was pressing with drops to zero while the arm stays put. Starts
+    from the leashed target (no jump, the hold is kept). Done once within `tol`
+    ([m, rad]), or after `timeout` s; immediate in free space. This replaces the old
+    reanchor(), which snapped the target to the arm in one cycle: the same release, but a
+    jump in the logged target that a policy cloning it cannot reproduce.
+
+    MotionStep starts with one. On its own (InterruptSequence.release) it goes before a
+    GripperStep that lets go of a pushed part: opening on a plug seated at the 40 N leash
+    dropped the open fingers 9-13 mm into the housing, up to 127 N
+    (ethernet-impedance-v2 episode 24).
+    """
+
+    def __init__(self, rexec, gripper_state=None, speed=(0.05, 0.5), tol=(1e-3, 0.01), timeout=3.0):
+        super().__init__(rexec)
+        self.gripper_state = gripper_state
+        self.speed, self.tol, self.timeout = speed, tol, timeout
+
+    def on_start(self):
+        self.cmd = np.array(self.env.restart_at_target(), float)
+        self.t_last = 0.
+        self.env.set_feedforward(False)     # see env.set_feedforward()
+
+    def tick(self, t):
+        imp, arm = self.env.imp, np.array(self.actual_pose(), float)
+        pos_err, rot_err = pose_error(imp.held(self.cmd), arm)
+        if (pos_err < self.tol[0] and rot_err < self.tol[1]) or t > self.timeout:
+            if t > self.timeout:
+                print(f'release timed out (pos_err={pos_err:.4f} m, rot_err={rot_err:.4f} rad)')
+            self.env.set_feedforward(True)  # the target is at rest: nothing to kick
+            return None
+        # Step toward the target that makes the spring pull toward the arm. The arm unloads
+        # a little as the force drops, so the goal is re-read every tick.
+        goal, dt = imp.unheld(arm), t - self.t_last
+        self.t_last = t
+        dp, dr = goal[:3] - self.cmd[:3], (R.from_rotvec(goal[3:]) * R.from_rotvec(self.cmd[3:]).inv()).as_rotvec()
+        lp, la = np.linalg.norm(dp), np.linalg.norm(dr)
+        sp = min(1.0, self.speed[0] * dt / lp) if lp > 0 else 1.0
+        sa = min(1.0, self.speed[1] * dt / la) if la > 0 else 1.0
+        self.cmd = np.r_[self.cmd[:3] + sp * dp, (R.from_rotvec(sa * dr) * R.from_rotvec(self.cmd[3:])).as_rotvec()]
+        grip = self.env.des_gripper_state if self.gripper_state is None else self.gripper_state
+        return URPose(*map(float, self.cmd)), grip, False, 0.
+
+
 class MotionStep(Step):
     """
     Drive the robot to a target pose, in two phases.
 
-    Release: the commanded target walks back, at `release_speed`, to the one whose held
-    pose (fdcc hold offset included) is the arm, at the current gains and without
-    feedforward -- whatever the spring was pressing with drops to zero while the arm stays
-    put. Done once within `release_tol`; immediate in free space. This replaces the old
-    reanchor(), which snapped the target to the arm in one cycle: the same release, but a
-    jump in the logged target that a policy cloning it cannot reproduce.
+    Release: a ReleaseStep (`release_speed`, `release_tol`, `release_timeout`).
 
     Move: stiffen (fdcc.toml [scripted]), then interpolate the command (linear position,
     slerp orientation) from the leashed target to the goal with the MOTION_PROFILE time
@@ -272,42 +326,16 @@ class MotionStep(Step):
         self.speed, self.rot_speed = speed, rot_speed
         self.pos_tol, self.rot_tol = pos_tol, rot_tol
         self.timeout = timeout
-        self.release_speed, self.release_tol = release_speed, release_tol
-        self.release_timeout = release_timeout
-
-    def on_start(self):
-        # Continue from the leashed target, not the arm: no jump, the hold is kept.
-        self.cmd = np.array(self.env.restart_at_target(), float)
-        self.t_last = 0.
+        self.release = ReleaseStep(rexec, gripper_state=gripper_state, speed=release_speed,
+                                   tol=release_tol, timeout=release_timeout)
         self.t_move = None                  # set when the move phase starts
-        self.env.set_feedforward(False)     # release: see env.set_feedforward()
 
     def _grip(self):
         return self.env.des_gripper_state if self.gripper_state is None else self.gripper_state
 
-    def _release(self, t):
-        """One release tick: the action, or None once released."""
-        imp, arm = self.env.imp, np.array(self.actual_pose(), float)
-        pos_err, rot_err = pose_error(imp.held(self.cmd), arm)
-        if (pos_err < self.release_tol[0] and rot_err < self.release_tol[1]) or t > self.release_timeout:
-            if t > self.release_timeout:
-                print(f'release timed out (pos_err={pos_err:.4f} m, rot_err={rot_err:.4f} rad)')
-            return None
-        # Step toward the target that makes the spring pull toward the arm. The arm unloads
-        # a little as the force drops, so the goal is re-read every tick.
-        goal, dt = imp.unheld(arm), t - self.t_last
-        self.t_last = t
-        dp, dr = goal[:3] - self.cmd[:3], (R.from_rotvec(goal[3:]) * R.from_rotvec(self.cmd[3:]).inv()).as_rotvec()
-        lp, la = np.linalg.norm(dp), np.linalg.norm(dr)
-        sp = min(1.0, self.release_speed[0] * dt / lp) if lp > 0 else 1.0
-        sa = min(1.0, self.release_speed[1] * dt / la) if la > 0 else 1.0
-        self.cmd = np.r_[self.cmd[:3] + sp * dp, (R.from_rotvec(sa * dr) * R.from_rotvec(self.cmd[3:])).as_rotvec()]
-        return URPose(*map(float, self.cmd)), self._grip(), False, 0.
-
     def _start_move(self, t):
-        self.env.set_feedforward(True)      # the move starts from rest: nothing to kick
         self.t_move = t
-        self.start_pose = URPose(*map(float, self.cmd))
+        self.start_pose = URPose(*map(float, self.release.cmd))
         arm = self.actual_pose()
         if self.relative:
             self.goal = URPose(*map(float, np.r_[
@@ -338,7 +366,7 @@ class MotionStep(Step):
 
     def tick(self, t):
         if self.t_move is None:
-            action = self._release(t)
+            action = self.release()         # runs on its own clock, started on its first call
             if action is not None:
                 return action
             self._start_move(t)
