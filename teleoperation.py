@@ -91,6 +91,7 @@ class Teleoperation(robot_execution.RobotExecution):
     def unplug_and_release(self):
         self.stiff_z = False
         seq = interrupt(self)
+        seq.release()               # let go of the push before the fingers let go of the plug
         seq.gripper(GRIP_OPEN)
         seq.move_to(self.unplug_pose)
         seq.gripper(GRIP_CLOSED)
