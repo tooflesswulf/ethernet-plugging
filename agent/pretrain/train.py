@@ -33,7 +33,7 @@ def batch_to_device(batch, device="cuda:0"):
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
           obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(),
-          use_wandb=False, log_interval=10, save_interval=10,
+          max_n_episodes=50, use_wandb=False, log_interval=10, save_interval=10,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
     if obs_fields is None:
@@ -47,7 +47,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                       cond_steps=obs_horizon, img_cond_steps=obs_horizon,
                                       horizon_steps=16, action_mode=action_mode, device=device,
-                                      max_n_episodes=50, **action_kwargs)
+                                      max_n_episodes=max_n_episodes, **action_kwargs)
 
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                           cond_steps=obs_horizon, img_cond_steps=obs_horizon,
@@ -159,6 +159,8 @@ def parse_args():
     parser.add_argument('--ckpt_dir', type=str, default='logs')
     parser.add_argument('--end_signal', action='store_true', default=True)
     parser.add_argument('--end_steps', type=int, default=None)
+    parser.add_argument('--max_episodes', type=int, default=50,
+                        help='train on the first N episodes of the dataset')
     parser.add_argument('--obs_fields', nargs='+', default=None,
                         help="state observation fields (default: pose gripper_width, + force if 'force' in --name); "
                              "log_<field> is log10 of a field, e.g. log_stiffness for the current K; "
@@ -204,5 +206,5 @@ if __name__ == '__main__':
     train(name=args.name, dataset_path=dataset_path, ckpt_dir=ckpt_path,
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
           obs_fields=args.obs_fields, pose_target=args.pose_target, action_anchor=args.action_anchor,
-          impedance_fields=args.impedance_fields,
+          impedance_fields=args.impedance_fields, max_n_episodes=args.max_episodes,
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
