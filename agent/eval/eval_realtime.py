@@ -60,7 +60,8 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         zf = self.last_obs['state']['filtered_force']
         kz = f'  Kz: {self.env.imp.K[2]:6.0f}' if self.policy.impedance_fields else ''
         rate = self.buffer._chunk_count / max(time.time() - self._t_pred_start, 1e-3)    # chunks/s
-        print(f'{rate:5.1f} chunks/s  zforce: {zf[2]:.05f}{kz}', end='\r')
+        network_status = 'yes' if self.last_obs['network_status'] else 'no '
+        print(f'{rate:5.1f} chunks/s  zforce: {zf[2]:0=7.3f}{kz} network: {network_status}', end='\r')
 
     def get_action(self):
         if self.buffer.is_empty():
@@ -77,14 +78,17 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             des_pose = self.lowpass(des_pose, now)
         # Predicted impedance, split back into fields and blended over one command period
         # (no-op without an impedance head)
-        apply_gains(self.env, {f: log_gains[6 * i:6 * (i + 1)]
-                               for i, f in enumerate(self.policy.impedance_fields)},
-                    ramp_s=self.control_dt)
+        self.apply_gains({f: log_gains[6 * i:6 * (i + 1)]
+                          for i, f in enumerate(self.policy.impedance_fields)})
         # End-of-episode signal: stop once the executed action's done score crosses the threshold.
         if self.policy.predict_done and done > self.done_threshold:
             print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
             self.stop()
         return des_pose, des_width
+
+    def apply_gains(self, log_gains):
+        """Command one timestep of predicted gains ({field: (6,) log10 gains}); a hook for overrides."""
+        apply_gains(self.env, log_gains, ramp_s=self.control_dt)
 
     def prediction_loop(self):
         action_horizon = self.policy.action_horizon
