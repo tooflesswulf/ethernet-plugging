@@ -60,7 +60,8 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         zf = self.last_obs['state']['filtered_force']
         kz = f'  Kz: {self.env.imp.K[2]:6.0f}' if self.policy.impedance_fields else ''
         rate = self.buffer._chunk_count / max(time.time() - self._t_pred_start, 1e-3)    # chunks/s
-        print(f'{rate:5.1f} chunks/s  zforce: {zf[2]:.05f}{kz}', end='\r')
+        network_status = 'yes' if self.last_obs['network_status'] else 'no '
+        print(f'{rate:5.1f} chunks/s  zforce: {zf[2]:0=7.3f}{kz} network: {network_status}', end='\r')
 
     def get_action(self):
         if self.buffer.is_empty():
