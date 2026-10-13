@@ -1,9 +1,14 @@
 from agent.eval.eval_realtime import EvalRealtimeChunking
 from env import GRIP_OPEN, GRIP_CLOSED
 import numpy as np
+import fdcc
 import argparse
 import time
 import os
+
+STIFF_Z_K = 3000.0      # [N/m] on base z while Cross is toggled on, to push the plug in (as teleoperation.py)
+STIFF_Z_RAMP_S = 0.1    # blend in/out over this long (fdcc.toml gain_ramp_s)
+
 
 class TeleoperationRL(EvalRealtimeChunking):
     # No init-- inherited from EvalRealtimeChunking.
@@ -15,6 +20,7 @@ class TeleoperationRL(EvalRealtimeChunking):
         print('Circle overrides the gripper: it flips the commanded open/close and holds it')
         print('until the policy has predicted the same state for '
               f'{self.GRIP_OVERRIDE_AGREE_S:.1f} s (press again to flip back).')
+        print(f'Cross toggles base z stiffness to {STIFF_Z_K:.0f} N/m, overriding the policy\'s.')
         # print('Dpad-Left rewinds actions.')
         # print('- press = rewind 1s')
         # print('- hold = rewind until released')
@@ -23,6 +29,8 @@ class TeleoperationRL(EvalRealtimeChunking):
 
     grip_override = None            # GRIP_OPEN / GRIP_CLOSED while the operator holds the gripper
     _grip_agree_t = None            # since when the policy has agreed with the override
+    stiff_z = False                 # Cross: base z K overridden to STIFF_Z_K
+    _stiff_w = 0.                   # blend weight of the override, ramps toward stiff_z
 
     # undo_action_buffer = []
     # action_hist = []
@@ -49,12 +57,41 @@ class TeleoperationRL(EvalRealtimeChunking):
 
         # super() = RealtimeChunking.get_action()
         # gets nn prediction from RealtimeChunkingBuffer
+        if self.iface.act.get('toggle_stiff_z'):
+            self.toggle_stiff_z()
         nn_action = super().get_action()
         des_pose, des_grip, _, _ = self._unshortcut_action(nn_action)
         des_pose = self.iface.residual_action(np.array(des_pose), self.control_dt)
         des_grip = self.override_gripper(des_grip)
         # self.action_hist.append((des_pose, des_grip))
         return des_pose, des_grip
+
+    def toggle_stiff_z(self):
+        """
+        Cross: base z stiffness to STIFF_Z_K; again: back to the policy's (or fdcc.toml's).
+        With a stiffness head the override is applied to every predicted command (apply_gains),
+        blended in log K over STIFF_Z_RAMP_S; without one it is set once, ramped by Env.
+        """
+        self.stiff_z = not self.stiff_z
+        print(f'\nstiff z {"ON" if self.stiff_z else "off"}')
+        if 'stiffness' in self.policy.impedance_fields:
+            return
+        if self.stiff_z:
+            K = fdcc._six(self.env.imp.p.K)
+            K[2] = STIFF_Z_K
+            self.env.set_gains(K=K, frame='base')
+        else:
+            self.env.restore_gains()
+
+    def apply_gains(self, log_gains):
+        step = self.control_dt / STIFF_Z_RAMP_S
+        self._stiff_w = float(np.clip(self._stiff_w + (step if self.stiff_z else -step), 0., 1.))
+        if self._stiff_w > 0 and 'stiffness' in log_gains:
+            K = np.array(log_gains['stiffness'], float)
+            w = 3 * self._stiff_w ** 2 - 2 * self._stiff_w ** 3     # smoothstep, as fdcc ramps
+            K[2] += w * (np.log10(STIFF_Z_K) - K[2])
+            log_gains = {**log_gains, 'stiffness': K}
+        super().apply_gains(log_gains)
 
     def override_gripper(self, policy_grip):
         """
