@@ -159,5 +159,6 @@ if __name__ == "__main__":
         log_dir=path,
         control_freq=args.control_freq, weight_decay=args.weight_decay,
         taper=args.taper, lpf_hz=args.lpf,
+        env_metadata={'id': args.id} if path is not None else None,
     )
     teleop.run()
