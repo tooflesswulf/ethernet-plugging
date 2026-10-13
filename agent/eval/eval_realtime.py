@@ -14,7 +14,7 @@ import os
 
 class EvalRealtimeChunking(robot_execution.RobotExecution):
     def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=100.0, weight_decay=0.5, taper=0.15,
-                 lpf_hz=3.0, done_threshold=0.5):
+                 lpf_hz=3.0, done_threshold=0.5, env_metadata=None):
         # Inference runs in its own process (see policy_worker); it loads the policy while
         # the robot homes. This CPU copy only answers config questions (fields, horizons).
         self.worker = PolicyWorker(ckpt, device)
@@ -24,6 +24,10 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         # End the episode once the policy's predicted completion score crosses this.
         self.done_threshold = done_threshold
         grip = GripperStats(*self.policy.grip_stats)
+        # Episode metadata (rawdata.h5 /metadata), e.g. for recording demonstrations: the policy's
+        # gripper settings are added, as teleoperation.py records its GRIP_* (training reads them).
+        if env_metadata is not None:
+            env_metadata = {**grip._asdict(), **env_metadata}
 
         # Commands go out at control_freq, independent of the policy's framerate: the buffer
         # spaces each chunk's actions at 1 / framerate and interpolates them in time. At
@@ -40,6 +44,7 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             gforce=grip.grip_force_n,
             gspeed=grip.grip_speed_mmps,
             gpullback=grip.grip_pullback_mm,
+            env_metadata=env_metadata or {},
         )
 
         self.buffer = RealtimeActionChunkingBuffer(action_dt=1.0 / self.policy.framerate,
