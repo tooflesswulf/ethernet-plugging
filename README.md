@@ -139,7 +139,7 @@ options:
 ```
 
 ### Training
-Train using `python agent/pretrain/train.py`. The action mode & observation fields can be changed by editing the strings at the top of `train()`.
+Train using `python agent/pretrain/train.py`. Observation fields, pose target and action anchor are set with CLI flags (below). The action mode (`local_delta`), horizon (16), batch size and episode cap are hardcoded at the top of `train()`. Note that `max_n_episodes=50`, so episodes past the first 50 are silently ignored.
 
 For impedance-controller data (logged by the FDCC env, e.g. `ethernet-impedance`), pass `--impedance`: the policy clones the controller's spring target (`control/target`) instead of the actual pose, and additionally predicts log10 K, D, M (base-frame diagonals), with `pose, gripper_width, force` observations. Chunks are anchored to the target too: the delta actions are relative to the spring target at the chunk start, and eval integrates them from the live `target_pose` (anchoring to the lagging actual pose made overlapping chunks disagree, a 20 Hz sawtooth in the commanded target). `--pose_target`, `--action_anchor`, `--impedance_fields` and `--obs_fields` set these individually; `--obs_fields ... log_stiffness` also observes the controller's current K.
 
