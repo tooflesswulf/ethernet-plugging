@@ -33,7 +33,7 @@ def batch_to_device(batch, device="cuda:0"):
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
           obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(),
-          max_n_episodes=50, use_wandb=False, log_interval=10, save_interval=10,
+          max_n_episodes=50, init_ckpt=None, lr=1e-4, use_wandb=False, log_interval=10, save_interval=10,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
     if obs_fields is None:
@@ -73,8 +73,21 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                              impedance_fields=dataset.impedance_fields,
                              action_anchor=dataset.action_anchor,
                              obs_fields=obs_fields).to(device)
+    if init_ckpt is not None:
+        # Fine-tune: start from the checkpoint's (EMA) weights. Its state_dict also carries its
+        # normalization buffers, which the weights were trained against, so they replace the
+        # stats computed from this dataset above.
+        ckpt = torch.load(init_ckpt, map_location=device, weights_only=False)
+        mismatched = {k: (v, policy.config[k]) for k, v in ckpt['config'].items() if policy.config.get(k) != v}
+        assert not mismatched, f'{init_ckpt} config differs from this run (ckpt, run): {mismatched}'
+        policy.load_state_dict(ckpt['model_state_dict'])
+        for key, data in (('state', dataset.obs), ('action', np.asarray(dataset.actions).reshape(-1, dataset.act_dim))):
+            lo, hi = getattr(policy, f'{key}_min').cpu().numpy(), getattr(policy, f'{key}_max').cpu().numpy()
+            data = np.asarray(data, dtype=np.float32)  # buffers are float32; compare at their precision
+            outside = ((data < lo) | (data > hi)).any(axis=1).mean()
+            print(f'Fine-tuning from {init_ckpt}: {outside:.2%} of {key}s fall outside its normalization range')
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
-    opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
+    opt = torch.optim.AdamW(params=policy.parameters(), lr=lr, weight_decay=1e-6)
     lr_scheduler = get_scheduler(
         name='cosine',
         optimizer=opt,
@@ -161,6 +174,10 @@ def parse_args():
     parser.add_argument('--end_steps', type=int, default=None)
     parser.add_argument('--max_episodes', type=int, default=50,
                         help='train on the first N episodes of the dataset')
+    parser.add_argument('--init_ckpt', type=str, default=None,
+                        help='fine-tune: start from this checkpoint (keeps its normalization stats; '
+                             'the run\'s flags must reproduce its config)')
+    parser.add_argument('--lr', type=float, default=1e-4, help='peak learning rate (cosine schedule)')
     parser.add_argument('--obs_fields', nargs='+', default=None,
                         help="state observation fields (default: pose gripper_width, + force if 'force' in --name); "
                              "log_<field> is log10 of a field, e.g. log_stiffness for the current K; "
@@ -207,4 +224,5 @@ if __name__ == '__main__':
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
           obs_fields=args.obs_fields, pose_target=args.pose_target, action_anchor=args.action_anchor,
           impedance_fields=args.impedance_fields, max_n_episodes=args.max_episodes,
+          init_ckpt=args.init_ckpt, lr=args.lr,
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
