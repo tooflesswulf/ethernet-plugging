@@ -10,6 +10,8 @@ from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
 from env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
+# action_anchor (a dataset field) -> the live env obs['state'] key holding the same pose
+ANCHOR_STATE_KEYS = {'pose': 'actual_pose', 'target_pose': 'target_pose'}
 
 
 class DiffusionPolicy(nn.Module):
@@ -41,14 +43,28 @@ class DiffusionPolicy(nn.Module):
         obs_fields: list[str] | None = None,
         predict_done: bool | None = None,
         framerate: float = DEFAULT_FRAMERATE,
+        impedance_fields: list[str] | tuple = (),
+        action_anchor: str = 'pose',
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
         grip = GripperStats(*grip_stats) if grip_stats is not None else GripperStats(10, 40, 50, 5)
         self.grip_stats = GripperStats(*(float(x) for x in grip))
 
-        # Actions are [pose(6), gripper(1), done(1)], so assume it if predict_done is None.
+        # Actions are [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field)].
+        # Checkpoints from before predict_done was saved have no gains, so infer it from the size.
+        self.impedance_fields = tuple(impedance_fields)
         self.predict_done = (action_dim > 7) if predict_done is None else predict_done
+        imp_start = 7 + int(self.predict_done)
+        self.impedance_slice = slice(imp_start, imp_start + 6 * len(self.impedance_fields))
+        # Dataset field the delta actions are relative to at the chunk start (see
+        # StitchedSequenceDataset.action_anchor): 'pose' (the actual TCP pose; checkpoints
+        # from before this was saved) or 'target_pose' (the impedance spring target).
+        assert action_anchor in ANCHOR_STATE_KEYS, action_anchor
+        self.action_anchor = action_anchor
+        assert self.impedance_slice.stop == action_dim, (
+            f'action_dim {action_dim} != pose(6) + gripper(1) + done({int(self.predict_done)}) '
+            f'+ 6 * {len(self.impedance_fields)} impedance fields')
 
         # Architecture/config args; saved alongside the weights by save_checkpoint so
         # from_checkpoint can rebuild the policy without the caller knowing the dims.
@@ -67,6 +83,8 @@ class DiffusionPolicy(nn.Module):
             grip_stats=list(self.grip_stats),
             predict_done=self.predict_done,
             framerate=float(framerate),
+            impedance_fields=list(self.impedance_fields),
+            action_anchor=self.action_anchor,
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
@@ -147,11 +165,18 @@ class DiffusionPolicy(nn.Module):
         range_val = max_val - min_val
         return torch.where(range_val == 0, x, (x + 1) / 2 * range_val + min_val)
 
+    # Constant action dims (e.g. damping/mass gains that never change) map to 0 and back to
+    # their value. Passing them through raw like _normalize does lets clip_sample clip
+    # them to [-1, 1] during inference (log10 D = 3 would come back as 1).
     def normalize_actions(self, actions):
-        return self._normalize(actions, self.action_min, self.action_max)
+        const = self.action_max == self.action_min
+        return torch.where(const, torch.zeros_like(actions),
+                           self._normalize(actions, self.action_min, self.action_max))
 
     def unnormalize_actions(self, actions):
-        return self._unnormalize(actions, self.action_min, self.action_max)
+        const = self.action_max == self.action_min
+        return torch.where(const, self.action_min.expand_as(actions),
+                           self._unnormalize(actions, self.action_min, self.action_max))
 
     def normalize_states(self, states):
         return self._normalize(states, self.state_min, self.state_max)
@@ -205,6 +230,28 @@ class DiffusionPolicy(nn.Module):
 
         return self.unnormalize_actions(naction)
 
+    def decode_impedance(self, actions, log=False):
+        """
+        Split the predicted gains out of an unnormalized action chunk.
+
+        Args:
+            actions: (horizon, action_dim) unnormalized actions from predict_action.
+            log:     return log10 gains (for averaging) instead of the gains.
+        Returns:
+            {field: (horizon, 6)} base-frame diagonal gains per impedance field (e.g.
+            'stiffness' -> K), or {} for a policy without an impedance head.
+        """
+        if torch.is_tensor(actions):
+            actions = actions.detach().cpu().numpy()
+        log_gains = np.asarray(actions)[:, self.impedance_slice]
+        return {field: (log_gains[:, 6 * i:6 * (i + 1)] if log else 10 ** log_gains[:, 6 * i:6 * (i + 1)])
+                for i, field in enumerate(self.impedance_fields)}
+
+    def anchor_pose(self, state):
+        """The pose a live env obs['state'] gives integrate_actions: the one the chunk's
+        deltas were trained relative to (actual pose, or the spring target)."""
+        return np.asarray(state[ANCHOR_STATE_KEYS[self.action_anchor]], dtype=float)
+
     def integrate_actions(self, actions, curr_pose, curr_gripper_width):
         """
         Convert a predicted action chunk into absolute desired poses + gripper widths,
@@ -217,7 +264,8 @@ class DiffusionPolicy(nn.Module):
         Args:
             actions:            (horizon, action_dim) unnormalized actions from
                                 predict_action; last dim is the gripper (+1=open, -1=closed).
-            curr_pose:          (6,) current pose [tx, ty, tz, rx, ry, rz] (rotvec).
+            curr_pose:          (6,) pose the deltas start from [tx, ty, tz, rx, ry, rz]
+                                (rotvec); see anchor_pose.
             curr_gripper_width: current physical gripper width, used as fallback when
                                 width stats are unavailable.
 

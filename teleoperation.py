@@ -95,7 +95,7 @@ class Teleoperation(robot_execution.RobotExecution):
         seq.gripper(GRIP_OPEN)
         seq.move_to(self.unplug_pose)
         seq.gripper(GRIP_CLOSED)
-        seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
+        seq.move_relative([0, 0, .03, 0, 0, 0], speed=.05)
 
         r1, r2 = self.release_pose1, self.release_pose2
         rel = np.array(self.release_pose1)

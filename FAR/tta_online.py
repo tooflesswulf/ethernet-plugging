@@ -68,7 +68,7 @@ def get_actions_with_naction(policy: DiffusionPolicy, obs_deque, device='cuda'):
     naction = predict_action_normalized(policy, conditions)
 
     last = obs_deque[-1]['state']
-    curr_pose, curr_gripper_width = np.asarray(last['actual_pose']), last['gripper_width']
+    curr_pose, curr_gripper_width = policy.anchor_pose(last), last['gripper_width']
     unnorm_actions = policy.unnormalize_actions(naction).detach().cpu().numpy()[0]
     des_poses, des_grips, des_done = policy.integrate_actions(unnorm_actions, curr_pose, curr_gripper_width)
     return des_poses, des_grips, des_done, conditions, naction
