@@ -21,6 +21,8 @@ import h5py
 import numpy as np
 
 STITCHED_FIELDS = ['pose', 'force', 'gripper_width', 'gripper_force']
+# Only logged by the impedance (FDCC) env; stitched when every source has them.
+OPTIONAL_STITCHED_FIELDS = ['target_pose', 'stiffness', 'damping', 'mass']
 
 
 def parse_episode_slice(spec: str) -> slice:
@@ -113,8 +115,9 @@ def inspect_source(dataset_dir: str, ep_slice: slice) -> SourceInfo:
         time_start = int(lengths[:start_ep].sum())
         time_stop = int(lengths[:stop_ep].sum())
 
-        field_shapes = {name: f[name].shape for name in STITCHED_FIELDS}
-        field_dtypes = {name: f[name].dtype for name in STITCHED_FIELDS}
+        fields = STITCHED_FIELDS + [name for name in OPTIONAL_STITCHED_FIELDS if name in f]
+        field_shapes = {name: f[name].shape for name in fields}
+        field_dtypes = {name: f[name].dtype for name in fields}
         field_shapes['images'] = f['images'].shape
         field_dtypes['images'] = f['images'].dtype
         images_stored_as = f['images'].attrs['stored_as']
@@ -126,10 +129,21 @@ def inspect_source(dataset_dir: str, ep_slice: slice) -> SourceInfo:
                        field_shapes, field_dtypes, images_stored_as, metadata, framerate)
 
 
-def check_consistent(sources: list[SourceInfo]):
+def stitched_fields(sources: list[SourceInfo]) -> list[str]:
+    """STITCHED_FIELDS plus the optional fields present in every source."""
+    present = [name for name in OPTIONAL_STITCHED_FIELDS if any(name in s.field_shapes for s in sources)]
+    common = [name for name in present if all(name in s.field_shapes for s in sources)]
+    dropped = set(present) - set(common)
+    if dropped:
+        print(f"Warning: fields not present in all sources will be dropped from the "
+              f"merged dataset: {', '.join(sorted(dropped))}")
+    return STITCHED_FIELDS + common
+
+
+def check_consistent(sources: list[SourceInfo], fields: list[str]):
     first = sources[0]
     for s in sources[1:]:
-        for name in STITCHED_FIELDS:
+        for name in fields:
             if s.field_shapes[name][1:] != first.field_shapes[name][1:]:
                 raise ValueError(
                     f"{name!r} trailing shape mismatch: {s.dataset_dir} has "
@@ -214,13 +228,14 @@ def build_filepath_images(out_f: h5py.File, sources: list[SourceInfo]):
 
 
 def concat_datasets(sources: list[SourceInfo], out_dir: pathlib.Path):
-    check_consistent(sources)
+    fields = stitched_fields(sources)
+    check_consistent(sources, fields)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with h5py.File(out_dir / 'dataset.h5', 'w') as f:
         f.create_dataset('num_episodes', data=sum(s.n_episodes for s in sources))
 
-        for name in STITCHED_FIELDS:
+        for name in fields:
             build_virtual_dataset(f, name, sources)
 
         if sources[0].images_stored_as == 'image':
