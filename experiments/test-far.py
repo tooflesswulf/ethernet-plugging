@@ -7,9 +7,9 @@ import threading
 import time
 import os
 
-from util import URPose
-from env import GRIP_OPEN, GRIP_CLOSED
-from FAR import tta_online
+from robot.util import URPose
+from robot.env import GRIP_OPEN, GRIP_CLOSED
+from experiments import tta_online
 
 
 class StreamingForceEdge:
@@ -79,7 +79,7 @@ class TeleoperationReset(EvalRealtimeChunking):
         # Test-time adaptation: rolling record of the policy's own recent
         # (obs, action) predictions, and the async machinery to fine-tune on
         # them without blocking the control loop or racing the prediction
-        # thread. See FAR/tta_online.py.
+        # thread. See experiments/tta_online.py.
         self._tta_recorder = tta_online.TTATrajectoryRecorder(maxlen=200)
         self._tta_thread = None
         self._tta_pause = threading.Event()  # set while a TTA update is training

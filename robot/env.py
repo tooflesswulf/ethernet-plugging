@@ -11,11 +11,11 @@ import time
 import cv2
 import os
 
-from net_isup import is_network_up
-from util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
-from camera import Camera
-import fdcc
-import wsg
+from robot.net_isup import is_network_up
+from robot.util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
+from robot.camera import Camera
+from robot import fdcc
+from robot import wsg
 
 # Gripper command states (des_gripper_state / gripper_state)
 GRIP_OPEN = 0

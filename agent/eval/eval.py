@@ -1,7 +1,7 @@
 from agent.utils.robot_utils import get_actions, wait_for_circle, apply_gains
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
-import robot_execution
+from robot import robot_execution
 import collections
 import argparse
 import torch

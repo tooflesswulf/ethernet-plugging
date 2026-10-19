@@ -7,7 +7,7 @@ import pathlib
 import h5py
 import os
 
-from util import dict2hdf5, hdf52dict
+from robot.util import dict2hdf5, hdf52dict
 
 
 def ewma(x, alpha):

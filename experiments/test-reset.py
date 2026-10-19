@@ -6,8 +6,8 @@ import argparse
 import time
 import os
 
-from util import URPose
-from env import GRIP_OPEN, GRIP_CLOSED
+from robot.util import URPose
+from robot.env import GRIP_OPEN, GRIP_CLOSED
 
 
 class StreamingForceEdge:

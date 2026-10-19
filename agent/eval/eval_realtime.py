@@ -3,7 +3,7 @@ from agent.eval.policy_worker import PolicyWorker
 from agent.utils.robot_utils import build_states, wait_for_circle, apply_gains
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
-import robot_execution
+from robot import robot_execution
 import collections
 import numpy as np
 import threading

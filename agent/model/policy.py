@@ -7,7 +7,7 @@ from diffusers import DDIMScheduler
 
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
 from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
-from env import GRIP_OPEN, GRIP_CLOSED
+from robot.env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
 # action_anchor (a dataset field) -> the live env obs['state'] key holding the same pose
