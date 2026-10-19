@@ -217,7 +217,8 @@ class EvalSplits(EvalRealtimeChunking):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Split (pickup -> transport -> insert -> unplug) evaluation.')
-    parser.add_argument('--pickup_ckpt', type=str, required=True, help='pickup policy checkpoint')
+    parser.add_argument('--pickup_ckpt', type=str, help='pickup policy checkpoint',
+                        default='../ckpts/ethernet-impedance-v2v3-pickup-tgt-noforce/ckpt_final.pth')
     parser.add_argument('--insert_ckpt', type=str, required=True, help='insert policy checkpoint')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--log_dir', type=str, default=None,
