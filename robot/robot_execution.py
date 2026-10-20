@@ -112,6 +112,7 @@ class RobotExecution:
 
             self.env.wait_period()
         self.stop()
+        self.env.stop_flag = True
         self.close()
 
     def stop(self):
