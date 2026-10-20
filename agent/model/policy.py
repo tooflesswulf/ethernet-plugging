@@ -12,6 +12,7 @@ from robot.env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
 ENCODER_TYPES = ('resnet', 'vit', 'none')
+NOISE_NETS = ('unet', 'crossunet')  # ConditionalUnet1D (FiLM) / CrossUnet1D2 (cross-attention)
 # action_anchor (a dataset field) -> the live env obs['state'] key holding the same pose
 ANCHOR_STATE_KEYS = {'pose': 'actual_pose', 'target_pose': 'target_pose'}
 
@@ -33,8 +34,11 @@ class DiffusionPolicy(nn.Module):
                   a long-range one over all obs_horizon frames, and a short-range one
                   over the most recent short_obs_horizon frames. The ViTs live inside
                   the noise prediction net (nets['noise_pred_net'].backbone/ctx_backbone).
-        'none':   no images; the state history alone is the FiLM global conditioning
-                  of a ConditionalUnet1D.
+        'none':   no images. noise_net 'unet': the state history is the FiLM global
+                  conditioning of a ConditionalUnet1D; 'crossunet': a CrossUnet1D2
+                  cross-attends to one token per embedded state.
+    noise_net: None picks the one encoder_type was built for ('crossunet' for vit, else
+               'unet'); checkpoints from before it was saved get the same.
     """
 
     def __init__(
@@ -58,6 +62,7 @@ class DiffusionPolicy(nn.Module):
         impedance_fields: list[str] | tuple = (),
         action_anchor: str = 'pose',
         short_obs_horizon: int = 1,
+        noise_net: str | None = None,
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
@@ -101,7 +106,13 @@ class DiffusionPolicy(nn.Module):
             short_obs_horizon=short_obs_horizon,
         )
         assert encoder_type in ENCODER_TYPES, encoder_type
+        if noise_net is None:
+            noise_net = 'crossunet' if encoder_type == 'vit' else 'unet'
+        assert (encoder_type, noise_net) in (('resnet', 'unet'), ('vit', 'crossunet'), ('none', 'unet'),
+                                             ('none', 'crossunet')), (encoder_type, noise_net)
+        self.config['noise_net'] = noise_net
         self.encoder_type = encoder_type
+        self.noise_net = noise_net
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
         # Rate the training data was sampled at; actions are meant to be executed at
@@ -123,6 +134,17 @@ class DiffusionPolicy(nn.Module):
                 'vision_encoder': vision_encoder,
                 'noise_pred_net': noise_pred_net,
             })
+        elif encoder_type == 'none' and noise_net == 'crossunet':
+            assert short_obs_horizon <= obs_horizon, (
+                f'short_obs_horizon {short_obs_horizon} > obs_horizon {obs_horizon}')
+            self.nets = nn.ModuleDict({'noise_pred_net': CrossUnet1D2(
+                backbone=None, ctx_backbone=None,
+                input_dim=action_dim,
+                cond_steps=short_obs_horizon,
+                context_steps=obs_horizon,
+                cond_dim=state_dim,
+                context_dim=state_dim,
+            )})
         elif encoder_type == 'none':
             self.nets = nn.ModuleDict({'noise_pred_net': ConditionalUnet1D(
                 input_dim=action_dim,
@@ -224,19 +246,19 @@ class DiffusionPolicy(nn.Module):
         conditions: {'rgb': (B, T, C, H, W) in [0, 1], 'state': (B, T, state_dim) raw}
         Returns the noise prediction net's observation conditioning:
             resnet: flattened features (B, T * obs_dim)
-            none:   flattened normalized states (B, T * state_dim); images are ignored
+            none:   flattened normalized states (B, T * state_dim), or {'state': (B, T, state_dim)}
+                    for a CrossUnet1D2; images are ignored
             vit:    {'rgb': (B, obs_horizon, C, H, W) in [0, 255], 'state': normalized};
                     CrossUnet1D2 runs the ViTs itself on every call.
         """
-        states = self.normalize_states(conditions['state'].float())
+        # Pad a short history (e.g. the first steps of an eval episode) by repeating the
+        # oldest frame, as the dataset does at episode starts. Every encoder needs exactly
+        # obs_horizon frames.
+        states = self._pad_history(self.normalize_states(conditions['state'].float()), self.obs_horizon)
         if self.encoder_type == 'none':
-            return states.flatten(start_dim=1)
-        images = conditions['rgb'].float()
+            return {'state': states} if self.noise_net == 'crossunet' else states.flatten(start_dim=1)
+        images = self._pad_history(conditions['rgb'].float(), self.obs_horizon)
         if self.encoder_type == 'vit':
-            # Pad a short history (e.g. the first steps of an eval episode) by repeating the
-            # oldest frame, as the dataset does at episode starts. CrossUnet1D2 needs exactly
-            # obs_horizon frames.
-            images, states = (self._pad_history(x, self.obs_horizon) for x in (images, states))
             return {'rgb': images * 255.0, 'state': states}  # VitEncoder expects [0, 255]
         # BxTxCxHxW -> (B T)xCxHxW -> (B T) x d -> BxTxd
         image_features = self.nets['vision_encoder'](images.flatten(end_dim=1)).reshape(*images.shape[:2], -1)
@@ -252,7 +274,7 @@ class DiffusionPolicy(nn.Module):
         return x
 
     def _predict_noise(self, sample, timestep, obs_cond):
-        if self.encoder_type == 'vit':
+        if self.noise_net == 'crossunet':
             return self.nets['noise_pred_net'](sample=sample, timestep=timestep, cond=obs_cond)
         return self.nets['noise_pred_net'](sample=sample, timestep=timestep, global_cond=obs_cond)
 

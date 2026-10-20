@@ -33,7 +33,7 @@ def batch_to_device(batch, device="cuda:0"):
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
           obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(),
-          encoder_type='resnet', obs_horizon=None, short_obs_horizon=1,
+          encoder_type='resnet', noise_net=None, obs_horizon=None, short_obs_horizon=1,
           max_n_episodes=50, init_ckpt=None, lr=1e-4, use_wandb=False, log_interval=10, save_interval=10,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
@@ -44,16 +44,18 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     if obs_horizon is None:
         # vit: CrossUnet1D2 attends over a history of obs_horizon frames (long-range context)
         obs_horizon = 4 if encoder_type == 'vit' else 1
+    # a state-only policy never looks at images: don't decode any
+    img_cond_steps = 0 if encoder_type == 'none' else obs_horizon
     action_kwargs = dict(predict_done=predict_done, end_signal_steps=end_signal_steps,
                          pose_target=pose_target, action_anchor=action_anchor,
                          impedance_fields=impedance_fields)
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
-                                      cond_steps=obs_horizon, img_cond_steps=obs_horizon,
+                                      cond_steps=obs_horizon, img_cond_steps=img_cond_steps,
                                       horizon_steps=16, action_mode=action_mode, device=device,
                                       max_n_episodes=max_n_episodes, **action_kwargs)
 
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
-                                          cond_steps=obs_horizon, img_cond_steps=obs_horizon,
+                                          cond_steps=obs_horizon, img_cond_steps=img_cond_steps,
                                           horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device,
                                           **action_kwargs)
     dataloader = torch.utils.data.DataLoader(
@@ -77,6 +79,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                              action_anchor=dataset.action_anchor,
                              obs_fields=obs_fields,
                              encoder_type=encoder_type,
+                             noise_net=noise_net,
                              short_obs_horizon=short_obs_horizon).to(device)
     if init_ckpt is not None:
         # Fine-tune: start from the checkpoint's (EMA) weights. Its state_dict also carries its
@@ -201,6 +204,9 @@ def parse_args():
                         help='resnet: ResNet18 + FiLM ConditionalUnet1D; '
                              'vit: short/long-range ViTs + cross-attention CrossUnet1D2; '
                              'none: no images, state-only FiLM ConditionalUnet1D')
+    parser.add_argument('--noise_net', type=str, default=None, choices=['unet', 'crossunet'],
+                        help='noise prediction net: ConditionalUnet1D (FiLM) or CrossUnet1D2 (cross-attention); '
+                             'default: crossunet for vit, unet otherwise. Only none takes either.')
     parser.add_argument('--obs_horizon', type=int, default=None,
                         help='observation history frames (default: 1 for resnet, 4 for vit)')
     parser.add_argument('--short_obs_horizon', type=int, default=1,
@@ -239,7 +245,7 @@ if __name__ == '__main__':
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
           obs_fields=args.obs_fields, pose_target=args.pose_target, action_anchor=args.action_anchor,
           impedance_fields=args.impedance_fields, max_n_episodes=args.max_episodes,
-          encoder_type=args.encoder_type, obs_horizon=args.obs_horizon,
+          encoder_type=args.encoder_type, noise_net=args.noise_net, obs_horizon=args.obs_horizon,
           short_obs_horizon=args.short_obs_horizon,
           init_ckpt=args.init_ckpt, lr=args.lr,
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
