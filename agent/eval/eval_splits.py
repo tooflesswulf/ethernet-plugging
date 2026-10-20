@@ -22,8 +22,8 @@ from agent.eval.policy_worker import PolicyWorker
 from agent.utils.robot_utils import interrupt, build_states
 from agent.model.policy import DiffusionPolicy
 from teleoperation import Teleoperation
-from env import URPose, GRIP_OPEN, GRIP_CLOSED
-import robot_execution
+from robot.env import URPose, GRIP_OPEN, GRIP_CLOSED
+from robot import robot_execution
 import collections
 import numpy as np
 import argparse

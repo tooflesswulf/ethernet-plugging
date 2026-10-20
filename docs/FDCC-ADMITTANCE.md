@@ -1,7 +1,7 @@
 # FDCC-style Cartesian admittance over speedL (UR16e)
 
 This is a spec for rebuilding the controller from scratch. The controller's numbers
-live in [`fdcc.toml`](fdcc.toml) and this file uses their names; teleop shaping values
+live in [`fdcc.toml`](../robot/fdcc.toml) and this file uses their names; teleop shaping values
 are given inline, and the measurements behind the numbers are in §11. Poses are elements of
 $SE(3)$, twists of $\mathfrak{se}(3)$, and wrenches of $\mathfrak{se}(3)^*$.
 The reference implementation, `test-fdcc-admittance.py`, is a first-order

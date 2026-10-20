@@ -15,7 +15,7 @@ sampled at t = (k + 1) / framerate on the rawdata.h5 clock -- nothing is resampl
 no images are rewritten; image paths are stored absolute, as concat_datasets.py does,
 so the source dataset directories must stay where they are.
 
-Episodes without the scripted markers (e.g. DAgger rollouts from teleoperation-rl2.py)
+Episodes without the scripted markers (e.g. DAgger rollouts from teleoperation_rl.py)
 are skipped with a warning.
 
 Example:

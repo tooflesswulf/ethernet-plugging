@@ -4,12 +4,12 @@ import einops
 import numpy as np
 import torch
 
-from env import URPose, Env, GRIP_CLOSED
-from interface import DualSenseInterface
+from robot.env import URPose, Env, GRIP_CLOSED
+from robot.interface import DualSenseInterface
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
 from agent.dataset.sequence import target_offset
-from agent.utils.interrupt_sequence import InterruptSequence
+from robot.interrupt_sequence import InterruptSequence
 
 
 # Maps a dataset.h5 observation field (the names used in policy.obs_fields, see

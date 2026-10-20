@@ -17,8 +17,8 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import time
 
-from util import URPose, interpolate
-from promise import Promise
+from robot.util import URPose, interpolate
+from robot.promise import Promise
 
 
 MIN_JERK_PEAK = 1.875          # peak / mean speed of the minimum-jerk profile

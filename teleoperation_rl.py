@@ -1,7 +1,7 @@
 from agent.eval.eval_realtime import EvalRealtimeChunking
-from env import GRIP_OPEN, GRIP_CLOSED
+from robot.env import GRIP_OPEN, GRIP_CLOSED
 import numpy as np
-import fdcc
+from robot import fdcc
 import argparse
 import time
 import os
