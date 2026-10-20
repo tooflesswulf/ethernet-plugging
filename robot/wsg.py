@@ -3,7 +3,7 @@ import atexit
 import threading
 import enum
 
-from promise import Promise
+from robot.promise import Promise
 
 '''
 Remaining TODO:

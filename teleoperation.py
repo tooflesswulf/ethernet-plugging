@@ -1,8 +1,8 @@
 from agent.utils.robot_utils import interrupt
-import robot_execution
-from env import URPose, GRIP_OPEN, GRIP_CLOSED
+from robot import robot_execution
+from robot.env import URPose, GRIP_OPEN, GRIP_CLOSED
 import argparse
-import fdcc
+from robot import fdcc
 import numpy as np
 import time
 import os

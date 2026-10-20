@@ -1,8 +1,8 @@
 from scipy.spatial.transform import Rotation as R
-from dualsense import DualSense
+from robot.dualsense import DualSense
 import numpy as np
 
-from env import GRIP_OPEN, GRIP_CLOSED
+from robot.env import GRIP_OPEN, GRIP_CLOSED
 
 
 class DualSenseInterface:

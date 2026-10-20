@@ -124,6 +124,20 @@ Navigate to the **Move** panel (top-left, Local mode only). Two options:
 | **Freedrive (screen)**   | Click **Freedrive** at the bottom → panel appears on the right → press & hold, then move the robot by hand |
 | **Freedrive (physical)** | Press & hold the physical button on the back-top of the teach pendant, then move the robot by hand         |
 
+## Layout
+
+| Path | Contents |
+| ---- | -------- |
+| `teleoperation.py`, `teleoperation_rl.py` | Operator entry points: demo collection, and policy + teleop residual (DAgger) |
+| `robot/` | Hardware and control layer: `env.py`, FDCC admittance controller (`fdcc.py`, `fdcc.toml`), camera, WSG gripper, DualSense, interrupt sequences |
+| `agent/` | Learning: `dataset/`, `model/`, `pretrain/train.py`, `eval/` (policy eval on the robot), `failure/` (failure-detection classifier, WIP) |
+| `scripts/` | Data processing: raw episodes → dataset, concat, split, visualize |
+| `experiments/` | One-off hardware tests (FDCC admittance reference implementation, reset, FAR test-time adaptation) |
+| `docs/` | Design notes, e.g. `FDCC-ADMITTANCE.md` |
+| `shells/`, `notebooks/` | Launch scripts (incl. slurm `submit.sh`) and analysis notebooks |
+
+All imports are absolute from the repo root, so keep it on `PYTHONPATH` (see Environment setup) and run scripts as `python agent/eval/eval_realtime.py ...`.
+
 ## Teleoperation & Training
 ### Teleoperation
 First, edit `teleoperation.py:TeleopMetadata` to customize the logged teleoperation data (e.g. generate a random target port). Also make sure the gripper settings `GRIP_*` are suited for the demonstration. Then teleoperate the robot with `teleoperation.py --path /path/to/data/dir`.
@@ -140,8 +154,6 @@ options:
 
 ### Training
 Train using `python agent/pretrain/train.py`. Observation fields, pose target and action anchor are set with CLI flags (below). The action mode (`local_delta`), horizon (16), batch size and episode cap are hardcoded at the top of `train()`. Note that `max_n_episodes=50`, so episodes past the first 50 are silently ignored.
-
-For impedance-controller data (logged by the FDCC env, e.g. `ethernet-impedance`), pass `--impedance`: the policy clones the controller's spring target (`control/target`) instead of the actual pose, and additionally predicts log10 K, D, M (base-frame diagonals), with `pose, gripper_width, force` observations. Chunks are anchored to the target too: the delta actions are relative to the spring target at the chunk start, and eval integrates them from the live `target_pose` (anchoring to the lagging actual pose made overlapping chunks disagree, a 20 Hz sawtooth in the commanded target). `--pose_target`, `--action_anchor`, `--impedance_fields` and `--obs_fields` set these individually; `--obs_fields ... log_stiffness` also observes the controller's current K.
 
 For impedance-controller data (logged by the FDCC env, e.g. `ethernet-impedance`), pass `--impedance`: the policy clones the controller's spring target (`control/target`) instead of the actual pose, and additionally predicts log10 K, D, M (base-frame diagonals), with `pose, gripper_width, force` observations. Chunks are anchored to the target too: the delta actions are relative to the spring target at the chunk start, and eval integrates them from the live `target_pose` (anchoring to the lagging actual pose made overlapping chunks disagree, a 20 Hz sawtooth in the commanded target). `--pose_target`, `--action_anchor`, `--impedance_fields` and `--obs_fields` set these individually; `--obs_fields ... log_stiffness` also observes the controller's current K.
 

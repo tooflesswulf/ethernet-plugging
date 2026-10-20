@@ -108,49 +108,6 @@ def compute_norm_stats(dataset) -> dict:
     }
 
 
-def normalize(arr: np.ndarray, stats: dict) -> np.ndarray:
-    """
-    Normalize a numpy array to [-1, 1] using precomputed min/max stats.
-    Dimensions where max == min are left unchanged.
-
-    Args:
-        arr:   Array to normalize.
-        stats: Dict with keys 'min' and 'max' (scalars or arrays matching arr).
-
-    Returns:
-        Normalized array with same shape as input.
-    """
-    min_val = np.array(stats['min'])
-    max_val = np.array(stats['max'])
-
-    range_val = max_val - min_val
-    safe_range = np.where(range_val == 0, 1.0, range_val)
-
-    return np.where(range_val == 0, arr, 2 * (arr - min_val) / safe_range - 1)
-
-
-def denormalize(arr: np.ndarray, stats: dict) -> np.ndarray:
-    """
-    Denormalize a numpy array from [-1, 1] back to original scale using
-    precomputed min/max stats. Dimensions where max == min are left unchanged.
-
-    Args:
-        arr:   Normalized array to denormalize.
-        stats: Dict with keys 'min' and 'max' (scalars or arrays matching arr).
-
-    Returns:
-        Denormalized array with same shape as input.
-    """
-    min_val = np.array(stats['min'])
-    max_val = np.array(stats['max'])
-
-    range_val = max_val - min_val
-
-    denormalized = ((arr + 1) / 2) * range_val + min_val
-
-    return denormalized
-
-
 def resize_image(np_array, new_size=(128, 128), flip_channel=False):
     if flip_channel:
         np_array = np_array[:, :, ::-1]

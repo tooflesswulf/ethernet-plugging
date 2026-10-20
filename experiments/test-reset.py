@@ -1,15 +1,13 @@
 from agent.eval.eval_realtime import EvalRealtimeChunking
-from agent.utils.robot_utils import interrupt, build_states
+from agent.utils.robot_utils import interrupt
 from collections import deque
 import numpy as np
 import argparse
-import threading
 import time
 import os
 
-from util import URPose
-from env import GRIP_OPEN, GRIP_CLOSED
-from FAR import tta_online
+from robot.util import URPose
+from robot.env import GRIP_OPEN, GRIP_CLOSED
 
 
 class StreamingForceEdge:
@@ -76,69 +74,6 @@ class TeleoperationReset(EvalRealtimeChunking):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._force_edge = StreamingForceEdge(hz=self.env.servo_frequency)
-        # Test-time adaptation: rolling record of the policy's own recent
-        # (obs, action) predictions, and the async machinery to fine-tune on
-        # them without blocking the control loop or racing the prediction
-        # thread. See FAR/tta_online.py.
-        self._tta_recorder = tta_online.TTATrajectoryRecorder(maxlen=200)
-        self._tta_thread = None
-        self._tta_pause = threading.Event()  # set while a TTA update is training
-
-    def prediction_loop(self):
-        """Overrides EvalRealtimeChunking.prediction_loop to additionally
-        record each tick's (obs conditioning, raw normalized action chunk)
-        into self._tta_recorder for later TTA updates, and to pause while a
-        TTA update is training (it mutates noise_pred_net's weights, which
-        this loop reads concurrently).
-        """
-        action_horizon = self.policy.action_horizon
-        obs_horizon = self.policy.obs_horizon
-
-        obs_deque = deque(maxlen=obs_horizon)
-        while not self.stop_event.is_set():
-            if self._tta_pause.is_set():
-                time.sleep(0.05)
-                continue
-
-            t_obs = time.time()
-            obs_deque.append(self.env.get_obs())
-            if len(obs_deque) < obs_horizon:
-                continue
-
-            des_poses, des_grips, des_done, conditions, naction = tta_online.get_actions_with_naction(
-                self.policy, obs_deque, self.device)
-            self._tta_recorder.record(conditions, naction)
-
-            start = obs_horizon - 1
-            end = start + action_horizon
-            chnk = self.buffer.add_chunk(
-                t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end])
-            obs_state = build_states(obs_deque, self.policy.obs_fields)
-            self.buffer.dolog(chnk, obs_state, time.time())
-
-    def trigger_tta_update(self):
-        """Fire a background TTA update on the trajectory recorded since the
-        last update, using the current failure as the negative signal. Runs
-        in its own thread so reset_cable()'s interrupt sequence stays
-        non-blocking; pauses prediction_loop for the duration so training
-        doesn't race live inference on the same weights.
-        """
-        if self._tta_thread is not None and self._tta_thread.is_alive():
-            print('TTA update already running, skipping.')
-            return
-        recorder, self._tta_recorder = self._tta_recorder, tta_online.TTATrajectoryRecorder(maxlen=200)
-        if len(recorder) == 0:
-            return
-
-        def _run():
-            self._tta_pause.set()
-            try:
-                tta_online.do_tta_update(self.policy, recorder, device=self.device)
-            finally:
-                self._tta_pause.clear()
-
-        self._tta_thread = threading.Thread(target=_run, daemon=True)
-        self._tta_thread.start()
 
     def detect_force_edge(self):
         # robot_obs is appended by the receive thread at servo_frequency (~500Hz),
@@ -188,7 +123,6 @@ class TeleoperationReset(EvalRealtimeChunking):
         # Start interrupt sequence. The seq methods queue up instructions behind the scenes,
         #   so custom logic needs to be 1. run through promise.then() and 2. be non-blocking.
         print('Starting cable reset sequence.')
-        self.trigger_tta_update()
         seq = interrupt(self)
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=0.05)
         seq.move_to(self.cable_drop_pos)

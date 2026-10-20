@@ -703,7 +703,7 @@ def make_dualsense(args, pose):
     seconds of host silence. run() calls this BEFORE arming the watchdog -- doing it
     inside the mode tripped C207A0 before the first cycle.
     """
-    from interface import DualSenseInterface
+    from robot.interface import DualSenseInterface
     print(args.teleop_speed)
     return DualSenseInterface(pose, xyzspeed=args.teleop_speed[0], rpyspeed=args.teleop_speed[3],
                               enable_zadaptive=False)

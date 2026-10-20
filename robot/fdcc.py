@@ -8,7 +8,7 @@ Per-cycle Cartesian admittance over UR speedL. Minimal API for Env._control_loop
     v = imp.step(recv.getActualTCPPose(), recv.getActualTCPForce(), pose_target)
     ctrl.speedL(v, imp.p.accel[0], imp.p.dt)     # time argument = ONE cycle
 
-The law is FDCC-ADMITTANCE.md §3, in body coordinates at the compliance frame c:
+The law is docs/FDCC-ADMITTANCE.md §3, in body coordinates at the compliance frame c:
 
     M dV/dt + D (V - g V_t) = F + K xi,      xi = log(T_sc^-1 T_sc*)^v
 
@@ -17,7 +17,7 @@ pose = [p; rotvec] of the TCP in `base`; twist = TCP-point velocity in base axes
 (getActualTCPSpeed / speedL); wrench = getActualTCPForce, base axes, moment about the
 FLANGE on this arm.
 
-NOT handled here (the caller's job; see FDCC-ADMITTANCE.md §7-8):
+NOT handled here (the caller's job; see docs/FDCC-ADMITTANCE.md §7-8):
   * teleop slew limit and leash. The leash must not DRAG the target after the arm: a
     dragged target's velocity feeds forward, cancels the damping and ran the arm to
     vmax. env.py's clamp() (8 mm / 0.05 rad from actual) drags -- don't feed its output

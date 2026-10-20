@@ -1,6 +1,6 @@
 # FDCC-style Cartesian admittance over speedL, UR16e.
 # Only keys read by fdcc.py / env.py. The algorithm, and the measurements behind
-# these numbers, are in FDCC-ADMITTANCE.md (§11 for the measured facts).
+# these numbers, are in docs/FDCC-ADMITTANCE.md (§11 for the measured facts).
 # Units SI, angles in radians. [trans, rot] pairs are [m-based, rad-based].
 
 [robot]

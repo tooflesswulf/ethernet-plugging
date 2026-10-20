@@ -1,5 +1,5 @@
-from env import Env, URPose, GRIP_OPEN
-import interface
+from robot.env import Env, URPose, GRIP_OPEN
+from robot import interface
 import threading
 import cv2
 
