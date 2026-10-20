@@ -197,9 +197,10 @@ def parse_args():
     parser.add_argument('--impedance_fields', nargs='*', default=[],
                         choices=['stiffness', 'damping', 'mass'],
                         help='impedance gains to predict (log10, base-frame diagonals)')
-    parser.add_argument('--encoder_type', type=str, default='resnet', choices=['resnet', 'vit'],
+    parser.add_argument('--encoder_type', type=str, default='resnet', choices=['resnet', 'vit', 'none'],
                         help='resnet: ResNet18 + FiLM ConditionalUnet1D; '
-                             'vit: short/long-range ViTs + cross-attention CrossUnet1D2')
+                             'vit: short/long-range ViTs + cross-attention CrossUnet1D2; '
+                             'none: no images, state-only FiLM ConditionalUnet1D')
     parser.add_argument('--obs_horizon', type=int, default=None,
                         help='observation history frames (default: 1 for resnet, 4 for vit)')
     parser.add_argument('--short_obs_horizon', type=int, default=1,
