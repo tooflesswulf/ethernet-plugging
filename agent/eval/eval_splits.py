@@ -24,7 +24,6 @@ from agent.model.policy import DiffusionPolicy
 from teleoperation import Teleoperation
 from robot.env import URPose, GRIP_OPEN, GRIP_CLOSED
 from robot import robot_execution
-import collections
 import numpy as np
 import argparse
 import json
@@ -57,6 +56,7 @@ class EvalSplits(EvalRealtimeChunking):
         }
         self.insert_done = insert_done
         self.phase = 'pickup'
+        self.phase_t_start = time.time()
         self.phase_log = []
 
     # ============================================================
@@ -69,6 +69,7 @@ class EvalSplits(EvalRealtimeChunking):
             self.phase_log[-1].update(t_end=now, end=reason)
         self.phase_log.append({'phase': phase, 't_start': now})
         self.phase = phase
+        self.phase_t_start = time.time()
         if phase in POLICY_PHASES:
             # self.worker / policy / buffer are what the base class's get_action helpers,
             # runtime_info and save_chunks read
@@ -152,7 +153,6 @@ class EvalSplits(EvalRealtimeChunking):
 
     def prediction_loop(self):
         """EvalRealtimeChunking.prediction_loop for the current phase's policy; idle in scripted phases."""
-        obs_deque, deque_phase = None, None
         while not self.stop_event.is_set():
             phase = self.phase
             if phase not in POLICY_PHASES:
@@ -160,19 +160,17 @@ class EvalSplits(EvalRealtimeChunking):
                 continue
             worker, policy = self.policies[phase]
             buffer = self.buffers[phase]
-            if phase != deque_phase:
-                obs_deque, deque_phase = collections.deque(maxlen=policy.obs_horizon), phase
-
             t_obs = time.time()
-            obs_deque.append(self.env.get_obs())
-            if len(obs_deque) < policy.obs_horizon:
-                continue
+            # history from this phase only: training episodes are split by phase, and pad
+            # the history at their start
+            obs_deque = self.obs_history.frames(self.env.get_obs(), t_obs, policy.obs_horizon,
+                                                1.0 / policy.framerate, t_min=self.phase_t_start)
             des_poses, des_grips, des_done, des_gains = worker.get_actions(obs_deque)
             if self.phase != phase:
                 continue        # predicted across a phase change: never executed
             des_gains = np.concatenate([des_gains[f] for f in policy.impedance_fields], axis=1) \
                 if des_gains else None
-            start = policy.obs_horizon - 1
+            start = 0   # action 0 is t_obs's step (see EvalRealtimeChunking.prediction_loop)
             end = start + policy.action_horizon
             chnk = buffer.add_chunk(
                 t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end],
