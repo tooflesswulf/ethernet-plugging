@@ -33,6 +33,7 @@ def batch_to_device(batch, device="cuda:0"):
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
           obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(),
+          encoder_type='resnet', obs_horizon=None, short_obs_horizon=1,
           max_n_episodes=50, init_ckpt=None, lr=1e-4, use_wandb=False, log_interval=10, save_interval=10,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
@@ -40,7 +41,9 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
         obs_fields = ['pose', 'gripper_width']
         if 'force' in name:
             obs_fields += ['force']
-    obs_horizon = 1
+    if obs_horizon is None:
+        # vit: CrossUnet1D2 attends over a history of obs_horizon frames (long-range context)
+        obs_horizon = 4 if encoder_type == 'vit' else 1
     action_kwargs = dict(predict_done=predict_done, end_signal_steps=end_signal_steps,
                          pose_target=pose_target, action_anchor=action_anchor,
                          impedance_fields=impedance_fields)
@@ -72,7 +75,9 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                              predict_done=predict_done,
                              impedance_fields=dataset.impedance_fields,
                              action_anchor=dataset.action_anchor,
-                             obs_fields=obs_fields).to(device)
+                             obs_fields=obs_fields,
+                             encoder_type=encoder_type,
+                             short_obs_horizon=short_obs_horizon).to(device)
     if init_ckpt is not None:
         # Fine-tune: start from the checkpoint's (EMA) weights. Its state_dict also carries its
         # normalization buffers, which the weights were trained against, so they replace the
@@ -101,6 +106,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     step = 0
     for epoch in pbar:
         epoch_losses = []
+        policy.train()
         for i, batch in enumerate(dataloader):
             batch = batch_to_device(batch, device)
             loss = policy.compute_loss(batch.actions, batch.conditions)
@@ -132,6 +138,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
 
         val_mses, pose_mses, gripper_correctness, done_correctness = [], [], [], []
         imp_logmses = {f: [] for f in policy.impedance_fields}
+        policy.eval()  # no dropout / augmentation (CrossUnet1D2) during validation
         for i, batch in enumerate(val_dataloader):
             with torch.no_grad():
                 batch = batch_to_device(batch, device)
@@ -190,6 +197,13 @@ def parse_args():
     parser.add_argument('--impedance_fields', nargs='*', default=[],
                         choices=['stiffness', 'damping', 'mass'],
                         help='impedance gains to predict (log10, base-frame diagonals)')
+    parser.add_argument('--encoder_type', type=str, default='resnet', choices=['resnet', 'vit'],
+                        help='resnet: ResNet18 + FiLM ConditionalUnet1D; '
+                             'vit: short/long-range ViTs + cross-attention CrossUnet1D2')
+    parser.add_argument('--obs_horizon', type=int, default=None,
+                        help='observation history frames (default: 1 for resnet, 4 for vit)')
+    parser.add_argument('--short_obs_horizon', type=int, default=1,
+                        help='vit: most recent frames seen by the short-range ViT')
     parser.add_argument('--impedance', action='store_true', default=False,
                         help='shorthand for --pose_target target_pose --impedance_fields stiffness damping mass '
                              'with pose gripper_width force observations')
@@ -224,5 +238,7 @@ if __name__ == '__main__':
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
           obs_fields=args.obs_fields, pose_target=args.pose_target, action_anchor=args.action_anchor,
           impedance_fields=args.impedance_fields, max_n_episodes=args.max_episodes,
+          encoder_type=args.encoder_type, obs_horizon=args.obs_horizon,
+          short_obs_horizon=args.short_obs_horizon,
           init_ckpt=args.init_ckpt, lr=args.lr,
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)

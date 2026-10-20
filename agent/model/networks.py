@@ -1093,7 +1093,7 @@ class CrossUnet1D2(nn.Module):
         if self.num_img > 1:  # TODO: properly handle multiple images
             assert False, f"Not Implemented"
         else:  # single image
-            if self.augment:
+            if self.augment and self.training:
                 rgb = self.aug(rgb); ctx_rgb = self.aug(ctx_rgb)
             # feat: BxtokensxD; ctx_feat: (BxT)xtokensxD
             feat = self.backbone(rgb); ctx_feat = self.ctx_backbone(ctx_rgb) 
@@ -1101,11 +1101,13 @@ class CrossUnet1D2(nn.Module):
             feat = self.compress.forward(feat, state); ctx_feat = self.ctx_compress.forward(ctx_feat, ctx_state)
             if self.training and self.short_range_dropout > 0.0:
                 drop_mask = torch.bernoulli(
-                    torch.full((B,), self.short_range_dropout, device=feat.device)
+                    torch.full((cond_B,), self.short_range_dropout, device=feat.device)
                 ).bool()  # (B,) — True means replace this sample's short-range tokens
                 if drop_mask.any():
-                    null = self.short_range_null_token.view(1, -1).expand(B, -1)
-                    feat = torch.where(drop_mask.view(B,  1), null, feat)
+                    # feat is (B cond_steps) x d: drop all of a sample's short-range frames together
+                    drop_mask = drop_mask.repeat_interleave(self.cond_steps)
+                    null = self.short_range_null_token.view(1, -1).expand(feat.shape[0], -1)
+                    feat = torch.where(drop_mask.view(-1, 1), null, feat)
         feat = rearrange(feat, '(B T) d -> B T d', T=self.cond_steps); ctx_feat = rearrange(ctx_feat, '(B T) d -> B T d', T=self.context_steps)
         cond_encoded = torch.cat([ctx_feat, feat], dim=1) if not self.ablate_context else feat
         if duplicates > 1:

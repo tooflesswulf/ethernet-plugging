@@ -5,11 +5,13 @@ import torch.nn as nn
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers import DDIMScheduler
 
-from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
+from agent.model.networks import ConditionalUnet1D, CrossUnet1D2, get_resnet, replace_bn_with_gn
+from agent.model.vit import VitEncoder, VitEncoderConfig
 from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
 from robot.env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
+ENCODER_TYPES = ('resnet', 'vit')
 # action_anchor (a dataset field) -> the live env obs['state'] key holding the same pose
 ANCHOR_STATE_KEYS = {'pose': 'actual_pose', 'target_pose': 'target_pose'}
 
@@ -23,6 +25,14 @@ class DiffusionPolicy(nn.Module):
 
     Training:   loss = policy.compute_loss(actions, conditions)
     Inference:  actions = policy.predict_action(conditions)  # unnormalized
+
+    encoder_type:
+        'resnet': ResNet18 features + state are flattened into the global FiLM
+                  conditioning of a ConditionalUnet1D.
+        'vit':    a CrossUnet1D2 cross-attends to observation tokens from two ViTs:
+                  a long-range one over all obs_horizon frames, and a short-range one
+                  over the most recent short_obs_horizon frames. The ViTs live inside
+                  the noise prediction net (nets['noise_pred_net'].backbone/ctx_backbone).
     """
 
     def __init__(
@@ -45,6 +55,7 @@ class DiffusionPolicy(nn.Module):
         framerate: float = DEFAULT_FRAMERATE,
         impedance_fields: list[str] | tuple = (),
         action_anchor: str = 'pose',
+        short_obs_horizon: int = 1,
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
@@ -85,7 +96,10 @@ class DiffusionPolicy(nn.Module):
             framerate=float(framerate),
             impedance_fields=list(self.impedance_fields),
             action_anchor=self.action_anchor,
+            short_obs_horizon=short_obs_horizon,
         )
+        assert encoder_type in ENCODER_TYPES, encoder_type
+        self.encoder_type = encoder_type
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
         # Rate the training data was sampled at; actions are meant to be executed at
@@ -95,17 +109,34 @@ class DiffusionPolicy(nn.Module):
         self.img_size = img_size
         self.num_diffusion_iters = num_diffusion_iters
 
-        # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
-        # work with EMA — performance will tank if you forget to do this!
-        vision_encoder = replace_bn_with_gn(get_resnet('resnet18'))
-        noise_pred_net = ConditionalUnet1D(
-            input_dim=action_dim,
-            global_cond_dim=(vision_feature_dim + state_dim) * obs_horizon,
-        )
-        self.nets = nn.ModuleDict({
-            'vision_encoder': vision_encoder,
-            'noise_pred_net': noise_pred_net,
-        })
+        if encoder_type == 'resnet':
+            # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
+            # work with EMA — performance will tank if you forget to do this!
+            vision_encoder = replace_bn_with_gn(get_resnet('resnet18'))
+            noise_pred_net = ConditionalUnet1D(
+                input_dim=action_dim,
+                global_cond_dim=(vision_feature_dim + state_dim) * obs_horizon,
+            )
+            self.nets = nn.ModuleDict({
+                'vision_encoder': vision_encoder,
+                'noise_pred_net': noise_pred_net,
+            })
+        else:  # 'vit'
+            assert short_obs_horizon <= obs_horizon, (
+                f'short_obs_horizon {short_obs_horizon} > obs_horizon {obs_horizon}')
+            vit_kwargs = dict(obs_shape=[3, img_size, img_size], cfg=VitEncoderConfig(),
+                              num_channel=3, img_h=img_size, img_w=img_size)
+            noise_pred_net = CrossUnet1D2(
+                backbone=VitEncoder(**vit_kwargs),      # short range: last short_obs_horizon frames
+                ctx_backbone=VitEncoder(**vit_kwargs),  # long range: all obs_horizon frames
+                input_dim=action_dim,
+                cond_steps=short_obs_horizon,
+                context_steps=obs_horizon,
+                cond_dim=state_dim,
+                context_dim=state_dim,
+                augment=augment,
+            )
+            self.nets = nn.ModuleDict({'noise_pred_net': noise_pred_net})
 
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_diffusion_iters,
@@ -184,14 +215,36 @@ class DiffusionPolicy(nn.Module):
     def encode_obs(self, conditions):
         """
         conditions: {'rgb': (B, T, C, H, W) in [0, 1], 'state': (B, T, state_dim) raw}
-        Returns flattened observation conditioning (B, T * obs_dim).
+        Returns the noise prediction net's observation conditioning:
+            resnet: flattened features (B, T * obs_dim)
+            vit:    {'rgb': (B, obs_horizon, C, H, W) in [0, 255], 'state': normalized};
+                    CrossUnet1D2 runs the ViTs itself on every call.
         """
         images = conditions['rgb'].float()
         states = self.normalize_states(conditions['state'].float())
+        if self.encoder_type == 'vit':
+            # Pad a short history (e.g. the first steps of an eval episode) by repeating the
+            # oldest frame, as the dataset does at episode starts. CrossUnet1D2 needs exactly
+            # obs_horizon frames.
+            images, states = (self._pad_history(x, self.obs_horizon) for x in (images, states))
+            return {'rgb': images * 255.0, 'state': states}  # VitEncoder expects [0, 255]
         # BxTxCxHxW -> (B T)xCxHxW -> (B T) x d -> BxTxd
         image_features = self.nets['vision_encoder'](images.flatten(end_dim=1)).reshape(*images.shape[:2], -1)
         obs_features = torch.cat([image_features, states], dim=-1)
         return obs_features.flatten(start_dim=1)
+
+    @staticmethod
+    def _pad_history(x, horizon):
+        """(B, T, ...) -> (B, horizon, ...): keep the latest `horizon` steps, repeating the oldest if T < horizon."""
+        x = x[:, -horizon:]
+        if x.shape[1] < horizon:
+            x = torch.cat([x[:, :1].expand(-1, horizon - x.shape[1], *x.shape[2:]), x], dim=1)
+        return x
+
+    def _predict_noise(self, sample, timestep, obs_cond):
+        if self.encoder_type == 'vit':
+            return self.nets['noise_pred_net'](sample=sample, timestep=timestep, cond=obs_cond)
+        return self.nets['noise_pred_net'](sample=sample, timestep=timestep, global_cond=obs_cond)
 
     def compute_loss(self, actions, conditions):
         """
@@ -209,7 +262,7 @@ class DiffusionPolicy(nn.Module):
             0, self.noise_scheduler.config.num_train_timesteps, (B,), device=actions.device
         ).long()
         noisy_actions = self.noise_scheduler.add_noise(actions, noise, timesteps)
-        noise_pred = self.nets['noise_pred_net'](noisy_actions, timesteps, global_cond=obs_cond)
+        noise_pred = self._predict_noise(noisy_actions, timesteps, obs_cond)
         return nn.functional.mse_loss(noise_pred, noise)
 
     @torch.no_grad()
@@ -218,13 +271,12 @@ class DiffusionPolicy(nn.Module):
         Run reverse diffusion and return UNNORMALIZED actions (B, action_horizon, action_dim).
         """
         obs_cond = self.encode_obs(conditions)
-        B = obs_cond.shape[0]
-        device = obs_cond.device
+        B = conditions['state'].shape[0]
+        device = conditions['state'].device
 
         naction = torch.randn((B, self.action_horizon, self.action_dim), device=device)
         for k in self.noise_scheduler.timesteps:
-            noise_pred = self.nets['noise_pred_net'](
-                sample=naction, timestep=k, global_cond=obs_cond)
+            noise_pred = self._predict_noise(naction, k, obs_cond)
             naction = self.noise_scheduler.step(
                 model_output=noise_pred, timestep=k, sample=naction).prev_sample
 
