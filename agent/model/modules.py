@@ -14,6 +14,7 @@ activation_dict = nn.ModuleDict(
     }
 )
 
+
 class RandomShiftsAug:
     def __init__(self, pad):
         self.pad = pad
@@ -40,6 +41,7 @@ class RandomShiftsAug:
         return F.grid_sample(
             x, grid, padding_mode="zeros", align_corners=False
         )
+
 
 class SpatialEmb(nn.Module):
     def __init__(self, num_patch, patch_dim, prop_dim, proj_dim, dropout):
@@ -74,6 +76,7 @@ class SpatialEmb(nn.Module):
         z = self.dropout(z)
         return z
 
+
 class TwoLayerPreActivationResNetLinear(nn.Module):
     def __init__(
         self,
@@ -101,6 +104,7 @@ class TwoLayerPreActivationResNetLinear(nn.Module):
             x = self.norm2(x)
         x = self.l2(self.act(x))
         return x + x_input
+
 
 class ResidualMLP(nn.Module):
     """

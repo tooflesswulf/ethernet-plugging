@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torchvision
 
+from agent.model.modules import RandomShiftsAug, ResidualMLP, SpatialEmb
+
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
