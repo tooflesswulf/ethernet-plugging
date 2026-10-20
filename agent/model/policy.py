@@ -11,7 +11,7 @@ from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
 from robot.env import GRIP_OPEN, GRIP_CLOSED
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
-ENCODER_TYPES = ('resnet', 'vit')
+ENCODER_TYPES = ('resnet', 'vit', 'none')
 # action_anchor (a dataset field) -> the live env obs['state'] key holding the same pose
 ANCHOR_STATE_KEYS = {'pose': 'actual_pose', 'target_pose': 'target_pose'}
 
@@ -33,6 +33,8 @@ class DiffusionPolicy(nn.Module):
                   a long-range one over all obs_horizon frames, and a short-range one
                   over the most recent short_obs_horizon frames. The ViTs live inside
                   the noise prediction net (nets['noise_pred_net'].backbone/ctx_backbone).
+        'none':   no images; the state history alone is the FiLM global conditioning
+                  of a ConditionalUnet1D.
     """
 
     def __init__(
@@ -121,6 +123,11 @@ class DiffusionPolicy(nn.Module):
                 'vision_encoder': vision_encoder,
                 'noise_pred_net': noise_pred_net,
             })
+        elif encoder_type == 'none':
+            self.nets = nn.ModuleDict({'noise_pred_net': ConditionalUnet1D(
+                input_dim=action_dim,
+                global_cond_dim=state_dim * obs_horizon,
+            )})
         else:  # 'vit'
             assert short_obs_horizon <= obs_horizon, (
                 f'short_obs_horizon {short_obs_horizon} > obs_horizon {obs_horizon}')
@@ -217,11 +224,14 @@ class DiffusionPolicy(nn.Module):
         conditions: {'rgb': (B, T, C, H, W) in [0, 1], 'state': (B, T, state_dim) raw}
         Returns the noise prediction net's observation conditioning:
             resnet: flattened features (B, T * obs_dim)
+            none:   flattened normalized states (B, T * state_dim); images are ignored
             vit:    {'rgb': (B, obs_horizon, C, H, W) in [0, 255], 'state': normalized};
                     CrossUnet1D2 runs the ViTs itself on every call.
         """
-        images = conditions['rgb'].float()
         states = self.normalize_states(conditions['state'].float())
+        if self.encoder_type == 'none':
+            return states.flatten(start_dim=1)
+        images = conditions['rgb'].float()
         if self.encoder_type == 'vit':
             # Pad a short history (e.g. the first steps of an eval episode) by repeating the
             # oldest frame, as the dataset does at episode starts. CrossUnet1D2 needs exactly
