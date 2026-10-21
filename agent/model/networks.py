@@ -1130,11 +1130,15 @@ class CrossUnet1D2(nn.Module):
         
         return tokens, positions, modalities, ranges
 
+    def encode_obs(self, cond: Dict[str, torch.Tensor], B: int) -> tuple:
+        return self._encode_obs(cond, B)
+
     def forward(
         self,
         sample,
         timestep,
-        cond,
+        cond=None,
+        encoded_obs=None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -1142,12 +1146,14 @@ class CrossUnet1D2(nn.Module):
             x: (B, T, input_dim)
             timestep: (B,) or scalar diffusion step
             cond: dicionary of observation
-           
+            encoded_obs: encode_obs(cond, B) output, instead of cond (skips the encoders)
+
         Returns:
             (B, T, input_dim)
         """
-
-        global_cond, temporal_positions, modality_indices, range_indices = self._encode_obs(cond, B=len(sample))
+        if encoded_obs is None:
+            encoded_obs = self._encode_obs(cond, B=len(sample))
+        global_cond, temporal_positions, modality_indices, range_indices = encoded_obs
       
         """
         global_cond: (B, N, global_cond_dim) observation tokens

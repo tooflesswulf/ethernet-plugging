@@ -305,10 +305,18 @@ class DiffusionPolicy(nn.Module):
         obs_cond = self.encode_obs(conditions)
         B = conditions['state'].shape[0]
         device = conditions['state'].device
+        net = self.nets['noise_pred_net']
+        if self.noise_net == 'crossunet' and not self.training:
+            # The observation tokens are the same at every denoising step: encode them once.
+            # (In train mode each forward draws its own short-range dropout mask.)
+            obs_tokens = net.encode_obs(obs_cond, B)
+            predict_noise = lambda x, k: net(sample=x, timestep=k, encoded_obs=obs_tokens)
+        else:
+            predict_noise = lambda x, k: self._predict_noise(x, k, obs_cond)
 
         naction = torch.randn((B, self.action_horizon, self.action_dim), device=device)
         for k in self.noise_scheduler.timesteps:
-            noise_pred = self._predict_noise(naction, k, obs_cond)
+            noise_pred = predict_noise(naction, k)
             naction = self.noise_scheduler.step(
                 model_output=noise_pred, timestep=k, sample=naction).prev_sample
 
