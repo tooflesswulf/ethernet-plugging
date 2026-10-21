@@ -1,4 +1,4 @@
-from agent.utils.robot_utils import get_actions, wait_for_circle, apply_gains
+from agent.utils.robot_utils import get_actions, wait_for_circle, apply_gains, policy_command
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
 from robot import robot_execution
@@ -57,13 +57,14 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
             # Skip action 0: Env.step blends to each command over one period, so the
             # command sent now is reached a period later, when action 1 is due.
             self.action_chunk = self.do_prediction()[1:]
-        des_pose, des_width, done, log_gains = self.action_chunk.pop(0)
+        des_pose, des_width, done, extras = self.action_chunk.pop(0)
         # predicted impedance, blended over one command period; no-op without an impedance head
-        apply_gains(self.env, log_gains, ramp_s=self.control_dt)
+        apply_gains(self.env, extras, ramp_s=self.control_dt)
         if done > self.done_threshold:
             print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
             self.stop()
-        return des_pose, des_width
+        # explicit twist / wrench targets, when the policy predicts them
+        return policy_command(des_pose, des_width, extras.get('twist'), extras.get('wrench'))
 
     def do_prediction(self):
         action_horizon = self.policy.action_horizon
@@ -77,7 +78,7 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
             end = start + action_horizon
             des_poses, des_widths, des_done = des_poses[start:end], des_widths[start:end], des_done[start:end]
 
-        # per-step {field: (6,) log10 gains}
+        # per-step {field: (6,) log10 gains, or twist / wrench}
         steps = [{f: g[start + i] for f, g in des_gains.items()} for i in range(len(des_poses))]
         return [(p, w, d, g) for p, w, d, g in zip(des_poses, des_widths, des_done, steps)]
 

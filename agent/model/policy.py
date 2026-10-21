@@ -9,6 +9,7 @@ from agent.model.networks import ConditionalUnet1D, CrossUnet1D2, get_resnet, re
 from agent.model.vit import VitEncoder, VitEncoderConfig
 from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
 from robot.env import GRIP_OPEN, GRIP_CLOSED
+from agent.utils import se3
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
 ENCODER_TYPES = ('resnet', 'vit', 'none')
@@ -63,26 +64,33 @@ class DiffusionPolicy(nn.Module):
         action_anchor: str = 'pose',
         short_obs_horizon: int = 1,
         noise_net: str | None = None,
+        feedforward_fields: list[str] | tuple = (),
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
         grip = GripperStats(*grip_stats) if grip_stats is not None else GripperStats(10, 40, 50, 5)
         self.grip_stats = GripperStats(*(float(x) for x in grip))
 
-        # Actions are [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field)].
+        # Actions are [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field),
+        # anchor twist / wrench (6 per feedforward field, see agent/utils/se3.py)].
         # Checkpoints from before predict_done was saved have no gains, so infer it from the size.
         self.impedance_fields = tuple(impedance_fields)
+        self.feedforward_fields = tuple(feedforward_fields)
         self.predict_done = (action_dim > 7) if predict_done is None else predict_done
         imp_start = 7 + int(self.predict_done)
         self.impedance_slice = slice(imp_start, imp_start + 6 * len(self.impedance_fields))
+        self.feedforward_slice = slice(self.impedance_slice.stop,
+                                       self.impedance_slice.stop + 6 * len(self.feedforward_fields))
+        if self.feedforward_fields:
+            assert action_mode == 'local_delta' and action_anchor == 'pose', (action_mode, action_anchor)
         # Dataset field the delta actions are relative to at the chunk start (see
         # StitchedSequenceDataset.action_anchor): 'pose' (the actual TCP pose; checkpoints
         # from before this was saved) or 'target_pose' (the impedance spring target).
         assert action_anchor in ANCHOR_STATE_KEYS, action_anchor
         self.action_anchor = action_anchor
-        assert self.impedance_slice.stop == action_dim, (
+        assert self.feedforward_slice.stop == action_dim, (
             f'action_dim {action_dim} != pose(6) + gripper(1) + done({int(self.predict_done)}) '
-            f'+ 6 * {len(self.impedance_fields)} impedance fields')
+            f'+ 6 * {len(self.impedance_fields)} impedance fields + 6 * {len(self.feedforward_fields)} feedforward fields')
 
         # Architecture/config args; saved alongside the weights by save_checkpoint so
         # from_checkpoint can rebuild the policy without the caller knowing the dims.
@@ -104,6 +112,7 @@ class DiffusionPolicy(nn.Module):
             impedance_fields=list(self.impedance_fields),
             action_anchor=self.action_anchor,
             short_obs_horizon=short_obs_horizon,
+            feedforward_fields=list(self.feedforward_fields),
         )
         assert encoder_type in ENCODER_TYPES, encoder_type
         if noise_net is None:
@@ -338,6 +347,24 @@ class DiffusionPolicy(nn.Module):
         log_gains = np.asarray(actions)[:, self.impedance_slice]
         return {field: (log_gains[:, 6 * i:6 * (i + 1)] if log else 10 ** log_gains[:, 6 * i:6 * (i + 1)])
                 for i, field in enumerate(self.impedance_fields)}
+
+    def decode_feedforward(self, actions):
+        """
+        The predicted explicit admittance targets of an unnormalized action chunk, as
+        Env.step takes them: {'twist': (H, 6) body twist [v; w], 'wrench': (H, 6) expected
+        body wrench [f; tau]}, each at the chunk's predicted pose T_i = T_0 exp(xi_i), in
+        its axes ({} for a policy without them). T_0^-1 T_i is the pose action itself,
+        so no live pose is needed.
+        """
+        if not self.feedforward_fields:
+            return {}
+        if torch.is_tensor(actions):
+            actions = actions.detach().cpu().numpy()
+        actions = np.asarray(actions, dtype=float)
+        T_0i = Tf.from_exp_coords(actions[:, :6]).as_matrix()
+        ff = actions[:, self.feedforward_slice]
+        return {k: se3.FROM_ANCHOR[k](T_0i, ff[:, 6 * i:6 * (i + 1)])
+                for i, k in enumerate(self.feedforward_fields)}
 
     def anchor_pose(self, state):
         """The pose a live env obs['state'] gives integrate_actions: the one the chunk's

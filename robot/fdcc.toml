@@ -30,7 +30,9 @@ stiff_gain = 5.0                        # [1/s] on stiff axes: v = v_t - stiff_g
 gain_ramp_s = 0.1                       # set_gains() blends K, D, M over this long (smoothstep); the held pose is kept (fdcc.py step 2a)
 
 [feedforward]
-# D * v_t is a force in disguise; fade it when the environment resists the motion.
+# fdcc.TargetFeedforward: the velocity of teleop / scripted pose targets, fed forward as
+# D * v_t. A force in disguise; fade it when the environment resists the motion. Not used
+# for explicit twist targets (a policy's; Env.step(des_twist=)).
 release = [3.0, 0.8]                    # resisting [N, Nm] at which the feedforward is fully off
 recover_s = 0.3                         # drops instantly, recovers 0 -> 1 over this long (symmetric fade rang at 25 Hz)
 filter_hz = 5.0                         # low-pass on the force the fade reads; the ~28 Hz wobble after an impact kept it tripped
@@ -38,6 +40,7 @@ filter_hz = 5.0                         # low-pass on the force the fade reads; 
 [limits]
 speed = [0.08, 0.9]                     # norm clamp on commanded twist [m/s, rad/s]
 accel = [2.0, 4.0]                      # norm clamp on change of commanded twist [m/s^2, rad/s^2]; also speedL's acceleration argument
+wrench_target = [40.0, 2.5]             # norm clamp on an explicit expected wrench (Env.step des_wrench) [N, Nm]
 abort_wrench = [inf, inf]               # halt above |F| [N], |tau| [Nm] (raw getActualTCPForce). inf (or 0) = no limit; tested value was [45.0, 5.0]
 
 [scripted]

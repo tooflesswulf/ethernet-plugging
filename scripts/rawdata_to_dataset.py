@@ -1,13 +1,17 @@
 from dataclasses import dataclass
+from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
+from scipy.signal import butter, filtfilt
 from PIL import Image
 from tqdm import tqdm
 import numpy as np
 import argparse
 import pathlib
+import tomllib
 import h5py
 import os
 
 from robot.util import dict2hdf5, hdf52dict
+from robot import fdcc
 
 
 def ewma(x, alpha):
@@ -46,8 +50,42 @@ class EpisodeData:
     stiffness: np.ndarray | None = None
     damping: np.ndarray | None = None
     mass: np.ndarray | None = None
+    # Measured body twist / wrench of the TCP (see body_twist_wrench), fdcc order [lin; ang]
+    twist_body: np.ndarray | None = None
+    wrench_body: np.ndarray | None = None
 
 
+def lowpass(x, t, hz, order=2):
+    """Zero-phase Butterworth low-pass along axis 0 of x sampled at times t (~uniform). hz <= 0 = off."""
+    if hz <= 0 or len(x) < 3 * (order + 1) * 2:
+        return x
+    fs = 1.0 / np.median(np.diff(t))
+    b, a = butter(order, hz, fs=fs)
+    return filtfilt(b, a, x, axis=0)
+
+
+def body_twist_wrench(t, pose, force, tcp_offset, ft_ref='flange', sign=1.0, lpf_hz=5.0):
+    """
+    Labels for explicit admittance targets, at the control rate (fdcc.body_twist /
+    fdcc.body_wrench, vectorized):
+      twist:  the TCP's body twist [v; w], central difference log(T_{i-1}^-1 T_{i+1}) / dt
+      wrench: getActualTCPForce as the body wrench [f; tau] at the TCP, unfiltered, no deadband
+    Both then zero-phase low-passed at lpf_hz (anti-aliasing for the dataset framerate;
+    these are labels, so the filter may look ahead).
+    """
+    T = Tf.from_components(pose[:, :3], R.from_rotvec(pose[:, 3:]))
+    xi = (T[:-2].inv() * T[2:]).as_exp_coords()                        # [w; v]
+    tw = np.concatenate([xi[:, 3:], xi[:, :3]], axis=1) / (t[2:] - t[:-2])[:, None]
+    tw = np.concatenate([tw[:1], tw, tw[-1:]])
+
+    T_fe = fdcc.pose_to_T(tcp_offset)
+    R_se = T.rotation.as_matrix()
+    R_q = R_se @ T_fe[:3, :3].T if ft_ref == 'flange' else R_se       # axes of the reading's point
+    W = sign * np.asarray(force, float)
+    F_q = np.concatenate([np.einsum('nji,nj->ni', R_q, W[:, :3]), np.einsum('nji,nj->ni', R_q, W[:, 3:])], axis=1)
+    Ad = fdcc.adjoint(T_fe) if ft_ref == 'flange' else np.eye(6)       # reading point -> TCP
+    wr = F_q @ Ad
+    return lowpass(tw, t, lpf_hz), lowpass(wr, t, lpf_hz)
 def base_frame_gains(gains, frame_base):
     """
     Logged gains are diagonal on the axes of fdcc.Impedance.frame. Gains on 'tool' axes are
@@ -62,7 +100,62 @@ def base_frame_gains(gains, frame_base):
     return gains
 
 
-def proc_h5(h5_path, framerate=10.0, alpha=0.03):
+def h5_labels(f, label_lpf_hz=5.0):
+    """(robot_obs time, twist_body, wrench_body) of an open rawdata.h5, at the control rate."""
+    rt = np.array(f['robot_obs/time'])
+    if 'config' in f and 'tcp_offset' in f['config']:
+        tcp_offset = np.array(f['config/tcp_offset'])
+        cfg = tomllib.loads(f['config'].attrs['fdcc_toml'])
+    else:
+        cfg = fdcc.load_config()
+        tcp_offset = np.array(cfg['robot']['tcp_offset'], float)
+    tw, wr = body_twist_wrench(rt, np.array(f['robot_obs/actual_pose']), np.array(f['robot_obs/actual_force']),
+                               tcp_offset, ft_ref=cfg['wrench']['reference_point'],
+                               sign=float(cfg['wrench']['sign']), lpf_hz=label_lpf_hz)
+    return rt, tw, wr
+
+
+def add_labels(path, framerate, label_lpf_hz=5.0):
+    """
+    Add twist_body / wrench_body to an existing `<path>_dataset/dataset.h5` built by this
+    script from `path`, without redoing the images: the labels are sampled at the same
+    times, and each episode's stored pose is checked against the raw one at those times.
+    The old file is kept as dataset.h5.bak.
+    """
+    import shutil
+    path = pathlib.Path(path)
+    ds = path.parent / (path.stem + '_dataset') / 'dataset.h5'
+    episodes = sorted(e for e in os.listdir(path) if e.startswith('episode'))
+    out = {'twist_body': [], 'wrench_body': []}
+    with h5py.File(ds, 'r') as f:
+        lengths, poses = np.array(f['metadata/length']), np.array(f['pose'])
+        assert float(f['metadata'].attrs['framerate']) == framerate, f['metadata'].attrs['framerate']
+    assert len(lengths) == len(episodes), (len(lengths), len(episodes))
+    offsets = np.r_[0, np.cumsum(lengths)]
+    for i, ep in enumerate(tqdm(episodes, desc=f'labels {path.name}')):
+        with h5py.File(path / ep / 'rawdata.h5', 'r') as f:
+            rt, tw, wr = h5_labels(f, label_lpf_hz)
+            pose = np.array(f['robot_obs/actual_pose'])
+            tf = max(rt[-1], f['gripper_obs/time'][-1], f['camera_obs/time'][-1])
+        dt = 1.0 / framerate
+        idx = np.searchsorted(rt, np.arange(dt, tf, dt), side='right') - 1
+        assert len(idx) == lengths[i] and np.array_equal(pose[idx], poses[offsets[i]:offsets[i + 1]]), \
+            f'{ep}: samples do not line up with {ds}'
+        out['twist_body'].append(tw[idx])
+        out['wrench_body'].append(wr[idx])
+    bak = ds.with_suffix('.h5.bak')
+    if not bak.exists():
+        shutil.copy2(ds, bak)
+    with h5py.File(ds, 'a') as f:
+        for k, v in out.items():
+            if k in f:
+                del f[k]
+            f.create_dataset(k, data=np.concatenate(v, axis=0))
+        f['metadata'].attrs['label_lpf_hz'] = label_lpf_hz
+    print(f'Added twist_body, wrench_body to {ds} (backup: {bak})')
+
+
+def proc_h5(h5_path, framerate=10.0, alpha=0.03, label_lpf_hz=5.0):
     with h5py.File(h5_path, 'r') as f:
         rt = np.array(f['robot_obs/time'])
         actual_pose = np.array(f['robot_obs/actual_pose'])
@@ -80,6 +173,8 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
                 'damping': base_frame_gains(np.array(f['control/D']), frame_base),
                 'mass': base_frame_gains(np.array(f['control/M']), frame_base),
             }
+
+        _, twist_body, wrench_body = h5_labels(f, label_lpf_hz)
 
         gt = np.array(f['gripper_obs/time'])
         gripper_width = np.array(f['gripper_obs/gripper_width'])
@@ -105,6 +200,7 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
     g_widths = []
     forces = []
     g_forces = []
+    twists, wrenches = [], []
     ctrl = {k: [] for k in ('target_poses', 'stiffness', 'damping', 'mass')} if control else None
     for t in sample_times:
         rt_idx = np.searchsorted(rt, t, side='right') - 1
@@ -116,6 +212,8 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
         g_widths.append(gripper_width[gt_idx])
         forces.append(force_smoothed[rt_idx])
         g_forces.append(gripper_force[gt_idx])
+        twists.append(twist_body[rt_idx])
+        wrenches.append(wrench_body[rt_idx])
         if control is not None:
             ct_idx = np.searchsorted(control['time'], t, side='right') - 1
             for k in ctrl:
@@ -129,6 +227,8 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
         gripper_widths=g_widths,
         gripper_forces=g_forces,
         meta=meta,
+        twist_body=np.array(twists),
+        wrench_body=np.array(wrenches),
         **({k: np.array(v) for k, v in ctrl.items()} if ctrl else {}),
     )
 
@@ -140,11 +240,18 @@ if __name__ == '__main__':
                         help='Base dataset directory')
     parser.add_argument('--framerate', type=float, default=20.0, help='Framerate to sample the raw data at')
     parser.add_argument('--alpha', '-a', type=float, default=0.03, help='Smoothing factor for force EWMA')
+    parser.add_argument('--label_lpf_hz', type=float, default=5.0,
+                        help='zero-phase low-pass on the twist / wrench labels before resampling (0 = off)')
+    parser.add_argument('--labels_only', action='store_true', default=False,
+                        help='only add twist_body / wrench_body to the existing <path>_dataset (no images)')
     parser.add_argument('--h5_images', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to save images in the HDF5 file (can make it very large)')
     args = parser.parse_args()
 
     path = pathlib.Path(args.path)
+    if args.labels_only:
+        add_labels(path, args.framerate, args.label_lpf_hz)
+        raise SystemExit
     save_dir = path.parent / (path.stem + '_dataset')
     save_dir.mkdir(exist_ok=True)
 
@@ -153,7 +260,7 @@ if __name__ == '__main__':
         if not ep_str.startswith('episode'):
             continue
         episode_path = path / ep_str
-        episode = proc_h5(path / ep_str / 'rawdata.h5', framerate=args.framerate)
+        episode = proc_h5(path / ep_str / 'rawdata.h5', framerate=args.framerate, label_lpf_hz=args.label_lpf_hz)
         episodes.append(episode)
 
     if not args.h5_images:
@@ -178,7 +285,8 @@ if __name__ == '__main__':
         f.create_dataset('gripper_force', data=np.concatenate([ep.gripper_forces for ep in episodes], axis=0))
         # Impedance fields (see EpisodeData), only when every episode has them
         for field, key in (('target_poses', 'target_pose'), ('stiffness', 'stiffness'),
-                           ('damping', 'damping'), ('mass', 'mass')):
+                           ('damping', 'damping'), ('mass', 'mass'),
+                           ('twist_body', 'twist_body'), ('wrench_body', 'wrench_body')):
             if all(getattr(ep, field) is not None for ep in episodes):
                 f.create_dataset(key, data=np.concatenate([getattr(ep, field) for ep in episodes], axis=0))
         dict2hdf5(f.create_group('metadata'), meta)

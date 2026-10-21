@@ -60,7 +60,7 @@ class TeleoperationRL(EvalRealtimeChunking):
         if self.iface.act.get('toggle_stiff_z'):
             self.toggle_stiff_z()
         nn_action = super().get_action()
-        des_pose, des_grip, _, _ = self._unshortcut_action(nn_action)
+        des_pose, des_grip = self._unshortcut_action(nn_action)[:2]
         des_pose = self.iface.residual_action(np.array(des_pose), self.control_dt)
         des_grip = self.override_gripper(des_grip)
         # self.action_hist.append((des_pose, des_grip))

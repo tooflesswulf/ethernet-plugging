@@ -9,6 +9,8 @@ from einops import rearrange, repeat
 import numpy as np
 import h5py, pathlib, os, torch
 
+from agent.utils import se3
+
 
 IMAGE_SIZE = 128
 # Framerate assumed for datasets/checkpoints that predate the stored `framerate`
@@ -65,6 +67,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         pose_target='pose',
         action_anchor=None,
         impedance_fields=(),
+        feedforward_fields=(),
         transform=None,
         device="cuda:0",
     ):
@@ -84,6 +87,10 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                           (e.g. 'target_offset') are computed from stored fields.
         impedance_fields: gain fields appended to each action as log10, e.g.
                           ('stiffness', 'damping', 'mass'); 6 base-frame diagonal values each.
+        feedforward_fields: explicit admittance targets appended to each action after the
+                          gains, ('twist', 'wrench'): the TCP's measured body twist and
+                          wrench, moved to the chunk anchor in the chart of the pose
+                          actions (agent/utils/se3.py). Needs local_delta actual-pose actions.
         """
         assert img_cond_steps <= cond_steps, 'consider using more cond_steps than img_cond_steps'
         self.horizon_steps = horizon_steps
@@ -95,6 +102,12 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.pose_target = pose_target
         self.action_anchor = pose_target if action_anchor is None else action_anchor
         self.impedance_fields = tuple(impedance_fields)
+        self.feedforward_fields = tuple(feedforward_fields)
+        assert set(self.feedforward_fields) <= set(se3.DATASET_FIELDS), self.feedforward_fields
+        if self.feedforward_fields:
+            # twist/wrench labels are body quantities at the ACTUAL pose: the pose action
+            # must be that pose, and its exp coords the chart they are moved into
+            assert action_mode == 'local_delta' and pose_target == 'pose', (action_mode, pose_target)
 
         self.predict_done = predict_done
         self.end_signal_steps = end_signal_steps if end_signal_steps is not None else horizon_steps
@@ -130,6 +143,10 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             anchor_poses = np.array(f[self.action_anchor][:total_num_steps])  # (N, 6)
             gains = [np.array(f[k][:total_num_steps]) for k in self.impedance_fields]
             log_gains = np.log10(np.concatenate(gains, axis=1)) if gains else np.zeros((total_num_steps, 0))
+            for k in self.feedforward_fields:
+                assert se3.DATASET_FIELDS[k] in f, (
+                    f'{se3.DATASET_FIELDS[k]} not in {self.dataset_path}: rebuild it with scripts/rawdata_to_dataset.py')
+            ff_body = {k: np.array(f[se3.DATASET_FIELDS[k]][:total_num_steps]) for k in self.feedforward_fields}
 
             if f['images'].attrs['stored_as'] == 'image':
                 self.h5_image = True
@@ -163,7 +180,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.indices = self.make_indices(traj_lengths, horizon_steps)
         self.obs = all_obs  # (N, obs_dim)
         self.h5 = None
-        self._precompute_actions(g_widths, action_poses, anchor_poses, log_gains)
+        self._precompute_actions(g_widths, action_poses, anchor_poses, log_gains, ff_body)
 
         self.obs_dim = self.obs.shape[1]
         self.act_dim = self.actions.shape[-1]
@@ -223,7 +240,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             traj_start += traj_length
         return np.array(indices)
 
-    def _precompute_actions(self, g_widths, action_poses, anchor_poses, log_gains):
+    def _precompute_actions(self, g_widths, action_poses, anchor_poses, log_gains, ff_body=None):
         g_thr = (np.amax(g_widths) + np.amin(g_widths)) / 2  # threshold for binary gripper action
 
         actions = []
@@ -241,11 +258,22 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             chunk = np.c_[pose_action, g_action]
             if self.predict_done:
                 chunk = np.c_[chunk, self.done_action(start, end, ep_end)]
-            # [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field)]
+            # [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field),
+            #  twist / wrench at the anchor (6 per feedforward field)]
             chunk = np.c_[chunk, log_gains[start:end]]
+            if self.feedforward_fields:
+                T_0i = self.relative_transforms(action_poses[start:end], anchor_poses[start])
+                for k in self.feedforward_fields:
+                    chunk = np.c_[chunk, se3.TO_ANCHOR[k](T_0i, ff_body[k][start:end])]
             actions.append(chunk)
         self.actions = np.array(actions)
         return self.actions
+
+    @staticmethod
+    def relative_transforms(poses, ref_pose):
+        """(N, 4, 4) T_0^-1 T_i of UR poses (N, 6) relative to ref_pose (6,)."""
+        t0 = Tf.from_components(ref_pose[:3], R.from_rotvec(ref_pose[3:]))
+        return (t0.inv() * Tf.from_components(poses[:, :3], R.from_rotvec(poses[:, 3:]))).as_matrix()
 
     def gripper_action(self, g_widths, threshold=20):
         """

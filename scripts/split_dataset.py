@@ -32,6 +32,8 @@ import numpy as np
 
 STITCHED_FIELDS = ['pose', 'force', 'gripper_width', 'gripper_force',
                    'target_pose', 'stiffness', 'damping', 'mass']
+# rawdata_to_dataset.py (--labels_only) labels; stitched when every source has them
+OPTIONAL_FIELDS = ['twist_body', 'wrench_body']
 SCRIPTED_K = 2999.     # fdcc.toml [scripted] stiffness is 3000 N/m; teleop runs at 300
 PHASES = ('pickup', 'insert')
 
@@ -96,6 +98,14 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
             for p in PHASES}
     source_names = {p: [] for p in PHASES}
     framerate = None
+    have = []
+    for raw_dir in sources:
+        raw_dir = pathlib.Path(raw_dir).resolve()
+        with h5py.File(raw_dir.parent / (raw_dir.name + '_dataset') / 'dataset.h5', 'r') as f:
+            have.append(set(f.keys()))
+    fields = STITCHED_FIELDS + [k for k in OPTIONAL_FIELDS if all(k in h for h in have)]
+    for p in PHASES:
+        collected[p].update({k: [] for k in fields if k not in collected[p]})
 
     for raw_dir in sources:
         raw_dir = pathlib.Path(raw_dir).resolve()
@@ -110,7 +120,7 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
             assert len(lengths) == len(episodes), \
                 f'{ds_dir} has {len(lengths)} episodes, {raw_dir} has {len(episodes)}'
             offsets = np.r_[0, np.cumsum(lengths)]
-            data = {k: f[k][:] for k in STITCHED_FIELDS}
+            data = {k: f[k][:] for k in fields}
             images = f['images'][:]
             ds_meta = {k: f[f'metadata/{k}'][:] for k in meta['pickup'] if f'metadata/{k}' in f}
 
@@ -141,7 +151,7 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
                     print(f'  skip {raw_dir.name}/{ep.name} {phase}: gripper open '
                           f'{"at the end" if phase == "pickup" else "during insertion"}')
                     continue
-                for k in STITCHED_FIELDS:
+                for k in fields:
                     collected[phase][k].append(data[k][idx])
                 collected[phase]['images'].append(
                     [str(ds_dir / p.decode()) for p in images[idx]])
@@ -160,7 +170,7 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
         c, m = collected[phase], meta[phase]
         with h5py.File(out_dir / 'dataset.h5', 'w') as f:
             f.create_dataset('num_episodes', data=len(m['length']))
-            for k in STITCHED_FIELDS:
+            for k in fields:
                 f.create_dataset(k, data=np.concatenate(c[k], axis=0))
             f.create_dataset('images', data=sum(c['images'], []), dtype=h5py.string_dtype())
             f['images'].attrs['stored_as'] = 'filepath'

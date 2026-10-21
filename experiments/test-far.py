@@ -154,14 +154,14 @@ class TeleoperationReset(EvalRealtimeChunking):
 
     def get_action(self):
         if self.detect_force_edge():
-            last_pose, last_grip, _, _ = self.last_action
+            last_pose, last_grip = self.last_action[:2]
             if last_grip == GRIP_CLOSED:
                 print('Detected rising force edge while gripper closed. Setting 2s timeout')
                 self._contact_flag = True
                 self._contact_t = time.time()
 
         if self.iface.dualsense.state.DpadLeft:
-            last_pose, last_grip, _, _ = self.last_action
+            last_pose, last_grip = self.last_action[:2]
             if last_grip == GRIP_CLOSED:
                 return self.reset_cable()
             print('Dpad-Left pressed, but gripper is open. Ignoring.')

@@ -2,20 +2,33 @@
 Per-cycle Cartesian admittance over UR speedL. Minimal API for Env._control_loop().
 
     imp = Impedance(ImpedanceParams.from_toml(), tcp_offset=ctrl.getTCPOffset())
-    imp.reset()                                  # after any motion not commanded by imp
+    ff = TargetFeedforward(imp.p)                # teleop only: the target's own velocity
+    imp.reset(); ff.reset()                      # after any motion not commanded by imp
     ...every 2 ms:
     imp.set_gains(K=..., D=...)                  # optional; blends over gain_ramp_s
-    v = imp.step(recv.getActualTCPPose(), recv.getActualTCPForce(), pose_target)
+    pose = recv.getActualTCPPose()
+    F = imp.wrench(pose, recv.getActualTCPForce(), wrench_target)    # step 1
+    # explicit targets (a policy):
+    v = imp.step(pose, pose_target, twist_target)
+    # or teleop / scripted targets:
+    ff.update_force(F)
+    v = imp.step(pose, pose_target, ff.twist(pose_target), shape=ff.fade)
     ctrl.speedL(v, imp.p.accel[0], imp.p.dt)     # time argument = ONE cycle
 
 The law is docs/FDCC-ADMITTANCE.md §3, in body coordinates at the compliance frame c:
 
-    M dV/dt + D (V - g V_t) = F + K xi,      xi = log(T_sc^-1 T_sc*)^v
+    M dV/dt + D (V - V_t) = (F - F_ref) + K xi,      xi = log(T_sc^-1 T_sc*)^v
+
+V_t is the target's twist and F_ref the wrench the arm expects to feel there, both given
+by the caller (zero when not). The finite-differenced, contact-faded target velocity of
+teleop is TargetFeedforward's, not the law's.
 
 Twists/wrenches are [linear; angular]. Poses in and twists out use UR's conventions:
-pose = [p; rotvec] of the TCP in `base`; twist = TCP-point velocity in base axes
-(getActualTCPSpeed / speedL); wrench = getActualTCPForce, base axes, moment about the
-FLANGE on this arm.
+pose = [p; rotvec] of the TCP in `base`; twist out = TCP-point velocity in base axes
+(getActualTCPSpeed / speedL); wrench in = getActualTCPForce, base axes, moment about the
+FLANGE on this arm. Targets in are BODY quantities: twist_target the body twist of the
+target TCP (its axes, its point), wrench_target the body wrench at the actual TCP, sign
+of getActualTCPForce (the force ON the tool).
 
 NOT handled here (the caller's job; see docs/FDCC-ADMITTANCE.md §7-8):
   * teleop slew limit and leash. The leash must not DRAG the target after the arm: a
@@ -55,6 +68,11 @@ def _six(x):
     return x.copy()
 
 
+def _lowpass_alpha(hz, dt):
+    """First-order low-pass coefficient per sample; hz <= 0 = no filter."""
+    return 1.0 if hz <= 0 else 1.0 - np.exp(-2 * np.pi * hz * dt)
+
+
 @dataclass
 class ImpedanceParams:
     dt: float = 0.002
@@ -77,6 +95,7 @@ class ImpedanceParams:
     ff_filter_hz: float = 0.0           # low-pass on the force the fade sees; 0 = off
     speed: np.ndarray = field(default_factory=lambda: np.array([0.08, 0.9]))
     accel: np.ndarray = field(default_factory=lambda: np.array([2.0, 4.0]))
+    wrench_target_clamp: np.ndarray = field(default_factory=lambda: np.array([25.0, 2.0]))
 
     @classmethod
     def from_toml(cls, path=CONFIG_PATH):
@@ -94,7 +113,8 @@ class ImpedanceParams:
                    ff_release=np.array(ff['release'], float),
                    ff_recover=ff['recover_s'], ff_filter_hz=ff.get('filter_hz', 0.0),
                    speed=np.array(lim['speed'], float),
-                   accel=np.array(lim['accel'], float))
+                   accel=np.array(lim['accel'], float),
+                   wrench_target_clamp=np.array(lim.get('wrench_target', w['clamp']), float))
 
 
 # ------------------------------------------------------------------- SE(3) helpers
@@ -174,6 +194,28 @@ def se3_exp(xi):
     else:
         V = np.eye(3) + (1 - np.cos(th)) / th ** 2 * W + (th - np.sin(th)) / th ** 3 * W @ W
     return _T(_rotvec_to_R(w), V @ v)
+
+
+def _body_wrench(T_se, wrench, T_fe, T_ec, ft_ref, sign):
+    """getActualTCPForce -> body wrench [f; tau] at frame c = T_se T_ec (step 1, unfiltered)."""
+    T_sc = T_se @ T_ec
+    T_q = T_se @ _inv(T_fe) if ft_ref == 'flange' else T_se
+    F_q = _B(T_q[:3, :3]).T @ (sign * np.asarray(wrench, float))
+    return adjoint(_inv(T_q) @ T_sc).T @ F_q
+
+
+def body_wrench(pose, wrench, tcp_offset, ft_ref='flange', sign=1.0):
+    """
+    getActualTCPForce (base axes, moment about `ft_ref`) -> the body wrench at the TCP,
+    [f; tau] in TCP axes, sign `sign` (+1: the force ON the tool). What
+    Impedance.wrench(wrench_target=) takes. pose: UR TCP pose; tcp_offset: UR TCP offset.
+    """
+    return _body_wrench(pose_to_T(pose), wrench, pose_to_T(tcp_offset), np.eye(4), ft_ref, sign)
+
+
+def body_twist(pose0, pose1, dt):
+    """Body twist [v; w] of the TCP moving from pose0 to pose1 (UR poses) over dt: log(T0^-1 T1)^v / dt."""
+    return se3_log(_inv(pose_to_T(pose0)) @ pose_to_T(pose1)) / dt
 
 
 def _isotropic(gains):
@@ -269,9 +311,7 @@ class Impedance:
         self.T_ec = _T(np.eye(3), self.p.compliance_point)           # TCP -> compliance frame
         self.Ad_ec = adjoint(self.T_ec)
         self.Ad_ec_inv = adjoint(_inv(self.T_ec))
-        lp = lambda hz: 1.0 if hz <= 0 else 1.0 - np.exp(-2 * np.pi * hz * self.p.dt)
-        self.alpha = lp(self.p.lowpass_hz)
-        self.alpha_ff = lp(self.p.ff_filter_hz)
+        self.alpha = _lowpass_alpha(self.p.lowpass_hz, self.p.dt)
         self.K, self.D, self.M, self.sel = (_six(x) for x in (self.p.K, self.p.D, self.p.M, self.p.sel))
         self.frame = self.p.frame       # axes K, D, M, sel are on; set_gains(frame=) changes it
         self._ramp = None               # (gains from, gains to, cycles done, cycles total, frame at end)
@@ -282,9 +322,8 @@ class Impedance:
         """Zero the state. Call after any motion this object did not command."""
         self.V = np.zeros(6)            # commanded twist of c, body coordinates
         self.F_filt = None
-        self.F_ff = None                # slow copy of F for the fade
-        self.g = np.ones(2)             # feedforward fade, [lin, ang]
-        self.T_target_prev = None
+        self.F = np.zeros(6)            # this cycle's processed wrench at c (wrench())
+        self.F_ref = np.zeros(6)        # this cycle's expected wrench at c
         self.clear_hold()
         self.last = {}
 
@@ -363,25 +402,39 @@ class Impedance:
         else:
             self._ramp = (a, b, i, n, end_frame)
 
-    def note_target_jump(self, target):
-        """
-        Tell the controller the target was MOVED on purpose (re-anchor),
-        so the finite-difference target twist does not read the jump as velocity and feed
-        it forward (it did: a one-cycle bumpless jump became an 80 mm/s feedforward kick,
-        logs-debug-fdcc/episode000005 12.7 s).
-        """
-        self.T_target_prev = pose_to_T(target)
-
     def _check(self):
         bad = (self.sel != 0) & (self.M + self.D * self.p.dt <= 0)
         if bad.any():
             raise ValueError(f'compliant axes {np.flatnonzero(bad)} need M + D dt > 0')
 
-    def step(self, pose, wrench, pose_target, twist_target=None):
+    def wrench(self, pose, wrench, wrench_target=None):
         """
-        pose, pose_target: TCP [p; rotvec] in base. wrench: raw getActualTCPForce().
-        twist_target: the target's TCP twist, speedL convention; None = finite
-        difference of successive pose_targets. Returns the twist for speedL.
+        Step 1, once per cycle before step(): the measured wrench as a body wrench at c,
+        low-passed, minus the expected wrench, deadbanded and clamped. Returns that F.
+        pose: TCP [p; rotvec] in base. wrench: raw getActualTCPForce().
+        wrench_target: the wrench the arm expects to feel, a body wrench at the TCP in its
+        axes, sign of getActualTCPForce; clamped to p.wrench_target_clamp. None = zero.
+        The deadband and clamp act on the deviation from it, so held contact at the
+        expected wrench reads zero; with none, F is what it always was.
+        """
+        p = self.p
+        T_se = pose_to_T(pose)
+        F = _body_wrench(T_se, wrench, self.T_fe, self.T_ec, p.ft_ref, p.ft_sign)
+        self.F_filt = F if self.F_filt is None else self.F_filt + self.alpha * (F - self.F_filt)
+        if wrench_target is None:
+            self.F_ref = np.zeros(6)
+        else:
+            self.F_ref = self.Ad_ec.T @ _clamp_halves(wrench_target, *p.wrench_target_clamp)
+        self.F = _clamp_halves(_deadband_halves(self.F_filt - self.F_ref, *p.deadband), *p.clamp)
+        return self.F
+
+    def step(self, pose, pose_target, twist_target=None, shape=None):
+        """
+        pose, pose_target: TCP [p; rotvec] in base. Uses the F of this cycle's wrench().
+        twist_target: the target's body twist [v; w] (target TCP, target axes); None = zero.
+        shape: optional fn(Vtq, Q) -> the target twist the damping pulls toward, in
+        compliance coordinates (TargetFeedforward.fade); stiff axes track the unshaped one.
+        Returns the twist for speedL.
         The spring pulls toward pose_target moved by the hold offset (2a), identity
         until the gains change.
         """
@@ -394,15 +447,7 @@ class Impedance:
         T_sc, T_sct = T_se @ self.T_ec, T_st @ self.T_ec
         R_sc = T_sc[:3, :3]
         Q = np.eye(6) if self.frame == 'tool' else _B(R_sc)  # compliance coordinates
-
-        # 1. wrench: body at c, filtered, deadbanded, clamped
-        T_sf = T_se @ _inv(self.T_fe)
-        T_q = T_sf if p.ft_ref == 'flange' else T_se
-        F_q = _B(T_q[:3, :3]).T @ (p.ft_sign * np.asarray(wrench, float))
-        F = adjoint(_inv(T_q) @ T_sc).T @ F_q
-        self.F_filt = F if self.F_filt is None else self.F_filt + self.alpha * (F - self.F_filt)
-        F = _clamp_halves(_deadband_halves(self.F_filt, *p.deadband), *p.clamp)
-        self.F_ff = F if self.F_ff is None else self.F_ff + self.alpha_ff * (F - self.F_ff)
+        F = self.F
         Fq = Q @ F
 
         # 2a. hold: when K changed since the last step (a ramp cycle, or an instant
@@ -417,7 +462,8 @@ class Impedance:
         # rotation of the target swung the held point around the target's TCP, |hold| away
         # from the arm (up to 41 mm in 2 s in logs-policy-imp). In base axes the held point
         # turns about itself, and a preload stays along the axis it was built on.
-        # Stiff axes and K = 0 on either side keep xi.
+        # Stiff axes and K = 0 on either side keep xi. F is the deviation from F_ref: the
+        # spring balances that part (statically K xi = -(F - F_ref)).
         if self._K_used is not None and not np.array_equal(self._K_used, self.K):
             xi = se3_log(_inv(T_sc) @ T_sct)
             xq = Q @ xi
@@ -435,36 +481,14 @@ class Impedance:
         T_cct = _inv(T_sc) @ T_sct
         xi = se3_log(T_cct)
         # the caller's target, before the hold: hold changes are not velocity
-        if twist_target is None:
-            Vb_et = (np.zeros(6) if self.T_target_prev is None
-                     else se3_log(_inv(self.T_target_prev) @ T_st_in) / dt)
-            Vb_et = _clamp_halves(Vb_et, *p.speed)
-        else:
-            Vb_et = _B(T_st_in[:3, :3]).T @ np.asarray(twist_target, float)
-        self.T_target_prev = T_st_in
+        Vb_et = np.zeros(6) if twist_target is None else np.asarray(twist_target, float)
         # same motion, held target: a base shift moves the held point with the target's
         # TCP (no w x hold term), so only the axes change
         Vb_et = _B(Rh.T) @ Vb_et
         Vt = adjoint(T_cct) @ (self.Ad_ec_inv @ Vb_et)
 
         xq, Vtq, Vq = Q @ xi, Q @ Vt, Q @ self.V
-        Fff = Q @ self.F_ff
-
-        # 3. feedforward fade: instant drop, slow recovery. It reads a slow copy of F:
-        # an impact kicked the ~28 Hz mode, its force wobble (4 N rms) kept tripping
-        # the fade, the lost feedforward left a 10-40 mm lag, and that steady spring
-        # force held the deadband open so the mode kept going
-        # (logs-debug-fdcc/episode000001, 2026-09-23).
-        Vff = Vtq.copy()
-        for j, (sl, rel) in enumerate(((slice(0, 3), p.ff_release[0]), (slice(3, 6), p.ff_release[1]))):
-            n = np.linalg.norm(Vff[sl])
-            g = 1.0
-            if rel > 0 and n > 0:
-                g = float(np.clip(1.0 + (Fff[sl] @ Vff[sl]) / (n * rel), 0.0, 1.0))
-            if p.ff_recover > 0:
-                g = min(g, self.g[j] + dt / p.ff_recover)
-            self.g[j] = g
-            Vff[sl] *= g
+        Vff = Vtq if shape is None else shape(Vtq, Q)
 
         # 4. dynamics, implicit in the damping
         Vn = (self.M * Vq + dt * (Fq + self.K * xq + self.D * Vff)) / (self.M + self.D * dt)
@@ -477,6 +501,73 @@ class Impedance:
         self.V = self.V + _clamp_halves(Vn - self.V, p.accel[0] * dt, p.accel[1] * dt)
         v_tcp = _clamp_halves(_B(T_se[:3, :3]) @ (self.Ad_ec @ self.V), *p.speed)
 
-        self.last = {'F_c': F, 'xi': xi, 'V': self.V.copy(), 'ff_gain': self.g.copy(), 'V_t': Vt,
+        self.last = {'F_c': F, 'F_ref': self.F_ref, 'xi': xi, 'V': self.V.copy(), 'V_t': Vt,
                      'hold': np.r_[hp, _R_to_rotvec(Rh)]}     # [base shift; rotvec on target axes]
         return v_tcp
+
+
+class TargetFeedforward:
+    """
+    The target velocity that teleop and scripted moves feed forward, and its fade in
+    contact -- a property of those targets, not of the law: a policy that predicts its own
+    twist (Impedance.step(twist_target=)) has no use for either.
+
+    The twist is the finite difference of successive pose targets (clamped to the speed
+    limit), as the joystick and MotionStep only give poses. Fed forward as D V_t it is a
+    force in disguise, and held against a wall it pushed 27 N at 27 mm/s, above the 25 N
+    clamp (docs/FDCC-ADMITTANCE.md §8), so it fades, per half, when the environment
+    resists it: drops at once, recovers over ff_recover. The fade reads a slow (ff_filter_hz)
+    copy of F: an impact kicked the ~28 Hz mode, its force wobble (4 N rms) kept tripping
+    the fade, the lost feedforward left a 10-40 mm lag, and that steady spring force held
+    the deadband open so the mode kept going (logs-debug-fdcc/episode000001, 2026-09-23).
+
+    Per cycle, after imp.wrench():
+        ff.update_force(F)
+        v = imp.step(pose, target, ff.twist(target), shape=ff.fade)
+    """
+
+    def __init__(self, params):
+        self.p = params
+        self.alpha = _lowpass_alpha(params.ff_filter_hz, params.dt)
+        self.reset()
+
+    def reset(self):
+        self.T_prev = None
+        self.F_ff = None                # slow copy of F (body at c) for the fade
+        self.g = np.ones(2)             # fade, [lin, ang]
+
+    def note_jump(self, target):
+        """
+        The target was MOVED on purpose (re-anchor): the next twist() does not read the
+        jump as velocity and feed it forward (it did: a one-cycle bumpless jump became an
+        80 mm/s feedforward kick, logs-debug-fdcc/episode000005 12.7 s).
+        """
+        self.T_prev = pose_to_T(target)
+
+    def update_force(self, F):
+        """F: this cycle's Impedance.wrench() output."""
+        self.F_ff = F if self.F_ff is None else self.F_ff + self.alpha * (F - self.F_ff)
+
+    def twist(self, target):
+        """Body twist of `target` (UR pose) since the last call, for Impedance.step."""
+        T = pose_to_T(target)
+        Vb = (np.zeros(6) if self.T_prev is None
+              else _clamp_halves(se3_log(_inv(self.T_prev) @ T) / self.p.dt, *self.p.speed))
+        self.T_prev = T
+        return Vb
+
+    def fade(self, Vtq, Q):
+        """Impedance.step's `shape`: the target twist at c (compliance coordinates), faded."""
+        p, dt = self.p, self.p.dt
+        Fff = Q @ (self.F_ff if self.F_ff is not None else np.zeros(6))
+        Vff = Vtq.copy()
+        for j, (sl, rel) in enumerate(((slice(0, 3), p.ff_release[0]), (slice(3, 6), p.ff_release[1]))):
+            n = np.linalg.norm(Vff[sl])
+            g = 1.0
+            if rel > 0 and n > 0:
+                g = float(np.clip(1.0 + (Fff[sl] @ Vff[sl]) / (n * rel), 0.0, 1.0))
+            if p.ff_recover > 0:
+                g = min(g, self.g[j] + dt / p.ff_recover)
+            self.g[j] = g
+            Vff[sl] *= g
+        return Vff

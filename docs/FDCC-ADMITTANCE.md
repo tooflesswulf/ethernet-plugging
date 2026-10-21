@@ -12,11 +12,16 @@ approximation of what's written here; §6 lists the differences.
 A 500 Hz host-side loop around UR's `speedL` velocity interface:
 
 ```
-target T_t, V_t (teleop)
+target T_t, V_t, F_ref (explicit: a policy; or teleop: V_t from TargetFeedforward, F_ref = 0)
         |
-W (getActualTCPForce) -> F in se(3)* at c -> [ M dV/dt + D (V - g V_t) = F + K xi ] -> V in se(3) at c -> Ad -> speedL
-T (getActualTCPPose) ---> xi = log(T_c^-1 T_t)                                     (clamped: speed, accel)
+W (getActualTCPForce) -> F - F_ref in se(3)* at c -> [ M dV/dt + D (V - V_t) = (F - F_ref) + K xi ] -> V in se(3) at c -> Ad -> speedL
+T (getActualTCPPose) ---> xi = log(T_c^-1 T_t)                                                (clamped: speed, accel)
 ```
+
+The law itself takes the target twist $V_t$ and the expected wrench $F_\text{ref}$ as
+given. Where they come from is the caller's business: a policy predicts them (§5a); for
+teleop and scripted moves, which only give poses, `fdcc.TargetFeedforward` derives $V_t$
+from the target's motion and fades it in contact (§4), with $F_\text{ref} = 0$.
 
 - **We own the geometry.** The compliance frame $c$ sits wherever `compliance_point`
   says. forceMode's is stuck at the flange.
@@ -80,13 +85,18 @@ Run everything below once per 2 ms cycle, between `initPeriod()` and `waitPeriod
 - Abort if $\|W_f\| > $ `abort_wrench[0]`, $\|W_\tau\| > $ `abort_wrench[1]`, or
   $\|p_{se} - p_{se}(0)\| > $ `max_drift_m`.
 
-**1. Wrench at c.** Convert $W$ to a body wrench at $c$, then filter, deadband and clamp it:
+**1. Wrench at c.** Convert $W$ to a body wrench at $c$, filter it, subtract the
+expected wrench, then deadband and clamp the deviation (`Impedance.wrench`):
 
 $$
-F = \operatorname{clamp}\circ\operatorname{db}\circ\operatorname{LPF}
-\Big(\mathrm{Ad}_{T_{fc}}^{\top}\,B(R_{sf})^{\top}\,\sigma W\Big),
+F = \operatorname{clamp}\circ\operatorname{db}\Big(\operatorname{LPF}
+\big(\mathrm{Ad}_{T_{fc}}^{\top}\,B(R_{sf})^{\top}\,\sigma W\big) - \mathrm{Ad}_{T_{ec}}^{\top} F^b_{\text{ref}}\Big),
 \qquad T_{fc} = T_{sf}^{-1}T_{sc},\ \ \sigma = \texttt{sign}.
 $$
+
+$F^b_{\text{ref}}$ is the expected body wrench at the TCP, same sign as $W$, its norms
+clamped to `wrench_target`; zero unless given. Holding contact at exactly the expected
+wrench reads $F = 0$. Below, $F$ means this deviation.
 
 $\operatorname{LPF}$ is a 30 Hz first-order filter per component. The deadband $\operatorname{db}$ acts on the norms
 of the two halves: $f \to f\,\max(\|f\| - 1.5, 0)/\|f\|$, and likewise $\tau$ with 0.15.
@@ -103,10 +113,13 @@ $$
 $\xi$ points from the current pose to the target. Its linear part is
 $V^{-1}(\omega)\,R_{sc}^\top(p_{sc^\star}-p_{sc})$, where
 $V^{-1}(\omega) = I - \tfrac12[\omega]_\times + O(\omega^2)$. The target's own body twist
-$V^b_{c^\star}$ comes from teleop (§4).
+$V^b_{c^\star}$ is given by the caller (`Impedance.step(twist_target=)`): a policy's, or
+teleop's (§4).
 
-**3. Feedforward fade.** Do the linear and angular halves separately, with $f_r$ = `release`
-and $T_r$ = `recover_s`:
+**3. Shaping the target twist (teleop only).** `Impedance.step(shape=)` may replace
+$V_t$ in the damping term (not on stiff axes) by $gV_t$; teleop passes
+`TargetFeedforward.fade`, an explicit target twist goes in as is ($g = 1$). The fade, per
+half, with $f_r$ = `release` and $T_r$ = `recover_s`:
 
 $$
 g^{+} = \min\!\Big(\operatorname{clip}\big(1 + \tfrac{\langle F_{\text{half}},\, V_{t,\text{half}}\rangle}{\|V_{t,\text{half}}\|\,f_r},\,0,\,1\big),\ g + \tfrac{\Delta t}{T_r}\Big).
@@ -179,7 +192,11 @@ between updates.
    the angular half with `leash[1]`. Never move the target toward the arm.
 4. **Commit and feed forward.** $T_{sc^\star} \leftarrow T_{\text{new}}$, and
    $V^b_{c^\star} = \log(T_{\text{old}}^{-1}T_{sc^\star})^\vee/h$. This is only the
-   stick's own motion, never the arm's.
+   stick's own motion, never the arm's. In `env.py` this is `fdcc.TargetFeedforward`:
+   the finite difference of successive leashed targets at the servo rate, faded in
+   contact (§3 step 3) and passed to `Impedance.step` with `shape=ff.fade`. It runs only
+   when `Env.step` gets no explicit twist, and a deliberate target jump is
+   `TargetFeedforward.note_jump`, never velocity.
 5. **Buttons.**
    - Dpad Up/Down: $s \times 1.5$ or $s / 1.5$.
    - Cross: $T_{sc^\star} = T_{sc}$ and $V_{\text{slew}} = 0$. A jump, not a velocity.
@@ -189,18 +206,33 @@ between updates.
 
 ## 5. Special cases of the same law
 
-**(a) Pose target:** use §3 as written.
+**(a) Explicit targets (a policy):** pose, twist and expected wrench together, no fade.
+The ethernet-plugging `--fv` policies clone the arm's ACTUAL motion: pose = actual TCP
+pose, $V_t$ = its measured body twist, $F_\text{ref}$ = its measured body wrench at the TCP.
+Replayed, $\xi \approx 0$, $V = V_t$ and $F - F_\text{ref} \approx 0$: the demo satisfies the
+law, and deviations from it are what the admittance responds to.
+
+*Action coordinates.* The policy's pose actions are
+$\xi_i = \log(T_0^{-1}T_i)^\vee$ (scipy exp coords, ordered $[\omega; v]$) relative to the
+chunk's anchor $T_0$. Its twist and wrench actions are put in the same chart
+(`agent/utils/se3.py`): $V^{(0)}_i = \mathrm{Ad}_{\exp\xi_i} V^b_i$ ordered $[\omega; v]$,
+and $F^{(0)}_i = \mathrm{Ad}_{\exp\xi_i}^{-\top} F^b_i$ ordered $[\tau; f]$, so
+$\dot\xi = J_l^{-1}(\xi)\,V^{(0)}$ and $\langle F^{(0)}, V^{(0)}\rangle = \langle F^b, V^b\rangle$.
+Eval inverts both to body values at the predicted pose $T_i$, which is what
+`Env.step(des_twist=, des_wrench=)` takes.
+
+**(b) Pose target (teleop):** use §3 as written, $V_t$ from §4.
 - Free-space steady state: $V = V_t$, and $\xi = -K^{-1}F$.
 - Against contact with a still target: $F = -K\xi$, bounded by $K\cdot$`leash` in teleop.
 
-**(b) Velocity target, not anchored:** $K = 0$, so $M\dot V + D(V - gV_t) = F$.
+**(c) Velocity target, not anchored:** $K = 0$, so $M\dot V + D(V - gV_t) = F$.
 - Nothing pulls it back, so force errors make it drift. That's why teleop integrates
   the stick into a pose target and uses (a).
 - In static contact against $V_t$, the resisting force per half is
   $D\|V_t\|f_r/(f_r + D\|V_t\|) < f_r$. It was $D\|V_t\|$ without the fade: 27 N at 27 mm/s.
 
-**(c) Force target** $F_d \in \mathfrak{se}(3)^*$, the wrench the tool should apply:
-$M\dot V + DV = F + F_d$.
+**(d) Force target** $F_d \in \mathfrak{se}(3)^*$, the wrench the tool should apply:
+$M\dot V + DV = F + F_d$, i.e. $F_\text{ref} = -F_d$ with $K = 0$.
 - Static contact gives $F = -F_d$, with no integrator needed.
 - In free space it approaches at $V = D^{-1}F_d$.
 
@@ -322,6 +354,12 @@ The script logs **mixed** coordinates, as UR reports them:
 - `wrench_point`: $F$ after §3 step 1, in base axes.
 - `err`: the error in $c$ axes.
 - `q`, `k_scale`, `selection`, `loop_dt`, `seg`/`rep`/`phase`, `ff_gain` ($g$, two halves).
+
+`env.py`'s per-cycle `control/` log (rawdata.h5) has the same kind of fields, plus
+`explicit` (the cycle used explicit targets), `twist_target` (body twist of the target
+as `Impedance.step` took it), `wrench_target` (expected body wrench at the TCP), `F_ref`
+(it at $c$) and `F_c` (the deviation $F$ of §3 step 1); `commands/des_twist`,
+`commands/des_wrench` hold the commands (NaN rows: teleop).
 
 Also save every setting (the whole config), the payload, CoG and TCP offset read at
 startup, the git revision, the end reason, and the maximum loop gap. Earlier logs were

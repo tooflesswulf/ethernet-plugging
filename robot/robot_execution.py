@@ -52,7 +52,7 @@ class RobotExecution:
         self.pre_start()
         self.env.start()  # start threads
         self.post_start()
-        self.last_action = (self.home_pose, GRIP_OPEN, 0., False)
+        self.last_action = (self.home_pose, GRIP_OPEN, False, 0., None, None)
 
     def get_action(self):
         """ Returns the action to send to _unshortcut_action.
@@ -67,13 +67,18 @@ class RobotExecution:
         """ Converts action shortcuts into unified format.
         act: None             -> repeat last action
         act: (float[6], int)  -> pose + gripper (GRIP_OPEN=0, GRIP_CLOSED=1)
-        act: (float[6], int, bool, float) -> pose, grip, zforce, mode
+        act: (float[6], int, bool, float) -> pose, grip, adaptive mode, zforce
+        act: (float[6], int, bool, float, float[6], float[6] | None)
+                              -> ... + explicit twist and wrench targets (Env.step)
+        Returns (pose, grip, adaptive_mode, zforce, twist, wrench); twist/wrench None = teleop.
         """
         if act is None:
             return self.last_action
         if len(act) == 2:
-            return (URPose(*act[0]), int(round(act[1])), 0, False)
-        return (URPose(*act[0]), int(round(act[1])), bool(act[2]), act[3])
+            return (URPose(*act[0]), int(round(act[1])), False, 0., None, None)
+        if len(act) == 4:
+            return (URPose(*act[0]), int(round(act[1])), bool(act[2]), act[3], None, None)
+        return (URPose(*act[0]), int(round(act[1])), bool(act[2]), act[3], act[4], act[5])
 
     def run(self):
         self.pre_run()
@@ -90,7 +95,7 @@ class RobotExecution:
             controller_state = self.iface.dualsense.state
             act = self.get_action()
             action = self._unshortcut_action(act)
-            des_pose, des_gripper, adaptive_mode, des_zforce = action
+            des_pose, des_gripper, adaptive_mode, des_zforce, des_twist, des_wrench = action
             self.last_action = action
 
             # ========================================================
@@ -101,7 +106,9 @@ class RobotExecution:
                 des_gripper_state=des_gripper,
                 des_zforce=des_zforce,
                 adaptive_mode=adaptive_mode,
-                dualsense=controller_state
+                dualsense=controller_state,
+                des_twist=des_twist,
+                des_wrench=des_wrench,
             )
             self.post_step(self.last_obs, self.last_action)
             self.iface.store_obs(self.last_obs)

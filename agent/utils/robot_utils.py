@@ -94,8 +94,10 @@ def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda', return_gains=
                here; the state follows policy.obs_fields so it matches training.
     Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,),
     des_done (H,) end-of-episode score in [0, 1]) ready to execute.
-    With return_gains, also the predicted impedance as {field: (H, 6) log10 gains}
-    ({} for a policy without an impedance head); see apply_gains.
+    With return_gains, also the policy's extra channels as one dict: the predicted
+    impedance {field: (H, 6) log10 gains} (see apply_gains) and the explicit admittance
+    targets {'twist' / 'wrench': (H, 6) body values at each predicted pose}
+    (DiffusionPolicy.decode_feedforward); {} for a policy with neither.
     """
     img_size = policy.img_size
     images = np.stack([resize_image(o['image'], (img_size, img_size), flip_channel=True) for o in obs_deque])
@@ -120,8 +122,37 @@ def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda', return_gains=
     # integrate deltas (per the policy's action_mode) into absolute poses + widths
     des_poses, des_widths, des_done = policy.integrate_actions(naction, curr_pose, curr_gripper_width)
     if return_gains:
-        return des_poses, des_widths, des_done, policy.decode_impedance(naction, log=True)
+        return des_poses, des_widths, des_done, {**policy.decode_impedance(naction, log=True),
+                                                 **policy.decode_feedforward(naction)}
     return des_poses, des_widths, des_done
+
+
+def extra_fields(policy: DiffusionPolicy):
+    """The policy's extra channels in the order they ride through a chunk buffer."""
+    return list(policy.impedance_fields) + list(policy.feedforward_fields)
+
+
+def extras_vector(policy: DiffusionPolicy, extras):
+    """get_actions' extras dict -> (H, 6 * n) in extra_fields order (None if there are none)."""
+    fields = extra_fields(policy)
+    return np.concatenate([extras[f] for f in fields], axis=1) if fields else None
+
+
+def split_extras(policy: DiffusionPolicy, vec):
+    """
+    One timestep of extras_vector (e.g. the chunk buffer's averaged gains channel) ->
+    ({impedance field: (6,) log10 gains}, twist (6,) or None, wrench (6,) or None).
+    """
+    d = {f: vec[6 * i:6 * (i + 1)] for i, f in enumerate(extra_fields(policy))}
+    return ({f: d[f] for f in policy.impedance_fields}, d.get('twist'), d.get('wrench'))
+
+
+def policy_command(des_pose, des_width, twist=None, wrench=None):
+    """An action for RobotExecution: (pose, width), or with explicit admittance targets
+    (pose, width, adaptive=False, zforce=0, twist, wrench), either may be None -- see Env.step."""
+    if twist is None and wrench is None:
+        return des_pose, des_width
+    return des_pose, des_width, False, 0., twist, wrench
 
 
 # Impedance field (StitchedSequenceDataset.impedance_fields) -> Env.set_gains keyword
@@ -139,6 +170,7 @@ def apply_gains(env: Env, log_gains: dict, ramp_s=None):
     ramp_s: blend time; pass the command period (1 / control_freq) when calling every
     command, so the gains blend between commands like the pose does (Env.interpolate).
     """
+    log_gains = {k: v for k, v in log_gains.items() if k in GAIN_KWARGS}   # extras may hold twist/wrench
     if not log_gains:
         return
     env.set_gains(frame='base', ramp_s=ramp_s,

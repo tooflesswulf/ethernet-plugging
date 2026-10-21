@@ -1,6 +1,7 @@
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer, CommandLowpass
 from agent.eval.policy_worker import PolicyWorker
-from agent.utils.robot_utils import ObsHistory, build_states, wait_for_circle, apply_gains
+from agent.utils.robot_utils import (ObsHistory, build_states, wait_for_circle, apply_gains,
+                                     extras_vector, split_extras, policy_command, extra_fields)
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
 from robot import robot_execution
@@ -83,18 +84,19 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
                                      pose_lead=self.lowpass.lead if self.lowpass else 0.0)
         if act is None:
             return None
-        des_pose, des_width, done, log_gains = act
+        des_pose, des_width, done, extras = act
         if self.lowpass:
             des_pose = self.lowpass(des_pose, now)
-        # Predicted impedance, split back into fields and blended over one command period
-        # (no-op without an impedance head)
-        self.apply_gains({f: log_gains[6 * i:6 * (i + 1)]
-                          for i, f in enumerate(self.policy.impedance_fields)})
+        # The extra channels, split back into fields: predicted impedance, blended over one
+        # command period (no-op without an impedance head), and the explicit twist / wrench
+        # targets (None without them: the admittance feeds the target's own velocity forward)
+        log_gains, twist, wrench = split_extras(self.policy, extras)
+        self.apply_gains(log_gains)
         # End-of-episode signal: stop once the executed action's done score crosses the threshold.
         if self.policy.predict_done and done > self.done_threshold:
             print(f"Policy thinks the task is complete (done={done:.3f} > threshold={self.done_threshold:.3f}).")
             self.stop()
-        return des_pose, des_width
+        return policy_command(des_pose, des_width, twist, wrench)
 
     def apply_gains(self, log_gains):
         """Command one timestep of predicted gains ({field: (6,) log10 gains}); a hook for overrides."""
@@ -113,10 +115,10 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
 
             # get_actions (in the worker process) builds images + the obs_fields state vector
             # from the deque; waiting on it releases the GIL for the control loop.
-            des_poses, des_grips, des_done, des_gains = self.worker.get_actions(obs_deque)
-            # (H, 6 * n_fields) log10 gains, in policy.impedance_fields order
-            des_gains = np.concatenate([des_gains[f] for f in self.policy.impedance_fields], axis=1) \
-                if des_gains else None
+            des_poses, des_grips, des_done, extras = self.worker.get_actions(obs_deque)
+            # (H, 6 * n) log10 gains then twist / wrench (robot_utils.extra_fields), averaged
+            # linearly by the buffer
+            des_gains = extras_vector(self.policy, extras)
 
             # Action 0 is the latest obs's step (StitchedSequenceDataset: the chunk starts at
             # the newest history frame), so the chunk starts at t_obs. The done score rides through the buffer so it's ensembled and thresholded at
@@ -148,7 +150,8 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             t_add=np.array([l['t'] for l in logs]) - self.env.t0,
             poses=np.stack([x.poses for x in c]), widths=np.stack([x.widths for x in c]),
             dones=np.stack([x.dones for x in c]), log_gains=np.stack([x.gains for x in c]),
-            obs=np.stack([l['obs'] for l in logs]), obs_fields=np.array(self.policy.obs_fields))
+            obs=np.stack([l['obs'] for l in logs]), obs_fields=np.array(self.policy.obs_fields),
+            log_gains_fields=np.array(extra_fields(self.policy)))   # log_gains columns, 6 each
 
 
 def parse_args():

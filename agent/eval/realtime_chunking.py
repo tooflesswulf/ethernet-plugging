@@ -17,9 +17,11 @@ to chunks that arrive at irregular, continuous times.
 
 Poses are averaged in absolute world coordinates (translation linearly, rotation
 via weighted rotation averaging), so the chunks must already be integrated into
-absolute poses (see ``DiffusionPolicy.integrate_actions``). Impedance gains, when the
-policy predicts them, ride along as log10 values and are averaged linearly in log space
-(a weighted geometric mean of the gains).
+absolute poses (see ``DiffusionPolicy.integrate_actions``). The policy's other continuous
+channels ride along in ``gains`` and are averaged linearly: impedance gains as log10 values
+(a weighted geometric mean of the gains), then explicit twist / wrench targets as body
+values at each chunk's own predicted pose (``robot_utils.extra_fields``). Those frames
+differ between chunks only by how much the chunks disagree, a second-order error.
 
 Each chunk's weight is also tapered: it ramps in from zero over ``taper`` seconds after
 the chunk arrives, and out to zero over the last ``taper`` seconds of its horizon. An
@@ -46,7 +48,7 @@ class _Chunk:
         self.poses = np.asarray(poses, dtype=float)    # (H, 6) [tx,ty,tz, rx,ry,rz]
         self.widths = np.asarray(widths, dtype=float)  # (H,)
         self.dones = np.asarray(dones, dtype=float)    # (H,) end-of-episode score in [0, 1]
-        # (H, P) log10 impedance gains; (H, 0) when the policy predicts none
+        # (H, P) extra linear channels (log10 gains, twist, wrench); (H, 0) when none
         self.gains = np.zeros((len(self.poses), 0)) if gains is None else np.asarray(gains, dtype=float)
         # absolute execution time of each action in the chunk
         self.times = t_obs + np.arange(len(self.poses)) * action_dt

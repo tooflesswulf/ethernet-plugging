@@ -19,7 +19,7 @@ chunks_<phase>.npz are saved next to rawdata.h5.
 from agent.eval.eval_realtime import EvalRealtimeChunking
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.eval.policy_worker import PolicyWorker
-from agent.utils.robot_utils import interrupt, build_states
+from agent.utils.robot_utils import interrupt, build_states, extras_vector, split_extras, policy_command
 from agent.model.policy import DiffusionPolicy
 from teleoperation import Teleoperation
 from robot.env import URPose, GRIP_OPEN, GRIP_CLOSED
@@ -127,16 +127,16 @@ class EvalSplits(EvalRealtimeChunking):
         act = self.policy_action()
         if act is None:
             return None
-        des_pose, des_width, done = act
+        des_pose, des_width, done, twist, wrench = act
         if self.policy.predict_done and done > self.done_threshold:
             if self.phase == 'pickup' and des_width > 0.5:      # commanding GRIP_CLOSED
                 return self.start_transport(f'done={done:.2f}')
             if self.phase == 'insert' and self.insert_done:
                 return self.start_unplug(f'done={done:.2f}')
-        return des_pose, des_width
+        return policy_command(des_pose, des_width, twist, wrench)
 
     def policy_action(self):
-        """EvalRealtimeChunking.get_action without its stop on done: (pose, width, done) or None."""
+        """EvalRealtimeChunking.get_action without its stop on done: (pose, width, done, twist, wrench) or None."""
         if self.buffer.is_empty():
             return None
         now = time.time()
@@ -144,12 +144,12 @@ class EvalSplits(EvalRealtimeChunking):
                                      pose_lead=self.lowpass.lead if self.lowpass else 0.0)
         if act is None:
             return None
-        des_pose, des_width, done, log_gains = act
+        des_pose, des_width, done, extras = act
         if self.lowpass:
             des_pose = self.lowpass(des_pose, now)
-        self.apply_gains({f: log_gains[6 * i:6 * (i + 1)]
-                          for i, f in enumerate(self.policy.impedance_fields)})
-        return des_pose, des_width, done
+        log_gains, twist, wrench = split_extras(self.policy, extras)
+        self.apply_gains(log_gains)
+        return des_pose, des_width, done, twist, wrench
 
     def prediction_loop(self):
         """EvalRealtimeChunking.prediction_loop for the current phase's policy; idle in scripted phases."""
@@ -168,8 +168,7 @@ class EvalSplits(EvalRealtimeChunking):
             des_poses, des_grips, des_done, des_gains = worker.get_actions(obs_deque)
             if self.phase != phase:
                 continue        # predicted across a phase change: never executed
-            des_gains = np.concatenate([des_gains[f] for f in policy.impedance_fields], axis=1) \
-                if des_gains else None
+            des_gains = extras_vector(policy, des_gains)
             start = 0   # action 0 is t_obs's step (see EvalRealtimeChunking.prediction_loop)
             end = start + policy.action_horizon
             chnk = buffer.add_chunk(

@@ -32,7 +32,7 @@ def batch_to_device(batch, device="cuda:0"):
 
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
-          obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(),
+          obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(), feedforward_fields=(),
           encoder_type='resnet', noise_net=None, obs_horizon=None, short_obs_horizon=1,
           action_horizon=16, batch_size=128,
           max_n_episodes=50, init_ckpt=None, lr=1e-4, use_wandb=False, log_interval=10, save_interval=10,
@@ -49,7 +49,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     img_cond_steps = 0 if encoder_type == 'none' else obs_horizon
     action_kwargs = dict(predict_done=predict_done, end_signal_steps=end_signal_steps,
                          pose_target=pose_target, action_anchor=action_anchor,
-                         impedance_fields=impedance_fields)
+                         impedance_fields=impedance_fields, feedforward_fields=feedforward_fields)
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                       cond_steps=obs_horizon, img_cond_steps=img_cond_steps,
                                       horizon_steps=action_horizon, action_mode=action_mode, device=device,
@@ -77,6 +77,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                              framerate=dataset.framerate,
                              predict_done=predict_done,
                              impedance_fields=dataset.impedance_fields,
+                             feedforward_fields=dataset.feedforward_fields,
                              action_anchor=dataset.action_anchor,
                              obs_fields=obs_fields,
                              encoder_type=encoder_type,
@@ -142,6 +143,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
 
         val_mses, pose_mses, gripper_correctness, done_correctness = [], [], [], []
         imp_logmses = {f: [] for f in policy.impedance_fields}
+        ff_mses = {f: [] for f in policy.feedforward_fields}
         policy.eval()  # no dropout / augmentation (CrossUnet1D2) during validation
         for i, batch in enumerate(val_dataloader):
             with torch.no_grad():
@@ -157,6 +159,10 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                 for j, f in enumerate(policy.impedance_fields):
                     sl = slice(imp.start + 6 * j, imp.start + 6 * (j + 1))
                     imp_logmses[f].append(nn.functional.mse_loss(naction[:, :, sl], actions[:, :, sl]).item())
+                ffs = policy.feedforward_slice
+                for j, f in enumerate(policy.feedforward_fields):
+                    sl = slice(ffs.start + 6 * j, ffs.start + 6 * (j + 1))
+                    ff_mses[f].append(nn.functional.mse_loss(naction[:, :, sl], actions[:, :, sl]).item())
                 # gripper is channel 6; the optional end-of-episode signal is channel 7.
                 gripper_correctness.append(binary_correctness(naction[:, :, 6], actions[:, :, 6]))
                 if policy.predict_done:
@@ -164,6 +170,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
 
         val_log = {"val/mse_loss": np.mean(val_mses), "val/pose_mse": np.mean(pose_mses),
                    **{f"val/{f}_logmse": np.mean(v) for f, v in imp_logmses.items()},
+                   **{f"val/{f}_mse": np.mean(v) for f, v in ff_mses.items()},
                    "val/gripper_correctness": np.mean(gripper_correctness), "val/epoch": epoch}
         if done_correctness:
             val_log["val/done_correctness"] = np.mean(done_correctness)
@@ -201,6 +208,9 @@ def parse_args():
     parser.add_argument('--impedance_fields', nargs='*', default=[],
                         choices=['stiffness', 'damping', 'mass'],
                         help='impedance gains to predict (log10, base-frame diagonals)')
+    parser.add_argument('--feedforward_fields', nargs='*', default=[], choices=['twist', 'wrench'],
+                        help='explicit admittance targets to predict: the measured body twist / wrench, '
+                             'in the chart of the local_delta pose actions (needs --pose_target pose)')
     parser.add_argument('--encoder_type', type=str, default='resnet', choices=['resnet', 'vit', 'none'],
                         help='resnet: ResNet18 + FiLM ConditionalUnet1D; '
                              'vit: short/long-range ViTs + cross-attention CrossUnet1D2; '
@@ -217,7 +227,15 @@ def parse_args():
     parser.add_argument('--impedance', action='store_true', default=False,
                         help='shorthand for --pose_target target_pose --impedance_fields stiffness damping mass '
                              'with pose gripper_width force observations')
+    parser.add_argument('--fv', action='store_true', default=False,
+                        help='shorthand for --pose_target pose --action_anchor pose --feedforward_fields twist '
+                             'wrench with pose gripper_width force observations: actual-pose + twist + wrench actions')
     args = parser.parse_args()
+    assert not (args.fv and args.impedance), '--fv and --impedance clone different poses'
+    if args.fv:
+        args.pose_target = args.action_anchor = 'pose'
+        args.feedforward_fields = args.feedforward_fields or ['twist', 'wrench']
+        args.obs_fields = args.obs_fields or ['pose', 'gripper_width', 'force']
     if args.impedance:
         args.pose_target = 'target_pose'
         args.impedance_fields = args.impedance_fields or ['stiffness', 'damping', 'mass']
@@ -247,7 +265,8 @@ if __name__ == '__main__':
     train(name=args.name, dataset_path=dataset_path, ckpt_dir=ckpt_path,
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
           obs_fields=args.obs_fields, pose_target=args.pose_target, action_anchor=args.action_anchor,
-          impedance_fields=args.impedance_fields, max_n_episodes=args.max_episodes,
+          impedance_fields=args.impedance_fields, feedforward_fields=args.feedforward_fields,
+          max_n_episodes=args.max_episodes,
           encoder_type=args.encoder_type, noise_net=args.noise_net, obs_horizon=args.obs_horizon,
           short_obs_horizon=args.short_obs_horizon,
           action_horizon=args.action_horizon, batch_size=args.batch_size,
