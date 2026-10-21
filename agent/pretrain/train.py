@@ -34,6 +34,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
           obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(),
           encoder_type='resnet', noise_net=None, obs_horizon=None, short_obs_horizon=1,
+          action_horizon=16, batch_size=128,
           max_n_episodes=50, init_ckpt=None, lr=1e-4, use_wandb=False, log_interval=10, save_interval=10,
           device='cuda:0'):
     action_mode: ActionMode = 'local_delta'
@@ -51,16 +52,16 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                          impedance_fields=impedance_fields)
     dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                       cond_steps=obs_horizon, img_cond_steps=img_cond_steps,
-                                      horizon_steps=16, action_mode=action_mode, device=device,
+                                      horizon_steps=action_horizon, action_mode=action_mode, device=device,
                                       max_n_episodes=max_n_episodes, **action_kwargs)
 
     val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
                                           cond_steps=obs_horizon, img_cond_steps=img_cond_steps,
-                                          horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device,
+                                          horizon_steps=action_horizon, max_n_episodes=1, action_mode=action_mode, device=device,
                                           **action_kwargs)
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=128,
+        batch_size=batch_size,
         num_workers=8,
         shuffle=True,
     )
@@ -69,7 +70,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     # Normalization stats from the training set; stored as buffers inside the
     # policy so they're saved in the checkpoint for un-normalizing at eval time.
     norm_stats = compute_norm_stats(dataset)
-    policy = DiffusionPolicy(action_horizon=16, obs_horizon=obs_horizon, norm_stats=norm_stats,
+    policy = DiffusionPolicy(action_horizon=action_horizon, obs_horizon=obs_horizon, norm_stats=norm_stats,
                              state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
                              action_mode=dataset.action_mode,
                              grip_stats=dataset.grip_stats,
@@ -207,6 +208,8 @@ def parse_args():
     parser.add_argument('--noise_net', type=str, default=None, choices=['unet', 'crossunet'],
                         help='noise prediction net: ConditionalUnet1D (FiLM) or CrossUnet1D2 (cross-attention); '
                              'default: crossunet for vit, unet otherwise. Only none takes either.')
+    parser.add_argument('--action_horizon', type=int, default=16, help='actions per predicted chunk')
+    parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--obs_horizon', type=int, default=None,
                         help='observation history frames (default: 1 for resnet, 4 for vit)')
     parser.add_argument('--short_obs_horizon', type=int, default=1,
@@ -247,5 +250,6 @@ if __name__ == '__main__':
           impedance_fields=args.impedance_fields, max_n_episodes=args.max_episodes,
           encoder_type=args.encoder_type, noise_net=args.noise_net, obs_horizon=args.obs_horizon,
           short_obs_horizon=args.short_obs_horizon,
+          action_horizon=args.action_horizon, batch_size=args.batch_size,
           init_ckpt=args.init_ckpt, lr=args.lr,
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
