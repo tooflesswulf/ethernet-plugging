@@ -102,7 +102,8 @@ class EvalSplits(EvalRealtimeChunking):
 
         r1, r2 = Teleoperation.release_pose1, Teleoperation.release_pose2
         rel = np.array(r1)
-        rel[:2] = np.random.uniform([r1.x, r1.y], [r2.x, r2.y])
+        # rel[:2] = np.random.uniform([r1.x, r1.y], [r2.x, r2.y])
+        rel[:2] = [(r1.x + r2.x) / 2, (r1.y + r2.y) / 2]
         seq.move_to(URPose(*rel))
         seq.gripper(GRIP_OPEN)
         seq.wait(1) \
