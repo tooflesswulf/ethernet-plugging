@@ -140,7 +140,9 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
         def binary_correctness(pred, tgt):
             return (torch.sign(pred) == torch.sign(tgt)).float().mean().item()
 
-        val_mses, pose_mses, gripper_correctness, done_correctness = [], [], [], []
+        # Per-batch metrics, weighted by batch size when averaged: the last batch can be a
+        # handful of chunks (all from the episode's end), and must not count as a full one.
+        val_mses, pose_mses, gripper_correctness, done_correctness, val_ns = [], [], [], [], []
         imp_logmses = {f: [] for f in policy.impedance_fields}
         policy.eval()  # no dropout / augmentation (CrossUnet1D2) during validation
         for i, batch in enumerate(val_dataloader):
@@ -149,6 +151,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                 actions = batch.actions.float()
                 # predict_action returns unnormalized actions, comparable to raw dataset actions
                 naction = policy.predict_action(batch.conditions)
+                val_ns.append(len(actions))
 
                 val_mses.append(nn.functional.mse_loss(naction, actions).mean().item())
                 pose_mses.append(nn.functional.mse_loss(naction[:, :, :6], actions[:, :, :6]).item())
@@ -162,11 +165,12 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                 if policy.predict_done:
                     done_correctness.append(binary_correctness(naction[:, :, 7], actions[:, :, 7]))
 
-        val_log = {"val/mse_loss": np.mean(val_mses), "val/pose_mse": np.mean(pose_mses),
-                   **{f"val/{f}_logmse": np.mean(v) for f, v in imp_logmses.items()},
-                   "val/gripper_correctness": np.mean(gripper_correctness), "val/epoch": epoch}
+        val_mean = lambda v: np.average(v, weights=val_ns)
+        val_log = {"val/mse_loss": val_mean(val_mses), "val/pose_mse": val_mean(pose_mses),
+                   **{f"val/{f}_logmse": val_mean(v) for f, v in imp_logmses.items()},
+                   "val/gripper_correctness": val_mean(gripper_correctness), "val/epoch": epoch}
         if done_correctness:
-            val_log["val/done_correctness"] = np.mean(done_correctness)
+            val_log["val/done_correctness"] = val_mean(done_correctness)
         logger.log(val_log, step=step)
 
     # save the lastest model (with EMA weights applied)

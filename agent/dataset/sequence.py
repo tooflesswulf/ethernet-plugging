@@ -31,6 +31,20 @@ def target_offset(target_pose, actual_pose):
     return np.concatenate([target_pose[..., :3] - actual_pose[..., :3], rot], axis=-1)
 
 
+# metadata attr: [min, max] gripper width (mm) of the full data a dataset was built from
+# (scripts/rawdata_to_dataset.py), carried through split_dataset.py / concat_datasets.py.
+# The binary gripper label thresholds at its midpoint, so it means open vs closed even in a
+# dataset trimmed to one phase (an insert-only dataset never opens), and train / val
+# subsets of a dataset label alike.
+GRIP_RANGE_ATTR = 'grip_width_range'
+
+
+def grip_threshold(width_range):
+    """Gripper width (mm) above which the binary gripper action is +1 (open)."""
+    lo, hi = width_range
+    return (float(lo) + float(hi)) / 2
+
+
 # Observation fields computed from stored dataset fields: name -> fn(h5 file, n steps)
 DERIVED_OBS_FIELDS = {
     'target_offset': lambda f, n: target_offset(f['target_pose'][:n], f['pose'][:n]),
@@ -147,6 +161,17 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                       f'Assuming {DEFAULT_FRAMERATE}Hz.')
                 self.framerate = DEFAULT_FRAMERATE
 
+            if GRIP_RANGE_ATTR in f['metadata'].attrs:
+                grip_range = f['metadata'].attrs[GRIP_RANGE_ATTR]
+            else:
+                # Older datasets: the whole file's range (not just the max_n_episodes loaded,
+                # so a train and a val subset still agree). Wrong for a phase-trimmed dataset.
+                all_widths = f['gripper_width'][:]
+                grip_range = (all_widths.min(), all_widths.max())
+                print(f'Warning: {self.dataset_path} has no metadata/{GRIP_RANGE_ATTR}; gripper '
+                      f'labels threshold at the midpoint of its own widths {tuple(map(float, grip_range))}.')
+            self.grip_threshold = grip_threshold(grip_range)
+
             # Gripper metadata
             self.grip_stats = None
             if 'metadata/grip_width_mm' in f:
@@ -224,8 +249,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         return np.array(indices)
 
     def _precompute_actions(self, g_widths, action_poses, anchor_poses, log_gains):
-        g_thr = (np.amax(g_widths) + np.amin(g_widths)) / 2  # threshold for binary gripper action
-
         actions = []
         for i in tqdm(range(len(self)), desc='precomputing actions'):
             start, ep_start, ep_end = self.indices[i]
@@ -236,7 +259,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
             g_width = g_widths[start:end]
 
-            g_action = self.gripper_action(g_width, threshold=g_thr)
+            g_action = self.gripper_action(g_width, threshold=self.grip_threshold)
             pose_action = self.pose_action(action_poses[start:end], ref_pose=anchor_poses[start])
             chunk = np.c_[pose_action, g_action]
             if self.predict_done:

@@ -34,6 +34,15 @@ STITCHED_FIELDS = ['pose', 'force', 'gripper_width', 'gripper_force',
                    'target_pose', 'stiffness', 'damping', 'mass']
 SCRIPTED_K = 2999.     # fdcc.toml [scripted] stiffness is 3000 N/m; teleop runs at 300
 PHASES = ('pickup', 'insert')
+GRIP_RANGE_ATTR = 'grip_width_range'   # agent/dataset/sequence.py
+
+
+def grip_width_range(f: h5py.File) -> np.ndarray:
+    """[min, max] gripper width of a full (unsplit) dataset: its attr, or its own widths."""
+    if GRIP_RANGE_ATTR in f['metadata'].attrs:
+        return np.asarray(f['metadata'].attrs[GRIP_RANGE_ATTR], dtype=float)
+    w = f['gripper_width'][:]
+    return np.array([w.min(), w.max()], dtype=float)
 
 
 @dataclass
@@ -96,6 +105,9 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
             for p in PHASES}
     source_names = {p: [] for p in PHASES}
     framerate = None
+    # The phases are trimmed (insert never opens the gripper), so they keep the full sources'
+    # range for the gripper label threshold.
+    grip_range = np.array([np.inf, -np.inf])
 
     for raw_dir in sources:
         raw_dir = pathlib.Path(raw_dir).resolve()
@@ -113,6 +125,8 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
             data = {k: f[k][:] for k in STITCHED_FIELDS}
             images = f['images'][:]
             ds_meta = {k: f[f'metadata/{k}'][:] for k in meta['pickup'] if f'metadata/{k}' in f}
+            src_range = grip_width_range(f)
+            grip_range = np.array([min(grip_range[0], src_range[0]), max(grip_range[1], src_range[1])])
 
         n_kept = {p: 0 for p in PHASES}
         for i, ep in enumerate(episodes):
@@ -170,6 +184,7 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
             g.create_dataset('source', data=source_names[phase], dtype=h5py.string_dtype())
             g.attrs['framerate'] = framerate
             g.attrs['phase'] = phase
+            g.attrs[GRIP_RANGE_ATTR] = grip_range
         L = np.asarray(m['length'])
         print(f'Wrote {out_dir / "dataset.h5"}: {len(L)} episodes, {L.sum()} steps '
               f'(length {L.min()}-{L.max()}, median {np.median(L):.0f})')
