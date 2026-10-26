@@ -1,3 +1,5 @@
+import collections
+import threading
 import time
 
 import einops
@@ -28,6 +30,48 @@ OBS_FIELD_GETTERS = {
     # spring target relative to the arm (dataset DERIVED_OBS_FIELDS['target_offset'])
     'target_offset': lambda s: target_offset(s['target_pose'], s['actual_pose']).astype(np.float32),
 }
+
+
+class ObsHistory:
+    """
+    Timestamped env obs, recorded at the control rate, from which a policy's observation
+    history is picked at its training framerate. The dataset's history frames are 1 /
+    framerate apart; a deque appended once per prediction spaces them at the inference
+    period instead (~70+ ms for the ViT policies), which they were never trained on.
+    """
+
+    def __init__(self, maxlen=500):
+        self._records = collections.deque(maxlen=maxlen)    # (t, obs), oldest first
+        self._lock = threading.Lock()
+
+    def record(self, obs, t=None):
+        with self._lock:
+            self._records.append((time.time() if t is None else t, obs))
+
+    def frames(self, latest, t_latest, horizon, dt, t_min=None):
+        """
+        [obs at t_latest - (horizon - 1) * dt, ..., obs at t_latest - dt, latest]: each
+        earlier slot is the recorded obs nearest its time. Records before t_min (the start
+        of the episode / phase) are ignored; slots older than every remaining record get the
+        oldest one, as the dataset repeats an episode's first frame.
+        """
+        if horizon <= 1:
+            return [latest]
+        with self._lock:
+            records = [(t, o) for t, o in self._records
+                       if t <= t_latest and (t_min is None or t >= t_min)]
+        if not records:
+            return [latest] * horizon
+        times = np.array([t for t, _ in records])
+        out = []
+        for k in range(horizon - 1, 0, -1):
+            i = int(np.argmin(np.abs(times - (t_latest - k * dt))))
+            out.append(records[i][1])
+        return out + [latest]
+
+    def clear(self):
+        with self._lock:
+            self._records.clear()
 
 
 def build_states(obs_deque, obs_fields):

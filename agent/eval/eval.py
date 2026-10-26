@@ -41,6 +41,9 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
     def pre_run(self):
         wait_for_circle(self.env, self.iface, close_gripper=False)
         print("Starting evaluation...")
+        # Drop the obs from before homing: the first history is padded with the current one,
+        # as the dataset repeats an episode's first frame.
+        self.obs_deque.clear()
 
     def post_step(self, obs, act):
         self.obs_deque.append(obs)
@@ -63,14 +66,14 @@ class EvalPolicySerialChunks(robot_execution.RobotExecution):
         return des_pose, des_width
 
     def do_prediction(self):
-        obs_horizon = self.policy.obs_horizon
         action_horizon = self.policy.action_horizon
 
         # get_actions builds images + the obs_fields state vector from the deque.
         with torch.no_grad():
             des_poses, des_widths, des_done, des_gains = get_actions(
                 self.policy, self.obs_deque, self.device, return_gains=True)
-            start = obs_horizon - 1
+            # action 0 is the newest obs's step (StitchedSequenceDataset), whatever obs_horizon
+            start = 0
             end = start + action_horizon
             des_poses, des_widths, des_done = des_poses[start:end], des_widths[start:end], des_done[start:end]
 

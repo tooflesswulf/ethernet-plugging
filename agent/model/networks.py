@@ -744,6 +744,9 @@ class AttentionConditionalResidualBlock1D(nn.Module):
 class CrossUnet1D2(nn.Module):
     """
     1D U-Net with attention conditioning for fixed, static observation horizons.
+
+    backbone / ctx_backbone None: state-only; the observation tokens are the embedded states
+    (cond_mlp / ctx_mlp) without the image features they otherwise compress into.
     """
 
     def __init__(
@@ -787,7 +790,7 @@ class CrossUnet1D2(nn.Module):
             visual_feature_dim = spatial_emb # * num_img
             if num_img > 1:
                 assert False, f"Not implemented"
-            else:  # TODO: clean up
+            elif backbone is not None:  # TODO: clean up
                 self.compress,  self.ctx_compress = [SpatialEmb(
                     num_patch=bkbone.num_patch,
                     patch_dim=bkbone.patch_repr_dim,
@@ -1074,31 +1077,35 @@ class CrossUnet1D2(nn.Module):
             modalities: (B, To) — all 1 (single hybrid-encoder modality)
             ranges:     (B, To) — 1 = LONG, 2 = SHORT
         """
-        cond_B, T_rgb, C, H, W = cond["rgb"].shape
+        cond_B = cond["state"].shape[0]
         duplicates = B // cond_B # use for sample multiple action plans from the same observation
 
         # encode state: B x (Ts or Th) x d -> BTs x D or BTh x D
         ctx_state = rearrange(  cond["state"], 'B T d -> (B T) d'); state = rearrange(cond["state"][:,-self.cond_steps:], 'B T d -> (B T) d')
         ctx_state = self.ctx_mlp(ctx_state ); state = self.cond_mlp(state )
        
-        # encode images: B x T x C x H x W -> B x D
-        rgb = cond["rgb"][:, -self.cond_steps:]; ctx_rgb = cond["rgb"][:, -self.context_steps:]
-        if self.num_img > 1:
-            assert False, f"Not implemented"
+        if self.backbone is None:  # state-only: one token per embedded state
+            feat, ctx_feat = state, ctx_state
         else:
-            rgb = rearrange(rgb, "b t c h w -> (b t) c h w"); ctx_rgb = rearrange(ctx_rgb, "b t c h w -> (b t) c h w")
-        # convert rgb to float32 for augmentation
-        rgb = rgb.float(); ctx_rgb = ctx_rgb.float()
+            # encode images: B x T x C x H x W -> B x D
+            rgb = cond["rgb"][:, -self.cond_steps:]; ctx_rgb = cond["rgb"][:, -self.context_steps:]
+            if self.num_img > 1:
+                assert False, f"Not implemented"
+            else:
+                rgb = rearrange(rgb, "b t c h w -> (b t) c h w"); ctx_rgb = rearrange(ctx_rgb, "b t c h w -> (b t) c h w")
+            # convert rgb to float32 for augmentation
+            rgb = rgb.float(); ctx_rgb = ctx_rgb.float()
         # get vit output - pass in two images separately
         if self.num_img > 1:  # TODO: properly handle multiple images
             assert False, f"Not Implemented"
         else:  # single image
-            if self.augment and self.training:
-                rgb = self.aug(rgb); ctx_rgb = self.aug(ctx_rgb)
-            # feat: BxtokensxD; ctx_feat: (BxT)xtokensxD
-            feat = self.backbone(rgb); ctx_feat = self.ctx_backbone(ctx_rgb) 
-            # compress
-            feat = self.compress.forward(feat, state); ctx_feat = self.ctx_compress.forward(ctx_feat, ctx_state)
+            if self.backbone is not None:
+                if self.augment and self.training:
+                    rgb = self.aug(rgb); ctx_rgb = self.aug(ctx_rgb)
+                # feat: BxtokensxD; ctx_feat: (BxT)xtokensxD
+                feat = self.backbone(rgb); ctx_feat = self.ctx_backbone(ctx_rgb)
+                # compress
+                feat = self.compress.forward(feat, state); ctx_feat = self.ctx_compress.forward(ctx_feat, ctx_state)
             if self.training and self.short_range_dropout > 0.0:
                 drop_mask = torch.bernoulli(
                     torch.full((cond_B,), self.short_range_dropout, device=feat.device)
@@ -1123,11 +1130,15 @@ class CrossUnet1D2(nn.Module):
         
         return tokens, positions, modalities, ranges
 
+    def encode_obs(self, cond: Dict[str, torch.Tensor], B: int) -> tuple:
+        return self._encode_obs(cond, B)
+
     def forward(
         self,
         sample,
         timestep,
-        cond,
+        cond=None,
+        encoded_obs=None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -1135,12 +1146,14 @@ class CrossUnet1D2(nn.Module):
             x: (B, T, input_dim)
             timestep: (B,) or scalar diffusion step
             cond: dicionary of observation
-           
+            encoded_obs: encode_obs(cond, B) output, instead of cond (skips the encoders)
+
         Returns:
             (B, T, input_dim)
         """
-
-        global_cond, temporal_positions, modality_indices, range_indices = self._encode_obs(cond, B=len(sample))
+        if encoded_obs is None:
+            encoded_obs = self._encode_obs(cond, B=len(sample))
+        global_cond, temporal_positions, modality_indices, range_indices = encoded_obs
       
         """
         global_cond: (B, N, global_cond_dim) observation tokens

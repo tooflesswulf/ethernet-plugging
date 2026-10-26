@@ -174,7 +174,8 @@ if __name__ == '__main__':
         f.create_dataset('num_episodes', data=len(episodes))
         f.create_dataset('pose', data=np.concatenate([ep.poses for ep in episodes], axis=0))
         f.create_dataset('force', data=np.concatenate([ep.forces for ep in episodes], axis=0))
-        f.create_dataset('gripper_width', data=np.concatenate([ep.gripper_widths for ep in episodes], axis=0))
+        gripper_widths = np.concatenate([ep.gripper_widths for ep in episodes], axis=0)
+        f.create_dataset('gripper_width', data=gripper_widths)
         f.create_dataset('gripper_force', data=np.concatenate([ep.gripper_forces for ep in episodes], axis=0))
         # Impedance fields (see EpisodeData), only when every episode has them
         for field, key in (('target_poses', 'target_pose'), ('stiffness', 'stiffness'),
@@ -183,6 +184,9 @@ if __name__ == '__main__':
                 f.create_dataset(key, data=np.concatenate([getattr(ep, field) for ep in episodes], axis=0))
         dict2hdf5(f.create_group('metadata'), meta)
         f['metadata'].attrs['framerate'] = args.framerate
+        # open-to-closed range of the full data; the binary gripper label thresholds at its
+        # midpoint, also in datasets split / concatenated from this one (agent/dataset/sequence.py)
+        f['metadata'].attrs['grip_width_range'] = [float(gripper_widths.min()), float(gripper_widths.max())]
 
         if args.h5_images:
             img_chunk_shape = (1,) + episodes[0].images[0].shape
