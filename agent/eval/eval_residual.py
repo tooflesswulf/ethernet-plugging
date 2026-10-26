@@ -19,13 +19,15 @@ run() plays the eval_splits phases once:
                held in between. Ends on the network, DpadUp, the done score (insert_done)
                or insert_timeout.
     unplug     scripted, as Teleoperation.unplug_and_release
-    done       the robot stops (Env threads stopped: nothing runs in this process but the
-               script, so it can train freely); run() returns the Episode
+    done       the episode is saved, then Env.reset homes the robot and the gripper (and
+               stops the Env threads: nothing runs in this process but the script, so it
+               can train freely); run() returns the Episode
 
-The next run() re-homes the robot and, with wait_circle, waits for Circle (time to fix the
-scene). Square aborts the episode (run() returns it with aborted=True); Square while
-waiting for Circle raises RuntimeError, as in eval_splits. The policy workers live until
-close().
+as agent/rl_finetuning/train_residual_rl.py did between episodes (rl branch). The next
+run() restarts the Env and, with wait_circle, waits for Circle (time to fix the scene).
+Square aborts the episode (run() returns it with aborted=True, the robot homed) and the
+next run() starts as usual; Square while waiting for Circle raises RuntimeError, as in
+eval_splits, which ends the session. The policy workers live until close().
 
 Safety: each correction is clamped to max_dpos / max_drot / max_dlog_gain and the pose
 offset slew-limited to max_dpos_rate / max_drot_rate, whatever the callback asks for.
@@ -37,7 +39,7 @@ from agent.eval.eval_splits import EvalSplits
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import GAIN_KWARGS
 from robot.env import GRIP_OPEN
-from robot import fdcc
+from robot import robot_execution, interface, fdcc
 from scipy.spatial.transform import Rotation as R
 from dataclasses import dataclass, field
 import numpy as np
@@ -185,22 +187,27 @@ class _ResidualSplits(EvalSplits):
         self._steps, self._ticks = [], []
 
     def rearm(self):
-        """Back to the state __init__ leaves: robot homed and servoing, at pickup."""
+        """From where end_episode left the robot (homed, Env stopped) to the state __init__
+        leaves: Env running, at pickup."""
         self.index += 1
         # A sequence cut short by Square still shadows get_action
         if getattr(self, '_interrupt_sequence', None) is not None:
             del self.get_action
             self._interrupt_sequence = None
-        env = self.env
-        env.threads = []                # joined by Env.close, which saved them; reset() would save again
-        env.network_status = False      # until its loop polls again
-        env.reset(self.home_pose)
-        env.start()                     # a new episode directory
+        # As train_residual_rl.py: a DualSense that dropped out comes back as a new interface
+        while not self.iface.dualsense.thread.is_alive():
+            print('Detected dualsense disconnected! Reconnecting...')
+            try:
+                self.iface = interface.DualSenseInterface(self.home_pose, xyzspeed=0.08, rpyspeed=0.9,
+                                                          forcespeed=5.)
+            except TypeError:
+                pass
+            time.sleep(3)
+        self.iface.reset(self.home_pose)    # re-enables the DualSense: Square latches it
+        self.env.start()                    # a new episode directory
+        time.sleep(2)                       # as train_residual_rl.py
         self.stop_event.clear()
         self.last_action = (self.home_pose, GRIP_OPEN, 0., False)
-        iface = self.iface              # as RobotExecution.__init__ left it: wait_for_circle
-        iface.targ_pose = np.array(self.home_pose)          # waits for Circle to close it
-        iface.targ_zforce, iface.adaptive_mode, iface.gripper_state = 0., False, GRIP_OPEN
 
         self.buffers = {p: RealtimeActionChunkingBuffer(action_dt=b.action_dt, weight_decay=b.weight_decay,
                                                         taper=b.taper) for p, b in self.buffers.items()}
@@ -362,15 +369,17 @@ class _ResidualSplits(EvalSplits):
         self.end_episode()
 
     def end_episode(self):
+        """Save the episode, then home the robot and stop the Env (see rearm)."""
         if not self.armed:
             return self.result
+        self.armed = False
         aborted = self.phase != 'done'
         if self.phase == 'insert':
             self.end_insert('aborted')
         self.stop()
-        self.env.stop_flag = True
-        super().end_episode()           # stops the robot, saves rawdata.h5 / phases.json / chunks
-        self.armed = False
+        if self.prediction_thread.is_alive():
+            self.prediction_thread.join(timeout=2.0)
+        self.save_episode()             # phases.json, chunks: into this episode's directory
         steps, reached = self._steps, self._t_insert is not None
         self.result = Episode(
             index=self.index,
@@ -390,11 +399,18 @@ class _ResidualSplits(EvalSplits):
         if self.result.path is not None:
             with open(self.env.epi_path / 'insert.pkl', 'wb') as f:
                 pickle.dump(self.result, f)
+        # As train_residual_rl.py between episodes: Env.reset stops the Env threads, saves
+        # rawdata.h5, and homes the robot and the gripper.
+        self.env.reset(self.home_pose)
         return self.result
 
     def shutdown(self):
-        if self.armed:
-            self.end_episode()
+        if self.armed:                  # never run: the Env __init__ started is still going
+            self.stop()
+            robot_execution.RobotExecution.close(self)
+        elif self.env.camera is not None:
+            self.env.camera.close()     # end_episode's reset left it open for the next start()
+            self.env.camera = None
         for worker, _ in self.policies.values():
             worker.close()
 
@@ -419,7 +435,6 @@ class ResidualEnv:
             insert_done=insert_done, log_dir=log_dir, control_freq=control_freq, weight_decay=weight_decay,
             taper=taper, lpf_hz=lpf_hz, done_threshold=done_threshold, device=device)
         self.wait_circle = wait_circle
-        self._fresh = True              # the constructor armed the first episode
 
     def register(self, correction, period=0.05, images=False):
         """
@@ -434,11 +449,10 @@ class ResidualEnv:
 
     def run(self) -> Episode:
         """One episode (waiting for Circle first, with wait_circle). Returns once the plug is
-        released (or the episode aborted) and the robot has stopped."""
+        released (or the episode aborted) and the robot is back home."""
         r = self._runner
-        if not self._fresh:
+        if not r.armed:                 # the constructor armed the first episode
             r.rearm()
-        self._fresh = False
         r.wait_circle = self.wait_circle
         try:
             r.run()                     # RobotExecution.run: ends in r.close() = r.end_episode()

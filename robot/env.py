@@ -209,6 +209,7 @@ class Env:
         self.save_eps = save_eps
         self.image_idx = 0
         self.metadata = metadata
+        self.camera = None               # opened by reset()
 
     def wait_for_obs(self):
         while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
@@ -314,7 +315,8 @@ class Env:
                 thr.join()
             if self.dataset_path is not None:
                 self.save_data()
-        self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
+        if self.camera is None:          # a second reset() reuses it: the device is already open
+            self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
 
         # ============================================================
         # Home / open gripper
@@ -349,6 +351,7 @@ class Env:
         g = self.gripper.move(position=self.open_width, speed=self.g_speed)
         g.finished.wait()
         self.gripper_state = GRIP_OPEN
+        self.des_gripper_state = GRIP_OPEN   # the command too: start() would act on the last one
 
         self.gripper.set_pwt(20)
 
@@ -365,7 +368,10 @@ class Env:
         self.control_log: list[ControlLog] = []
         self.speedl_log: list[SpeedLCmd] = []
         self.network_log: list[tuple[float, bool]] = []   # (time, link up) at every network poll
+        self.network_status = False      # until _network_loop polls
+        self.fdcc_target = None          # obs 'target_pose' is the arm until the control loop runs
         self.ctrl.zeroFtSensor()
+        self._force_filtered = np.zeros(6)   # filter_force restarts with the zeroed sensor
 
         print('payload kg', self.recv.getPayload())
         print('payload cog', self.recv.getPayloadCog())
@@ -382,7 +388,9 @@ class Env:
             thr.join(timeout=2.0)
             if thr.is_alive():
                 print(f'Warning: thread {thr.name} did not exit; leaving it to daemon cleanup.')
-        self.camera.close()
+        if self.camera is not None:
+            self.camera.close()
+            self.camera = None
         if self.dataset_path is not None:
             self.save_data()
 

@@ -197,17 +197,15 @@ class EvalSplits(EvalRealtimeChunking):
         super().runtime_info()
 
     def close(self):
-        self.end_episode()
-        for worker, _ in self.policies.values():
-            worker.close()
-
-    def end_episode(self):
-        """Stop the robot and save the episode: rawdata.h5, phases.json, chunks_<phase>.npz.
-        Returns whether it plugged in."""
         if self.prediction_thread.is_alive():
             self.prediction_thread.join(timeout=2.0)
+        for worker, _ in self.policies.values():
+            worker.close()
         robot_execution.RobotExecution.close(self)     # Env.close saves rawdata.h5 into env.epi_path
+        self.save_episode()
 
+    def save_episode(self):
+        """phases.json and chunks_<phase>.npz into env.epi_path. Returns whether it plugged in."""
         if self.phase_log and 't_end' not in self.phase_log[-1] and self.phase != 'done':
             self.phase_log[-1].update(t_end=time.time() - self.env.t0, end='aborted')
         success = any(p['phase'] == 'insert' and p.get('end') == 'network' for p in self.phase_log)
