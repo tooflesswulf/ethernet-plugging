@@ -26,8 +26,10 @@ run() plays the eval_splits phases once:
 as agent/rl_finetuning/train_residual_rl.py did between episodes (rl branch). The next
 run() restarts the Env and, with wait_circle, waits for Circle (time to fix the scene).
 Square aborts the episode (run() returns it with aborted=True, the robot homed) and the
-next run() starts as usual; Square while waiting for Circle raises RuntimeError, as in
-eval_splits, which ends the session. The policy workers live until close().
+next run() starts as usual. Square while waiting for Circle ends the session: run()
+raises SessionAborted, which leaving a `with ResidualEnv(...)` block swallows, so the
+remaining episodes are skipped and the script carries on after the block. The policy
+workers live until close().
 
 Safety: each correction is clamped to max_dpos / max_drot / max_dlog_gain and the pose
 offset slew-limited to max_dpos_rate / max_drot_rate, whatever the callback asks for.
@@ -37,7 +39,7 @@ chunks_<phase>.npz, as eval_splits) plus insert.pkl, the returned Episode.
 """
 from agent.eval.eval_splits import EvalSplits
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
-from agent.utils.robot_utils import GAIN_KWARGS
+from agent.utils.robot_utils import GAIN_KWARGS, SquarePressed
 from robot.env import GRIP_OPEN
 from robot import robot_execution, interface, fdcc
 from scipy.spatial.transform import Rotation as R
@@ -50,6 +52,10 @@ import time
 import os
 
 DEFAULT_PICKUP_CKPT = '../ckpts/ethernet-impedance-v2v3-pickup-tgt-noforce/ckpt_final.pth'
+
+
+class SessionAborted(Exception):
+    """Square at the Circle prompt: the operator ended the session (see ResidualEnv.__exit__)."""
 
 
 # ============================================================
@@ -404,6 +410,15 @@ class _ResidualSplits(EvalSplits):
         self.env.reset(self.home_pose)
         return self.result
 
+    def abandon(self):
+        """Square at the Circle prompt, before the episode started: stop the Env where it is
+        (home, since the last reset) instead of running it."""
+        self.armed = False
+        self.stop()
+        self.env.stop_flag = True                   # as RobotExecution.run, before close
+        robot_execution.RobotExecution.close(self)  # Env.close: threads, camera, rawdata.h5
+        self.save_episode()                         # phases.json: no phases
+
     def shutdown(self):
         if self.armed:                  # never run: the Env __init__ started is still going
             self.stop()
@@ -456,6 +471,9 @@ class ResidualEnv:
         r.wait_circle = self.wait_circle
         try:
             r.run()                     # RobotExecution.run: ends in r.close() = r.end_episode()
+        except SquarePressed:           # at the Circle prompt (pre_run), before anything moved
+            r.abandon()
+            raise SessionAborted('Square at the Circle prompt: session ended') from None
         finally:
             r.end_episode()             # no-op unless run() raised
         if r.error is not None:
@@ -473,8 +491,11 @@ class ResidualEnv:
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc, tb):
         self.close()
+        if exc_type is not None and issubclass(exc_type, SessionAborted):
+            print(f'\n{exc}')
+            return True                 # the remaining episodes are skipped, not an error
 
     # ============================================================
     # Command line, for scripts that build a ResidualEnv
