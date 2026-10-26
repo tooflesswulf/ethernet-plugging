@@ -487,7 +487,7 @@ class ResidualEnv:
                             help='where to save robot log data (None disables logging)')
         parser.add_argument('--insert_timeout', type=float, default=None,
                             help='end insert (unplug, a failed episode) after this many seconds')
-        parser.add_argument('--wait_circle', action=argparse.BooleanOptionalAction, default=False,
+        parser.add_argument('--wait_circle', action=argparse.BooleanOptionalAction, default=True,
                             help='wait for Circle before each episode')
         parser.add_argument('--max_dpos', type=float, default=0.01, help='per-axis bound on the pose offset (m)')
         parser.add_argument('--max_drot', type=float, default=0.1, help='bound on the rotation offset (rad)')
