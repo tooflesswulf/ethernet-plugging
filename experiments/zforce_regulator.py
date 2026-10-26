@@ -15,9 +15,17 @@ an upward z-velocity linear in the excess force, capped:
 and sends it as the offset dz = v * horizon. The insert policy re-anchors each chunk on the
 corrected target, so a held dz is taken into its command and added again: the target
 drifts up at about dz / (the time the policy takes to absorb it), and horizon is that
-time (calibrate it: Episode ticks give the target's drift). Against a search descending
-at v_s the force settles where v = v_s, f_floor + v_s / gain (10 N at 5 mm/s with the
-defaults); a push faster than max_speed outraces the correction and builds force.
+time: the mean anchor age of the chunk ensemble, 0.39 s for the insert policy on the robot
+(logs-zresid, 2026-10). Against a search descending at v_s the force settles where
+v = v_s, at f_floor + v_s / gain; a push faster than max_speed outraces the correction and
+builds force.
+
+The policy pushes harder as it stalls: its own descent went from ~4 mm/s at contact to
+8-9 mm/s with the plug pinned (logs-zresid). At gain 1e-3 / max_speed 10 mm/s the
+correction saturated against that and the force crept to ~14 N. The defaults settle near
+8 N against a 9 mm/s push and saturate at 10 N, still under the 21-40 mm/s insertion
+pushes. The force loop's bandwidth is K_z gain (0.9 rad/s at K_z 300), against the
+~0.4 s absorption lag: a policy that stiffens z speeds it up in proportion.
 
     python -m experiments.zforce_regulator --insert_ckpt <ckpt> --log_dir <dir> --episodes 5
 """
@@ -29,7 +37,7 @@ import os
 
 
 class ZForceRegulator(ResidualActor):
-    def __init__(self, f_floor=5.0, gain=1e-3, max_speed=0.01, horizon=0.4):
+    def __init__(self, f_floor=5.0, gain=3e-3, max_speed=0.015, horizon=0.4):
         self.f_floor = f_floor      # [N] no correction below this
         self.gain = gain            # [m/s per N] upward velocity per N over f_floor
         self.max_speed = max_speed  # [m/s] fastest upward velocity: slower than an insertion push
@@ -61,8 +69,8 @@ def main():
     ResidualEnv.add_args(parser)
     parser.add_argument('--episodes', type=int, default=5)
     parser.add_argument('--f_floor', type=float, default=5.0, help='z-force above which the correction acts (N)')
-    parser.add_argument('--gain', type=float, default=1e-3, help='upward velocity per N over f_floor (m/s/N)')
-    parser.add_argument('--max_speed', type=float, default=0.01,
+    parser.add_argument('--gain', type=float, default=3e-3, help='upward velocity per N over f_floor (m/s/N)')
+    parser.add_argument('--max_speed', type=float, default=0.015,
                         help='cap on the upward velocity (m/s); pushes faster than this outrace it')
     parser.add_argument('--horizon', type=float, default=0.4,
                         help='offset = velocity * horizon: the time the policy takes to absorb an offset (s)')
