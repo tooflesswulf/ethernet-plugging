@@ -128,16 +128,23 @@ class EvalSplits(EvalRealtimeChunking):
         act = self.policy_action()
         if act is None:
             return None
-        des_pose, des_width, done = act
+        des_pose, des_width, done, log_gains = act
         if self.policy.predict_done and done > self.done_threshold:
             if self.phase == 'pickup' and des_width > 0.5:      # commanding GRIP_CLOSED
                 return self.start_transport(f'done={done:.2f}')
             if self.phase == 'insert' and self.insert_done:
                 return self.start_unplug(f'done={done:.2f}')
+        return self.command(des_pose, des_width, done, log_gains)
+
+    def command(self, des_pose, des_width, done, log_gains):
+        """A policy phase's command from the policy's action: apply its gains, return (pose,
+        width). A hook (eval_residual.py corrects the insert policy's here)."""
+        self.apply_gains(log_gains)
         return des_pose, des_width
 
     def policy_action(self):
-        """EvalRealtimeChunking.get_action without its stop on done: (pose, width, done) or None."""
+        """EvalRealtimeChunking.get_action without its stop on done and without applying the
+        gains: (pose, width, done, {field: (6,) log10 gains}) or None."""
         if self.buffer.is_empty():
             return None
         now = time.time()
@@ -148,9 +155,8 @@ class EvalSplits(EvalRealtimeChunking):
         des_pose, des_width, done, log_gains = act
         if self.lowpass:
             des_pose = self.lowpass(des_pose, now)
-        self.apply_gains({f: log_gains[6 * i:6 * (i + 1)]
-                          for i, f in enumerate(self.policy.impedance_fields)})
-        return des_pose, des_width, done
+        return des_pose, des_width, done, {f: log_gains[6 * i:6 * (i + 1)]
+                                           for i, f in enumerate(self.policy.impedance_fields)}
 
     def prediction_loop(self):
         """EvalRealtimeChunking.prediction_loop for the current phase's policy; idle in scripted phases."""
@@ -162,10 +168,7 @@ class EvalSplits(EvalRealtimeChunking):
             worker, policy = self.policies[phase]
             buffer = self.buffers[phase]
             t_obs = time.time()
-            # history from this phase only: training episodes are split by phase, and pad
-            # the history at their start
-            obs_deque = self.obs_history.frames(self.env.get_obs(), t_obs, policy.obs_horizon,
-                                                1.0 / policy.framerate, t_min=self.phase_t_start)
+            obs_deque = self.policy_frames(policy, t_obs)
             des_poses, des_grips, des_done, des_gains = worker.get_actions(obs_deque)
             if self.phase != phase:
                 continue        # predicted across a phase change: never executed
@@ -177,6 +180,12 @@ class EvalSplits(EvalRealtimeChunking):
                 t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end],
                 None if des_gains is None else des_gains[start:end])
             buffer.dolog(chnk, build_states(obs_deque, policy.obs_fields), time.time())  # for offline logging
+
+    def policy_frames(self, policy, t_obs):
+        """The obs history `policy` predicts from at t_obs. From this phase only: training
+        episodes are split by phase, and pad the history at their start."""
+        return self.obs_history.frames(self.env.get_obs(), t_obs, policy.obs_horizon,
+                                       1.0 / policy.framerate, t_min=self.phase_t_start)
 
     # ============================================================
     # Run loop hooks
@@ -191,10 +200,15 @@ class EvalSplits(EvalRealtimeChunking):
         super().runtime_info()
 
     def close(self):
-        if self.prediction_thread.is_alive():
-            self.prediction_thread.join(timeout=2.0)
+        self.end_episode()
         for worker, _ in self.policies.values():
             worker.close()
+
+    def end_episode(self):
+        """Stop the robot and save the episode: rawdata.h5, phases.json, chunks_<phase>.npz.
+        Returns whether it plugged in."""
+        if self.prediction_thread.is_alive():
+            self.prediction_thread.join(timeout=2.0)
         robot_execution.RobotExecution.close(self)     # Env.close saves rawdata.h5 into env.epi_path
 
         if self.phase_log and 't_end' not in self.phase_log[-1] and self.phase != 'done':
@@ -203,7 +217,7 @@ class EvalSplits(EvalRealtimeChunking):
         print(f'\nPhases: ' + ' -> '.join(f"{p['phase']} ({p.get('end')})" for p in self.phase_log))
         print(f'Plugged in: {"yes" if success else "no"}')
         if self.env.dataset_path is None:
-            return
+            return success
         with open(self.env.epi_path / 'phases.json', 'w') as f:
             json.dump({'ckpts': self.ckpts, 'success': success, 'phases': self.phase_log}, f, indent=2)
         # EvalRealtimeChunking.save_chunks writes self.buffer's chunks as chunks.npz
@@ -212,6 +226,7 @@ class EvalSplits(EvalRealtimeChunking):
             self.save_chunks()
             if (self.env.epi_path / 'chunks.npz').exists():
                 os.replace(self.env.epi_path / 'chunks.npz', self.env.epi_path / f'chunks_{phase}.npz')
+        return success
 
 
 def parse_args():
