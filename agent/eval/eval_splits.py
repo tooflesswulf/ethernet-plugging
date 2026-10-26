@@ -168,7 +168,10 @@ class EvalSplits(EvalRealtimeChunking):
             worker, policy = self.policies[phase]
             buffer = self.buffers[phase]
             t_obs = time.time()
-            obs_deque = self.policy_frames(policy, t_obs)
+            # history from this phase only: training episodes are split by phase, and pad
+            # the history at their start
+            obs_deque = self.obs_history.frames(self.env.get_obs(), t_obs, policy.obs_horizon,
+                                                1.0 / policy.framerate, t_min=self.phase_t_start)
             des_poses, des_grips, des_done, des_gains = worker.get_actions(obs_deque)
             if self.phase != phase:
                 continue        # predicted across a phase change: never executed
@@ -180,12 +183,6 @@ class EvalSplits(EvalRealtimeChunking):
                 t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end],
                 None if des_gains is None else des_gains[start:end])
             buffer.dolog(chnk, build_states(obs_deque, policy.obs_fields), time.time())  # for offline logging
-
-    def policy_frames(self, policy, t_obs):
-        """The obs history `policy` predicts from at t_obs. From this phase only: training
-        episodes are split by phase, and pad the history at their start."""
-        return self.obs_history.frames(self.env.get_obs(), t_obs, policy.obs_horizon,
-                                       1.0 / policy.framerate, t_min=self.phase_t_start)
 
     # ============================================================
     # Run loop hooks

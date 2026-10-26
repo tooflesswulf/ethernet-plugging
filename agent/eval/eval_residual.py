@@ -78,6 +78,12 @@ class Correction:
                 'damping' / 'mass'. For a field the insert policy does not predict, added
                 to fdcc.toml's gains.
     info:       anything to keep with the step (log-prob, the actor's raw action, ...).
+
+    The insert policy observes the corrected robot, target_pose included, and a
+    target-anchored policy integrates each chunk from that target: a held correction is
+    taken into the policy's own command chunk by chunk (step.base_pose carries it), and
+    added again on top. To hold the command at an offset from where the policy would put
+    it, recompute dpose from step.base_pose at every decision.
     """
     dpose: np.ndarray = field(default_factory=lambda: np.zeros(6))
     dlog_gains: dict = field(default_factory=dict)
@@ -144,14 +150,6 @@ def apply_dpose(pose, d):
     return np.r_[pose[:3] + d[:3], (R.from_rotvec(d[3:]) * R.from_rotvec(pose[3:])).as_rotvec()]
 
 
-def remove_dpose(pose, d):
-    """The inverse of apply_dpose."""
-    pose = np.asarray(pose, float)
-    if not d[3:].any():
-        return np.r_[pose[:3] - d[:3], pose[3:]]
-    return np.r_[pose[:3] - d[:3], (R.from_rotvec(d[3:]).inv() * R.from_rotvec(pose[3:])).as_rotvec()]
-
-
 def _stack(rows):
     """[{key: value}] -> {key: (n, ...) array}."""
     return {k: np.asarray([r[k] for r in rows]) for k in rows[0]} if rows else {}
@@ -169,12 +167,9 @@ def _stack_gains(rows):
 class _ResidualSplits(EvalSplits):
     """EvalSplits with the insert correction, re-armed for another episode by rearm()."""
 
-    def __init__(self, pickup_ckpt, insert_ckpt, insert_timeout=None, anchor_base=True, limits=None,
-                 **kwargs):
+    def __init__(self, pickup_ckpt, insert_ckpt, insert_timeout=None, limits=None, **kwargs):
         self.correction, self.period, self.images = None, 0.05, False
         self.insert_timeout = insert_timeout
-        # Un-correct target_pose in the insert policy's observations (see policy_frames)
-        self.anchor_base = anchor_base
         self.limits = limits
         self.index = 0
         self._dpose = np.zeros(6)                   # correction applied to the last command
@@ -355,34 +350,9 @@ class _ResidualSplits(EvalSplits):
             g[f] = np.clip(np.asarray(v, float), -lim['max_dlog_gain'], lim['max_dlog_gain'])
         return Correction(dpose=d, dlog_gains=g, info=c.info)
 
-    def policy_frames(self, policy, t_obs):
-        """
-        With anchor_base, the insert policy sees target_pose without the correction in effect
-        at each frame. A target-anchored policy integrates its chunk from the target; seeing
-        the corrected one, it would carry the correction into its next chunk, and the
-        correction would pile up chunk after chunk instead of being an offset on the
-        policy's own command. (Its actual pose and force still show the correction's effect.)
-        """
-        frames = super().policy_frames(policy, t_obs)
-        if not self.anchor_base or self.phase != 'insert':
-            return frames
-        out = []
-        for i, o in enumerate(frames):
-            d = self._dpose if i == len(frames) - 1 else o.get('residual_dpose')
-            if d is None or not d.any():
-                out.append(o)
-                continue
-            out.append({**o, 'state': {**o['state'], 'target_pose': remove_dpose(o['state']['target_pose'], d)}})
-        return out
-
     # ============================================================
     # Run loop hooks
     # ============================================================
-    def post_step(self, obs, action):
-        # the correction this obs's target_pose carries, for policy_frames
-        obs['residual_dpose'] = self._dpose if self.phase == 'insert' else None
-        super().post_step(obs, action)
-
     def runtime_info(self):
         print(f'ep {self.index:3d}  dz {1000 * self._dpose[2]:+5.1f} mm  ', end='')
         super().runtime_info()
@@ -437,13 +407,13 @@ class ResidualEnv:
     """
 
     def __init__(self, insert_ckpt, pickup_ckpt=DEFAULT_PICKUP_CKPT, log_dir=None, insert_timeout=None,
-                 wait_circle=True, anchor_base=True, max_dpos=0.01, max_drot=0.1, max_dlog_gain=0.5,
+                 wait_circle=True, max_dpos=0.01, max_drot=0.1, max_dlog_gain=0.5,
                  max_dpos_rate=0.05, max_drot_rate=0.5, insert_done=False, control_freq=100.0,
                  weight_decay=0.5, taper=0.15, lpf_hz=3.0, done_threshold=0.5, device='cuda'):
         if log_dir is not None:
             os.makedirs(log_dir, exist_ok=True)
         self._runner = _ResidualSplits(
-            pickup_ckpt, insert_ckpt, insert_timeout=insert_timeout, anchor_base=anchor_base,
+            pickup_ckpt, insert_ckpt, insert_timeout=insert_timeout,
             limits=dict(max_dpos=max_dpos, max_drot=max_drot, max_dlog_gain=max_dlog_gain,
                         max_dpos_rate=max_dpos_rate, max_drot_rate=max_drot_rate),
             insert_done=insert_done, log_dir=log_dir, control_freq=control_freq, weight_decay=weight_decay,
@@ -503,10 +473,8 @@ class ResidualEnv:
                             help='where to save robot log data (None disables logging)')
         parser.add_argument('--insert_timeout', type=float, default=None,
                             help='end insert (unplug, a failed episode) after this many seconds')
-        parser.add_argument('--wait_circle', action=argparse.BooleanOptionalAction, default=True,
+        parser.add_argument('--wait_circle', action=argparse.BooleanOptionalAction, default=False,
                             help='wait for Circle before each episode')
-        parser.add_argument('--anchor_base', action=argparse.BooleanOptionalAction, default=True,
-                            help='the insert policy sees target_pose without the correction')
         parser.add_argument('--max_dpos', type=float, default=0.01, help='per-axis bound on the pose offset (m)')
         parser.add_argument('--max_drot', type=float, default=0.1, help='bound on the rotation offset (rad)')
         parser.add_argument('--max_dlog_gain', type=float, default=0.5, help='bound on each log10 gain offset')
@@ -530,7 +498,7 @@ class ResidualEnv:
     def from_args(cls, args, **overrides):
         """A ResidualEnv from add_args's arguments; overrides replace any of them."""
         kw = {k: getattr(args, k) for k in (
-            'insert_ckpt', 'pickup_ckpt', 'log_dir', 'insert_timeout', 'wait_circle', 'anchor_base',
+            'insert_ckpt', 'pickup_ckpt', 'log_dir', 'insert_timeout', 'wait_circle',
             'max_dpos', 'max_drot', 'max_dlog_gain', 'max_dpos_rate', 'max_drot_rate', 'insert_done',
             'device', 'control_freq', 'weight_decay', 'taper', 'done_threshold')}
         kw['lpf_hz'] = args.lpf
