@@ -1,10 +1,9 @@
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer, CommandLowpass
 from agent.eval.policy_worker import PolicyWorker
-from agent.utils.robot_utils import build_states, wait_for_circle, apply_gains
+from agent.utils.robot_utils import ObsHistory, build_states, wait_for_circle, apply_gains
 from agent.dataset.sequence import GripperStats
 from agent.model.policy import DiffusionPolicy
 from robot import robot_execution
-import collections
 import numpy as np
 import threading
 import argparse
@@ -51,6 +50,8 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
                                                    weight_decay=weight_decay, taper=taper)
         # Low-pass on the commanded pose (None = off); the buffer is read its delay ahead
         self.lowpass = CommandLowpass(lpf_hz) if lpf_hz else None
+        # Obs recorded every control step, for the policy's obs_horizon history
+        self.obs_history = ObsHistory()
         self.prediction_thread = threading.Thread(target=self.prediction_loop)
 
     def pre_run(self):
@@ -58,8 +59,12 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         self.worker.wait_ready()
         print("Starting real-time chunked evaluation loop...")
         self._t_pred_start = time.time()
+        self.obs_history.clear()
 
         self.prediction_thread.start()
+
+    def post_step(self, obs, action):
+        self.obs_history.record(obs)
 
     def runtime_info(self):
         zf = self.last_obs['state']['filtered_force']
@@ -99,12 +104,12 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         action_horizon = self.policy.action_horizon
         obs_horizon = self.policy.obs_horizon
 
-        obs_deque = collections.deque(maxlen=obs_horizon)
+        obs_dt = 1.0 / self.policy.framerate
         while not self.stop_event.is_set():
             t_obs = time.time()  # observation time the chunk is anchored to
-            obs_deque.append(self.env.get_obs())
-            if len(obs_deque) < obs_horizon:
-                continue
+            # the current obs + its history at the training framerate (padded at the start)
+            obs_deque = self.obs_history.frames(self.env.get_obs(), t_obs, obs_horizon, obs_dt,
+                                                t_min=self._t_pred_start)
 
             # get_actions (in the worker process) builds images + the obs_fields state vector
             # from the deque; waiting on it releases the GIL for the control loop.
@@ -113,10 +118,10 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
             des_gains = np.concatenate([des_gains[f] for f in self.policy.impedance_fields], axis=1) \
                 if des_gains else None
 
-            # the executable chunk starts at index obs_horizon-1, which aligns with t_obs.
-            # The done score rides through the buffer so it's ensembled and thresholded at
+            # Action 0 is the latest obs's step (StitchedSequenceDataset: the chunk starts at
+            # the newest history frame), so the chunk starts at t_obs. The done score rides through the buffer so it's ensembled and thresholded at
             # execution time in get_action (not averaged over the chunk here).
-            start = obs_horizon - 1
+            start = 0
             end = start + action_horizon
             chnk = self.buffer.add_chunk(
                 t_obs, des_poses[start:end], des_grips[start:end], des_done[start:end],

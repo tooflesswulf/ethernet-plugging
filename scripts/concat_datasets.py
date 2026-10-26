@@ -23,6 +23,7 @@ import numpy as np
 STITCHED_FIELDS = ['pose', 'force', 'gripper_width', 'gripper_force']
 # Only logged by the impedance (FDCC) env; stitched when every source has them.
 OPTIONAL_STITCHED_FIELDS = ['target_pose', 'stiffness', 'damping', 'mass']
+GRIP_RANGE_ATTR = 'grip_width_range'   # agent/dataset/sequence.py
 
 
 def parse_episode_slice(spec: str) -> slice:
@@ -96,6 +97,7 @@ class SourceInfo:
     images_stored_as: str
     metadata: dict
     framerate: float | None
+    grip_range: np.ndarray  # [min, max] gripper width of the whole source, not just its range
 
     @property
     def n_episodes(self):
@@ -124,9 +126,14 @@ def inspect_source(dataset_dir: str, ep_slice: slice) -> SourceInfo:
 
         metadata = read_metadata(f['metadata'], slice(start_ep, stop_ep))
         framerate = f['metadata'].attrs.get('framerate')
+        if GRIP_RANGE_ATTR in f['metadata'].attrs:
+            grip_range = np.asarray(f['metadata'].attrs[GRIP_RANGE_ATTR], dtype=float)
+        else:
+            widths = f['gripper_width'][:]
+            grip_range = np.array([widths.min(), widths.max()], dtype=float)
 
     return SourceInfo(dataset_dir, h5_path, start_ep, stop_ep, time_start, time_stop,
-                       field_shapes, field_dtypes, images_stored_as, metadata, framerate)
+                       field_shapes, field_dtypes, images_stored_as, metadata, framerate, grip_range)
 
 
 def stitched_fields(sources: list[SourceInfo]) -> list[str]:
@@ -248,6 +255,9 @@ def concat_datasets(sources: list[SourceInfo], out_dir: pathlib.Path):
         write_metadata(meta_group, merge_metadata(intersect_metadata(sources)))
         if sources[0].framerate is not None:
             meta_group.attrs['framerate'] = sources[0].framerate
+        # gripper label threshold range (agent/dataset/sequence.py): the union of the sources'
+        meta_group.attrs[GRIP_RANGE_ATTR] = [min(s.grip_range[0] for s in sources),
+                                             max(s.grip_range[1] for s in sources)]
 
 
 if __name__ == '__main__':
