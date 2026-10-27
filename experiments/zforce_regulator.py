@@ -2,32 +2,7 @@
 Hand-written residual for the insert policy: keep the z-force low while it searches for
 the port, without stopping the insertion push.
 
-The insert policy's failure mode (logs-split-policy, 2026-10): while it wiggles the plug
-over the port it keeps descending (commanded z 1-8 mm/s, K_z 300 N/m), and the z-force
-builds up slowly until the plug is pinned (~25 N for 20 s, the operator aborts). The
-pushes that seat the plug are fast and stiff: 21-40 mm/s with K_z ~3000 N/m, 25-46 N.
-
-ZForceRegulator is a function of the current observation only. Above f_floor it asks for
-an upward z-velocity linear in the excess force, capped:
-
-    v = min(gain (F_z - f_floor), max_speed),    F_z = filtered_force z (+ = pushing down)
-
-and sends it as the offset dz = v * horizon. The insert policy re-anchors each chunk on the
-corrected target, so a held dz is taken into its command and added again: the target
-drifts up at about dz / (the time the policy takes to absorb it), and horizon is that
-time: the mean anchor age of the chunk ensemble, 0.39 s for the insert policy on the robot
-(logs-zresid, 2026-10). Against a search descending at v_s the force settles where
-v = v_s, at f_floor + v_s / gain; a push faster than max_speed outraces the correction and
-builds force.
-
-The policy pushes harder as it stalls: its own descent went from ~4 mm/s at contact to
-8-9 mm/s with the plug pinned (logs-zresid). At gain 1e-3 / max_speed 10 mm/s the
-correction saturated against that and the force crept to ~14 N. The defaults settle near
-8 N against a 9 mm/s push and saturate at 10 N, still under the 21-40 mm/s insertion
-pushes. The force loop's bandwidth is K_z gain (0.9 rad/s at K_z 300), against the
-~0.4 s absorption lag: a policy that stiffens z speeds it up in proportion.
-
-    python -m experiments.zforce_regulator --insert_ckpt <ckpt> --log_dir <dir> --episodes 5
+    python experiments/zforce_regulator.py --insert_ckpt <ckpt> --log_dir <dir>
 """
 from agent.eval.eval_residual import ResidualEnv, ResidualActor, Correction
 import numpy as np
