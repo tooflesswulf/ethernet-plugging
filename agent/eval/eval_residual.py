@@ -26,7 +26,8 @@ run() plays the eval_splits phases once:
 as agent/rl_finetuning/train_residual_rl.py did between episodes (rl branch). The next
 run() restarts the Env and, with wait_circle, waits for Circle (time to fix the scene).
 Square aborts the episode (run() returns it with aborted=True, the robot homed) and the
-next run() starts as usual. Square while waiting for Circle ends the session: run()
+next run() starts as usual; so does the controller disconnecting (its last state freezes,
+Square included), and the next run() reconnects it first. Square while waiting for Circle ends the session: run()
 raises SessionAborted, which leaving a `with ResidualEnv(...)` block swallows, so the
 remaining episodes are skipped and the script carries on after the block. The policy
 workers live until close().
@@ -128,7 +129,8 @@ class Episode:
     end:      what ended insert: 'network', 'DpadUp', 'done=0.87', 'timeout', 'aborted',
               or None if it was never reached
     duration: s of insert
-    aborted:  Square (or an error) ended the episode
+    aborted:  the episode was cut short: abort_reason says why ('Square', 'controller
+              disconnected', 'correction error', 'error')
     phases:   phases.json's list (phase, t_start, t_end, end)
     path:     the episode's log directory (None without log_dir)
     timing:   {'act_max_s': slowest callback, 'late': decisions whose callback overran the
@@ -145,6 +147,7 @@ class Episode:
     phases: list
     path: str | None
     timing: dict = field(default_factory=dict)
+    abort_reason: str | None = None
 
 
 # ============================================================
@@ -187,6 +190,7 @@ class _ResidualSplits(EvalSplits):
     def _begin_episode(self):
         self.armed = True               # Env threads running, the robot servoing
         self.error = None               # an exception from the correction callback
+        self.abort_reason = None        # why the episode was cut short, if it was
         self.result = None              # the Episode, once end_episode has run
         self._t_insert = None
         self._end = None
@@ -288,7 +292,7 @@ class _ResidualSplits(EvalSplits):
             except Exception as e:
                 # end the episode cleanly; ResidualEnv.run raises it once the robot has stopped
                 self.error = e
-                self.stop()
+                self.abort('correction error')
                 return des_pose, des_width
             self._gain_fields |= set(self._corr.dlog_gains)
             self._steps.append({
@@ -366,6 +370,21 @@ class _ResidualSplits(EvalSplits):
     # ============================================================
     # Run loop hooks
     # ============================================================
+    def abort(self, reason):
+        """End the episode early; the run loop stops on its next tick."""
+        if self.abort_reason is None:
+            self.abort_reason = reason
+            print(f'\n{reason}: aborting the episode')
+        self.stop()
+
+    def post_step(self, obs, action):
+        super().post_step(obs, action)
+        # A DualSense that disconnects (its read thread dies on the failed read) freezes its
+        # last state, Square included: abort rather than run on without one. Every tick, so
+        # the scripted phases too; the next run() reconnects it (rearm).
+        if not self.iface.dualsense.thread.is_alive():
+            self.abort('controller disconnected')
+
     def runtime_info(self):
         print(f'ep {self.index:3d}  dz {1000 * self._dpose[2]:+5.1f} mm  ', end='')
         super().runtime_info()
@@ -380,8 +399,13 @@ class _ResidualSplits(EvalSplits):
             return self.result
         self.armed = False
         aborted = self.phase != 'done'
+        if aborted and self.abort_reason is None:
+            # RobotExecution.run stops on Square by itself (it latches); else run() raised
+            self.abort_reason = 'Square' if getattr(self.iface.dualsense, '_reset_state', 0) else 'error'
         if self.phase == 'insert':
-            self.end_insert('aborted')
+            self.end_insert(self.abort_reason or 'aborted')
+        if aborted and self.phase_log and 't_end' not in self.phase_log[-1]:
+            self.phase_log[-1].update(t_end=time.time() - self.env.t0, end=self.abort_reason)
         self.stop()
         if self.prediction_thread.is_alive():
             self.prediction_thread.join(timeout=2.0)
@@ -399,7 +423,7 @@ class _ResidualSplits(EvalSplits):
             } if steps else {},
             ticks=_stack(self._ticks),
             success=self._end == 'network', end=self._end, duration=self._duration if reached else 0.,
-            aborted=aborted, phases=self.phase_log,
+            aborted=aborted, abort_reason=self.abort_reason if aborted else None, phases=self.phase_log,
             path=None if self.env.dataset_path is None else str(self.env.epi_path),
             timing=dict(self._timing) if reached else {})
         if self.result.path is not None:
