@@ -196,7 +196,8 @@ def parse_args():
     parser.add_argument('--obs_fields', nargs='+', default=None,
                         help="state observation fields (default: pose gripper_width, + force if 'force' in --name); "
                              "log_<field> is log10 of a field, e.g. log_stiffness for the current K; "
-                             "target_offset is the spring target relative to the arm")
+                             "target_offset is the spring target relative to the arm; "
+                             "force_bucket is a one-hot of |F_xyz| (edges: sequence.FORCE_BUCKET_EDGES)")
     parser.add_argument('--pose_target', type=str, default='pose', choices=['pose', 'target_pose'],
                         help="pose actions: actual TCP pose, or the impedance controller's spring target")
     parser.add_argument('--action_anchor', type=str, default=None, choices=['pose', 'target_pose'],

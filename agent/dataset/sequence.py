@@ -31,6 +31,23 @@ def target_offset(target_pose, actual_pose):
     return np.concatenate([target_pose[..., :3] - actual_pose[..., :3], rot], axis=-1)
 
 
+# Bucket edges (N) on the contact force magnitude |F_xyz|: [0, 1.5) free motion, [1.5, 10)
+# contact while exploring the port face, [10, 20) ramping up, [20, inf) the insertion push
+# (on the v2v3-insert data, 38% / 44% / 8% / 11% of frames; insertion plateaus at 20-35 N).
+# 1.5 N best separates free descent (median 0.9 N) from contact once z stalls on the port
+# (median 2.3 N); per-episode sensor offsets of 0.3-1.3 N blur it, ~10-15% of frames land
+# on the wrong side. Exploration is ~2-5 N in the demos but ~8 N at eval, hence one bucket
+# up to 10 N.
+# Not stored in checkpoints: changing these silently breaks policies trained on the old edges.
+FORCE_BUCKET_EDGES = (1.5, 10.0, 20.0)
+
+
+def force_bucket(force, edges=FORCE_BUCKET_EDGES):
+    """One-hot bucket of the force magnitude |F_xyz|. (..., 6) wrench in, (..., len(edges) + 1) out."""
+    mag = np.linalg.norm(np.asarray(force, float)[..., :3], axis=-1)
+    return np.eye(len(edges) + 1)[np.digitize(mag, edges)]
+
+
 # metadata attr: [min, max] gripper width (mm) of the full data a dataset was built from
 # (scripts/rawdata_to_dataset.py), carried through split_dataset.py / concat_datasets.py.
 # The binary gripper label thresholds at its midpoint, so it means open vs closed even in a
@@ -48,6 +65,7 @@ def grip_threshold(width_range):
 # Observation fields computed from stored dataset fields: name -> fn(h5 file, n steps)
 DERIVED_OBS_FIELDS = {
     'target_offset': lambda f, n: target_offset(f['target_pose'][:n], f['pose'][:n]),
+    'force_bucket': lambda f, n: force_bucket(f['force'][:n]),
 }
 
 

@@ -10,7 +10,7 @@ from robot.env import URPose, Env, GRIP_CLOSED
 from robot.interface import DualSenseInterface
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
-from agent.dataset.sequence import target_offset
+from agent.dataset.sequence import target_offset, force_bucket
 from robot.interrupt_sequence import InterruptSequence
 
 
@@ -29,6 +29,8 @@ OBS_FIELD_GETTERS = {
     'log_stiffness': lambda s: np.log10(np.asarray(s['stiffness'], dtype=np.float32)),
     # spring target relative to the arm (dataset DERIVED_OBS_FIELDS['target_offset'])
     'target_offset': lambda s: target_offset(s['target_pose'], s['actual_pose']).astype(np.float32),
+    # one-hot |F_xyz| bucket of the smoothed force (dataset DERIVED_OBS_FIELDS['force_bucket'])
+    'force_bucket': lambda s: force_bucket(s['filtered_force']).astype(np.float32),
 }
 
 
