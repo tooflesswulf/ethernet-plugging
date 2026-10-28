@@ -336,7 +336,9 @@ class Env:
         # watchdog -- otherwise this blocking moveL would trip it (C207A0).
         if not self.ctrl.isProgramRunning():
             self.ctrl.reuploadScript()
-        self.ctrl.moveL(home_pose, 0.1, 0.1)
+            while not self.ctrl.isProgramRunning():
+                time.sleep(0.5)
+        ret = self.ctrl.moveL(home_pose, 0.1, 0.1)
         self.des_pose = home_pose  # Ensure robot doesn't move after homing
         self.last_step_t = -1
 
