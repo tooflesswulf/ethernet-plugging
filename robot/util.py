@@ -11,6 +11,8 @@ class RotationVector(namedtuple("RotationVector", ("rx", "ry", "rz"))):
 
 
 class URPose(namedtuple("URPose", ("x", "y", "z") + RotationVector._fields)):
+    def __str__(self):
+        return f'URPose({self.x:5.2f}, {self.y:5.2f}, {self.z:5.2f}, {self.rx:6.2f}, {self.ry:6.2f}, {self.rz:6.2f})'
     pass
 
 
