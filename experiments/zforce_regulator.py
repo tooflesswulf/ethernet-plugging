@@ -52,11 +52,14 @@ def main():
     parser.add_argument('--period', type=float, default=0.02, help='decision period (s)')
     args = parser.parse_args()
 
+    last_successful = False
     results = []
     with ResidualEnv.from_args(args) as env:
         for _ in range(args.episodes):
             env.register(ZForceRegulator(args.f_floor, args.gain, args.max_speed, args.horizon), period=args.period)
+            env.wait_circle = not last_successful
             ep = env.run()
+            last_successful = ep.success
             s = summarize(ep, args.f_floor)
             results.append(s)
             print(f'\nepisode {s["episode"]}: {"plugged in" if ep.success else "failed"} ({ep.end})  '

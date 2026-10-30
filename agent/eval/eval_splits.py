@@ -101,9 +101,11 @@ class EvalSplits(EvalRealtimeChunking):
         seq.move_relative([0, 0, .03, 0, 0, 0], speed=.05)
 
         r1, r2 = Teleoperation.release_pose1, Teleoperation.release_pose2
+        box1 = [-0.07,  0.72,  0.08] # Custom drop box
+        box2 = [-0.19,  0.57,  0.08]
         rel = np.array(r1)
-        # rel[:2] = np.random.uniform([r1.x, r1.y], [r2.x, r2.y])
-        rel[:2] = [(r1.x + r2.x) / 2, (r1.y + r2.y) / 2]
+        rel[:2] = [(box1[0] + box2[0]) / 2, (box1[1] + box2[1]) / 2]
+        rel[2] = box1[2]
         seq.move_to(URPose(*rel))
         seq.gripper(GRIP_OPEN)
         seq.wait(1) \
