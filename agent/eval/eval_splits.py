@@ -104,7 +104,8 @@ class EvalSplits(EvalRealtimeChunking):
         box1 = [-0.07,  0.72,  0.08] # Custom drop box
         box2 = [-0.19,  0.57,  0.08]
         rel = np.array(r1)
-        rel[:2] = [(box1[0] + box2[0]) / 2, (box1[1] + box2[1]) / 2]
+        lo, hi = np.minimum(box1[:2], box2[:2]), np.maximum(box1[:2], box2[:2])
+        rel[:2] = np.random.uniform(lo, hi)
         rel[2] = box1[2]
         seq.move_to(URPose(*rel))
         seq.gripper(GRIP_OPEN)
