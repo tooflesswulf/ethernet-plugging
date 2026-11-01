@@ -101,9 +101,12 @@ class EvalSplits(EvalRealtimeChunking):
         seq.move_relative([0, 0, .03, 0, 0, 0], speed=.05)
 
         r1, r2 = Teleoperation.release_pose1, Teleoperation.release_pose2
+        box1 = [-0.07,  0.72,  0.08] # Custom drop box
+        box2 = [-0.19,  0.57,  0.08]
         rel = np.array(r1)
-        # rel[:2] = np.random.uniform([r1.x, r1.y], [r2.x, r2.y])
-        rel[:2] = [(r1.x + r2.x) / 2, (r1.y + r2.y) / 2]
+        lo, hi = np.minimum(box1[:2], box2[:2]), np.maximum(box1[:2], box2[:2])
+        rel[:2] = np.random.uniform(lo, hi)
+        rel[2] = box1[2]
         seq.move_to(URPose(*rel))
         seq.gripper(GRIP_OPEN)
         seq.wait(1) \
@@ -128,16 +131,23 @@ class EvalSplits(EvalRealtimeChunking):
         act = self.policy_action()
         if act is None:
             return None
-        des_pose, des_width, done = act
+        des_pose, des_width, done, log_gains = act
         if self.policy.predict_done and done > self.done_threshold:
             if self.phase == 'pickup' and des_width > 0.5:      # commanding GRIP_CLOSED
                 return self.start_transport(f'done={done:.2f}')
             if self.phase == 'insert' and self.insert_done:
                 return self.start_unplug(f'done={done:.2f}')
+        return self.command(des_pose, des_width, done, log_gains)
+
+    def command(self, des_pose, des_width, done, log_gains):
+        """A policy phase's command from the policy's action: apply its gains, return (pose,
+        width). A hook (eval_residual.py corrects the insert policy's here)."""
+        self.apply_gains(log_gains)
         return des_pose, des_width
 
     def policy_action(self):
-        """EvalRealtimeChunking.get_action without its stop on done: (pose, width, done) or None."""
+        """EvalRealtimeChunking.get_action without its stop on done and without applying the
+        gains: (pose, width, done, {field: (6,) log10 gains}) or None."""
         if self.buffer.is_empty():
             return None
         now = time.time()
@@ -148,9 +158,8 @@ class EvalSplits(EvalRealtimeChunking):
         des_pose, des_width, done, log_gains = act
         if self.lowpass:
             des_pose = self.lowpass(des_pose, now)
-        self.apply_gains({f: log_gains[6 * i:6 * (i + 1)]
-                          for i, f in enumerate(self.policy.impedance_fields)})
-        return des_pose, des_width, done
+        return des_pose, des_width, done, {f: log_gains[6 * i:6 * (i + 1)]
+                                           for i, f in enumerate(self.policy.impedance_fields)}
 
     def prediction_loop(self):
         """EvalRealtimeChunking.prediction_loop for the current phase's policy; idle in scripted phases."""
@@ -196,14 +205,17 @@ class EvalSplits(EvalRealtimeChunking):
         for worker, _ in self.policies.values():
             worker.close()
         robot_execution.RobotExecution.close(self)     # Env.close saves rawdata.h5 into env.epi_path
+        self.save_episode()
 
+    def save_episode(self):
+        """phases.json and chunks_<phase>.npz into env.epi_path. Returns whether it plugged in."""
         if self.phase_log and 't_end' not in self.phase_log[-1] and self.phase != 'done':
             self.phase_log[-1].update(t_end=time.time() - self.env.t0, end='aborted')
         success = any(p['phase'] == 'insert' and p.get('end') == 'network' for p in self.phase_log)
         print(f'\nPhases: ' + ' -> '.join(f"{p['phase']} ({p.get('end')})" for p in self.phase_log))
         print(f'Plugged in: {"yes" if success else "no"}')
         if self.env.dataset_path is None:
-            return
+            return success
         with open(self.env.epi_path / 'phases.json', 'w') as f:
             json.dump({'ckpts': self.ckpts, 'success': success, 'phases': self.phase_log}, f, indent=2)
         # EvalRealtimeChunking.save_chunks writes self.buffer's chunks as chunks.npz
@@ -212,6 +224,7 @@ class EvalSplits(EvalRealtimeChunking):
             self.save_chunks()
             if (self.env.epi_path / 'chunks.npz').exists():
                 os.replace(self.env.epi_path / 'chunks.npz', self.env.epi_path / f'chunks_{phase}.npz')
+        return success
 
 
 def parse_args():

@@ -12,6 +12,8 @@ import os
 
 
 class EvalRealtimeChunking(robot_execution.RobotExecution):
+    wait_circle = True      # pre_run waits for the operator's Circle
+
     def __init__(self, ckpt, device='cuda', log_dir=None, control_freq=100.0, weight_decay=0.5, taper=0.15,
                  lpf_hz=3.0, done_threshold=0.5, env_metadata=None):
         # Inference runs in its own process (see policy_worker); it loads the policy while
@@ -55,7 +57,8 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         self.prediction_thread = threading.Thread(target=self.prediction_loop)
 
     def pre_run(self):
-        wait_for_circle(self.env, self.iface, close_gripper=False)
+        if self.wait_circle:
+            wait_for_circle(self.env, self.iface, close_gripper=False)
         self.worker.wait_ready()
         print("Starting real-time chunked evaluation loop...")
         self._t_pred_start = time.time()

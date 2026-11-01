@@ -113,7 +113,8 @@ class Teleoperation(robot_execution.RobotExecution):
         """FDCC diagnostics every 0.5 s, one scrolling line per window (see Env.fdcc_stats)."""
         s = self.env.fdcc_stats()
         net = self.last_obs['network_status']
-        print(f'loop {s['hz']:4.0f} Hz  F {s['F']:4.1f} N', end='\r')
+        # print(f'loop {s['hz']:4.0f} Hz  F {s['F']:4.1f} N', end='\r')
+        print(f'Pose {URPose(*self.last_obs['state']['actual_pose'])}', end='\r')
         return
 
         now = time.perf_counter()

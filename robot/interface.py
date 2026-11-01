@@ -19,6 +19,18 @@ class DualSenseInterface:
         self.zfspeed = forcespeed
         self.enable_zadaptive = enable_zadaptive
 
+    def reset(self, start_pose):
+        """
+        Back to the state __init__ leaves, for another episode: targets at start_pose, gripper
+        open, z-force mode off, and the DualSense re-enabled (Square latches it until
+        start_control).
+        """
+        self.dualsense.start_control()
+        self.targ_pose = np.array(start_pose)
+        self.targ_zforce = 0.
+        self.adaptive_mode = False
+        self.gripper_state = GRIP_OPEN
+
     @property
     def target_pose(self):
         return self.targ_pose
