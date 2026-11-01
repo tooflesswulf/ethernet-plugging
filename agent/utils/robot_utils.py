@@ -150,13 +150,17 @@ def interrupt(rexec):
     return InterruptSequence.current(rexec)
 
 
+class SquarePressed(RuntimeError):
+    """The operator pressed Square while wait_for_circle waited for Circle."""
+
+
 def wait_for_circle(env: Env, iface: DualSenseInterface, close_gripper=False):
     freq = 250
     print('Waiting the circle...')
     while True:
         flag = iface.update(1 / freq)
         if flag == -1:
-            raise RuntimeError('Square pressed, exiting.')
+            raise SquarePressed('Square pressed, exiting.')
 
         des_pose = URPose(*iface.target_pose)
         des_gripper = iface.gripper_state
