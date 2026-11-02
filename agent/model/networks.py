@@ -4,6 +4,8 @@ import math
 import torch
 import torch.nn as nn
 import torchvision
+from agent.finetuning.config.rlpd import VitEncoderConfig
+from agent.model.vit import MinVit
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -542,7 +544,35 @@ class MultiEncoder(nn.Module):
             "logits": logits,
             "embedding": embedding,
         }
-    
+
+class VitEncoder(nn.Module):
+    def __init__(self, obs_shape: tuple[int, int, int], cfg: VitEncoderConfig):
+        super().__init__()
+        self.obs_shape = obs_shape
+        self.cfg = cfg
+        self.vit = MinVit(
+            embed_style=cfg.embed_style,
+            embed_dim=cfg.embed_dim,
+            embed_norm=cfg.embed_norm,
+            num_head=cfg.num_heads,
+            depth=cfg.depth,
+        )
+
+        self.num_patch = self.vit.num_patches
+        self.patch_repr_dim = self.cfg.embed_dim
+        self.repr_dim = self.cfg.embed_dim * self.vit.num_patches
+
+    def forward(self, obs, flatten=True) -> torch.Tensor:
+        if obs.max() > 5:
+            obs = obs / 255.0
+        obs = obs - 0.5
+        feats: torch.Tensor = self.vit.forward(obs)
+        if flatten:
+            # [B, D, N] -> [B, D*N]
+            feats = feats.flatten(1, 2)
+        return feats
+
+
 if __name__ == '__main__':
     from agent.dataset.sequence import FailureDetectDataset
     dataset_path = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/logs-collectfailures/75rl-rtc'
@@ -563,3 +593,5 @@ if __name__ == '__main__':
     force = data['force'] # B x T x D
     out = encoder(image, pose, force)
     assert False, f"{out['logits'].shape} {out['embedding'].shape}"
+
+
