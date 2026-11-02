@@ -12,7 +12,8 @@ During insert:
     Cross             toggle base z stiff (STIFF_Z_K) to push the plug in; again: back
     DpadUp            give up on this insert (unplug, a failed episode)
     Square            abort the episode; at the Circle prompt, end the session
-Triangle (z-force mode) is off: it would zero the z input.
+Triangle (z-force mode) is off: it would zero the z input. The gripper is held closed
+through insert, whatever the policy commands.
 
 Each episode directory gets, besides eval_residual's rawdata.h5 (whose control/target is the
 corrected command), phases.json and insert.pkl, a dagger.npz: every control tick of insert
@@ -134,7 +135,8 @@ def main():
 
     last_successful = False
     results = []
-    with ResidualEnv.from_args(args) as env:
+    # The gripper stays closed through insert: an OOD grasp could make the policy let go
+    with ResidualEnv.from_args(args, insert_grip_closed=True) as env:
         for _ in range(args.episodes):
             regulator = ZForceRegulator(args.f_floor, args.gain, args.max_speed, args.horizon) if args.zforce else None
             env.register(JoystickCorrection(env, args.speed, args.rot_speed, args.horizon, args.stiff_k,

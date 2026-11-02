@@ -16,8 +16,9 @@ run() plays the eval_splits phases once:
     transport  scripted, to Teleoperation.port_pose
     insert     insert policy + the registered correction: every `period` the callback gets
                an InsertStep and returns a Correction (pose offset, log-gain offsets),
-               held in between. Ends on the network, DpadUp, the done score (insert_done)
-               or insert_timeout.
+               held in between. With insert_grip_closed the gripper is held closed,
+               whatever width the policy commands. Ends on the network, DpadUp, the done
+               score (insert_done) or insert_timeout.
     unplug     scripted, as Teleoperation.unplug_and_release
     done       the episode is saved, then Env.reset homes the robot and the gripper (and
                stops the Env threads: nothing runs in this process but the script, so it
@@ -41,7 +42,7 @@ chunks_<phase>.npz, as eval_splits) plus insert.pkl, the returned Episode.
 from agent.eval.eval_splits import EvalSplits
 from agent.eval.realtime_chunking import RealtimeActionChunkingBuffer
 from agent.utils.robot_utils import GAIN_KWARGS, SquarePressed
-from robot.env import GRIP_OPEN
+from robot.env import GRIP_OPEN, GRIP_CLOSED
 from robot import robot_execution, interface, fdcc
 from scipy.spatial.transform import Rotation as R
 from dataclasses import dataclass, field
@@ -178,9 +179,11 @@ def _stack_gains(rows):
 class _ResidualSplits(EvalSplits):
     """EvalSplits with the insert correction, re-armed for another episode by rearm()."""
 
-    def __init__(self, pickup_ckpt, insert_ckpt, insert_timeout=None, limits=None, **kwargs):
+    def __init__(self, pickup_ckpt, insert_ckpt, insert_timeout=None, limits=None, insert_grip_closed=False,
+                 **kwargs):
         self.correction, self.period, self.images = None, 0.05, False
         self.insert_timeout = insert_timeout
+        self.insert_grip_closed = insert_grip_closed
         self.limits = limits
         self.index = 0
         self._dpose = np.zeros(6)                   # correction applied to the last command
@@ -278,6 +281,7 @@ class _ResidualSplits(EvalSplits):
         t = now - self._t_insert
         obs = self.env.get_obs()
         base_pose = np.asarray(des_pose, float)
+        width = float(GRIP_CLOSED) if self.insert_grip_closed else des_width
 
         if self.period is None or t >= self._next_decision:
             step = InsertStep(t=t, state=obs['state'], network_status=obs['network_status'],
@@ -293,7 +297,7 @@ class _ResidualSplits(EvalSplits):
                 # end the episode cleanly; ResidualEnv.run raises it once the robot has stopped
                 self.error = e
                 self.abort('correction error')
-                return des_pose, des_width
+                return des_pose, width
             self._gain_fields |= set(self._corr.dlog_gains)
             self._steps.append({
                 't': t, 'state': obs['state'], 'network_status': obs['network_status'],
@@ -349,7 +353,7 @@ class _ResidualSplits(EvalSplits):
                             'target_pose': np.asarray(s['target_pose'], float),
                             'base_pose': base_pose, 'dpose': self._dpose,
                             'network_status': obs['network_status']})
-        return pose, des_width
+        return pose, width
 
     def clamp(self, c):
         """The correction within the limits."""
@@ -464,11 +468,12 @@ class ResidualEnv:
     def __init__(self, insert_ckpt, pickup_ckpt=DEFAULT_PICKUP_CKPT, log_dir=None, insert_timeout=None,
                  wait_circle=True, max_dpos=0.01, max_drot=0.1, max_dlog_gain=0.5,
                  max_dpos_rate=0.05, max_drot_rate=0.5, insert_done=False, control_freq=100.0,
-                 weight_decay=0.5, taper=0.15, lpf_hz=3.0, done_threshold=0.5, device='cuda'):
+                 weight_decay=0.5, taper=0.15, lpf_hz=3.0, done_threshold=0.5, device='cuda',
+                 insert_grip_closed=False):
         if log_dir is not None:
             os.makedirs(log_dir, exist_ok=True)
         self._runner = _ResidualSplits(
-            pickup_ckpt, insert_ckpt, insert_timeout=insert_timeout,
+            pickup_ckpt, insert_ckpt, insert_timeout=insert_timeout, insert_grip_closed=insert_grip_closed,
             limits=dict(max_dpos=max_dpos, max_drot=max_drot, max_dlog_gain=max_dlog_gain,
                         max_dpos_rate=max_dpos_rate, max_drot_rate=max_drot_rate),
             insert_done=insert_done, log_dir=log_dir, control_freq=control_freq, weight_decay=weight_decay,
