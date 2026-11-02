@@ -108,6 +108,7 @@ def compute_norm_stats(dataset) -> dict:
     }
 
 
+<<<<<<< HEAD
 def normalize(arr: np.ndarray, stats: dict) -> np.ndarray:
     """
     Normalize a numpy array to [-1, 1] using precomputed min/max stats.
@@ -151,6 +152,8 @@ def denormalize(arr: np.ndarray, stats: dict) -> np.ndarray:
     return denormalized
 
 
+=======
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 def resize_image(np_array, new_size=(128, 128), flip_channel=False):
     if flip_channel:
         np_array = np_array[:, :, ::-1]

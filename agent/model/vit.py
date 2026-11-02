@@ -2,6 +2,7 @@
 ViT image encoder implementation from IBRL, https://github.com/hengyuan-hu/ibrl
 
 """
+<<<<<<< HEAD
 
 
 from typing import List
@@ -38,6 +39,23 @@ class RandomShiftsAug:
             x, grid, padding_mode="zeros", align_corners=False
         )
     
+=======
+from torchvision import transforms
+from dataclasses import dataclass
+from typing import List
+from PIL import Image
+import einops
+import torch
+from torch import nn
+import numpy as np, os
+import torch.nn.functional as F
+from torch.nn.init import trunc_normal_
+from torchvision.transforms import Normalize
+from tqdm import tqdm
+import math
+
+@dataclass
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 class VitEncoderConfig:
     patch_size: int = 8
     depth: int = 1
@@ -79,7 +97,11 @@ class VitEncoder(nn.Module):
 
     def forward(self, obs, flatten=False) -> torch.Tensor:
         # assert obs.max() > 5
+<<<<<<< HEAD
         obs = obs # / 255.0 - 0.5
+=======
+        obs = obs / 255.0 - 0.5
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         feats: torch.Tensor = self.vit.forward(obs)
         if flatten:
             feats = feats.flatten(1, 2)
@@ -220,13 +242,19 @@ class MinVit(nn.Module):
         named_apply(init_weights_vit_timm, self)
 
     def forward(self, x):
+<<<<<<< HEAD
        
+=======
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         x = self.patch_embed(x)
         x = x + self.pos_embed
         x = self.net(x)
         return self.norm(x)
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 def init_weights_vit_timm(module: nn.Module, name: str = ""):
     """ViT weight initialization, original timm impl (for reproducibility)"""
     if isinstance(module, nn.Linear):
@@ -279,9 +307,14 @@ def test_transformer_layer():
     print(z.size())
 
 
+<<<<<<< HEAD
     
 if __name__ == "__main__":
     obs_shape = [3, 128, 128] # --> 1, 28800
+=======
+if __name__ == "__main__":
+    obs_shape = [6, 128, 128]
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     enc = VitEncoder(
         obs_shape,
         VitEncoderConfig(),
@@ -292,7 +325,12 @@ if __name__ == "__main__":
 
     print(enc)
     x = torch.rand(1, *obs_shape) * 255
+<<<<<<< HEAD
     aug = RandomShiftsAug()
     x = aug(x)
     print("output size:", enc(x, flatten=False).size())
     print("repr dim:", enc.repr_dim, ", real dim:", enc(x, flatten=True).size())
+=======
+    print("output size:", enc(x, flatten=False).size())
+    print("repr dim:", enc.repr_dim, ", real dim:", enc(x, flatten=True).size())
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d

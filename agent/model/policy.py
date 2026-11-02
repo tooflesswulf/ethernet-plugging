@@ -5,6 +5,7 @@ import torch.nn as nn
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from diffusers import DDIMScheduler
 
+<<<<<<< HEAD
 from agent.model.networks import ConditionalUnet1D, get_resnet, replace_bn_with_gn
 <<<<<<< HEAD
 from agent.model.diffusion import build_encoder
@@ -15,6 +16,18 @@ from env import GRIP_OPEN, GRIP_CLOSED
 >>>>>>> 0e1c919e0e8cb0e50b9ad45919e536b9f693f639
 
 ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
+=======
+from agent.model.networks import ConditionalUnet1D, CrossUnet1D2, get_resnet, replace_bn_with_gn
+from agent.model.vit import VitEncoder, VitEncoderConfig
+from agent.dataset.sequence import ActionMode, GripperStats, DEFAULT_FRAMERATE
+from robot.env import GRIP_OPEN, GRIP_CLOSED
+
+ACTION_MODES = ('absolute', 'local_delta', 'global_delta', 'umi')
+ENCODER_TYPES = ('resnet', 'vit', 'none')
+NOISE_NETS = ('unet', 'crossunet')  # ConditionalUnet1D (FiLM) / CrossUnet1D2 (cross-attention)
+# action_anchor (a dataset field) -> the live env obs['state'] key holding the same pose
+ANCHOR_STATE_KEYS = {'pose': 'actual_pose', 'target_pose': 'target_pose'}
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 class DiffusionPolicy(nn.Module):
@@ -26,6 +39,22 @@ class DiffusionPolicy(nn.Module):
 
     Training:   loss = policy.compute_loss(actions, conditions)
     Inference:  actions = policy.predict_action(conditions)  # unnormalized
+<<<<<<< HEAD
+=======
+
+    encoder_type:
+        'resnet': ResNet18 features + state are flattened into the global FiLM
+                  conditioning of a ConditionalUnet1D.
+        'vit':    a CrossUnet1D2 cross-attends to observation tokens from two ViTs:
+                  a long-range one over all obs_horizon frames, and a short-range one
+                  over the most recent short_obs_horizon frames. The ViTs live inside
+                  the noise prediction net (nets['noise_pred_net'].backbone/ctx_backbone).
+        'none':   no images. noise_net 'unet': the state history is the FiLM global
+                  conditioning of a ConditionalUnet1D; 'crossunet': a CrossUnet1D2
+                  cross-attends to one token per embedded state.
+    noise_net: None picks the one encoder_type was built for ('crossunet' for vit, else
+               'unet'); checkpoints from before it was saved get the same.
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     """
 
     def __init__(
@@ -35,26 +64,42 @@ class DiffusionPolicy(nn.Module):
         vision_feature_dim=512,
         state_dim=7,
         action_dim=7,
+<<<<<<< HEAD
         img_size=96,
+=======
+        img_size=128,
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         num_diffusion_iters=100,
         num_inference_steps=10,
         norm_stats: dict | None = None,
         action_mode: ActionMode = 'local_delta',
         encoder_type='resnet',
 <<<<<<< HEAD
+<<<<<<< HEAD
         augment=True
 =======
+=======
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         augment=True,
         grip_stats: GripperStats | None = None,
         obs_fields: list[str] | None = None,
         predict_done: bool | None = None,
+<<<<<<< HEAD
 >>>>>>> 0e1c919e0e8cb0e50b9ad45919e536b9f693f639
+=======
+        framerate: float = DEFAULT_FRAMERATE,
+        impedance_fields: list[str] | tuple = (),
+        action_anchor: str = 'pose',
+        short_obs_horizon: int = 1,
+        noise_net: str | None = None,
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     ):
         super().__init__()
         self.obs_fields = obs_fields if obs_fields is not None else ['pose', 'gripper_width']
         grip = GripperStats(*grip_stats) if grip_stats is not None else GripperStats(10, 40, 50, 5)
         self.grip_stats = GripperStats(*(float(x) for x in grip))
 
+<<<<<<< HEAD
         # Actions are [pose(6), gripper(1), done(1)], so assume it if predict_done is None.
         self.predict_done = (action_dim > 7) if predict_done is None else predict_done
 
@@ -64,6 +109,25 @@ class DiffusionPolicy(nn.Module):
         self.augment = augment
         if augment:
             self.aug = RandomShiftsAug(4)
+=======
+        # Actions are [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field)].
+        # Checkpoints from before predict_done was saved have no gains, so infer it from the size.
+        self.impedance_fields = tuple(impedance_fields)
+        self.predict_done = (action_dim > 7) if predict_done is None else predict_done
+        imp_start = 7 + int(self.predict_done)
+        self.impedance_slice = slice(imp_start, imp_start + 6 * len(self.impedance_fields))
+        # Dataset field the delta actions are relative to at the chunk start (see
+        # StitchedSequenceDataset.action_anchor): 'pose' (the actual TCP pose; checkpoints
+        # from before this was saved) or 'target_pose' (the impedance spring target).
+        assert action_anchor in ANCHOR_STATE_KEYS, action_anchor
+        self.action_anchor = action_anchor
+        assert self.impedance_slice.stop == action_dim, (
+            f'action_dim {action_dim} != pose(6) + gripper(1) + done({int(self.predict_done)}) '
+            f'+ 6 * {len(self.impedance_fields)} impedance fields')
+
+        # Architecture/config args; saved alongside the weights by save_checkpoint so
+        # from_checkpoint can rebuild the policy without the caller knowing the dims.
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         self.config = dict(
             obs_horizon=obs_horizon,
             action_horizon=action_horizon,
@@ -75,20 +139,45 @@ class DiffusionPolicy(nn.Module):
             action_mode=action_mode,
             encoder_type=encoder_type,
 <<<<<<< HEAD
+<<<<<<< HEAD
             augment=augment
 =======
+=======
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
             augment=augment,
             obs_fields=obs_fields,
             grip_stats=list(self.grip_stats),
             predict_done=self.predict_done,
+<<<<<<< HEAD
 >>>>>>> 0e1c919e0e8cb0e50b9ad45919e536b9f693f639
         )
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
+=======
+            framerate=float(framerate),
+            impedance_fields=list(self.impedance_fields),
+            action_anchor=self.action_anchor,
+            short_obs_horizon=short_obs_horizon,
+        )
+        assert encoder_type in ENCODER_TYPES, encoder_type
+        if noise_net is None:
+            noise_net = 'crossunet' if encoder_type == 'vit' else 'unet'
+        assert (encoder_type, noise_net) in (('resnet', 'unet'), ('vit', 'crossunet'), ('none', 'unet'),
+                                             ('none', 'crossunet')), (encoder_type, noise_net)
+        self.config['noise_net'] = noise_net
+        self.encoder_type = encoder_type
+        self.noise_net = noise_net
+        self.obs_horizon = obs_horizon
+        self.action_horizon = action_horizon
+        # Rate the training data was sampled at; actions are meant to be executed at
+        # this rate. Checkpoints saved before this was tracked default to DEFAULT_FRAMERATE.
+        self.framerate = float(framerate)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         self.action_dim = action_dim
         self.img_size = img_size
         self.num_diffusion_iters = num_diffusion_iters
 
+<<<<<<< HEAD
         noise_pred_net = ConditionalUnet1D(
             input_dim=action_dim,
             global_cond_dim=(vision_feature_dim + state_dim) * obs_horizon,
@@ -97,6 +186,52 @@ class DiffusionPolicy(nn.Module):
             'vision_encoder': vision_encoder,
             'noise_pred_net': noise_pred_net,
         })
+=======
+        if encoder_type == 'resnet':
+            # construct ResNet18 encoder; replace all BatchNorm with GroupNorm to
+            # work with EMA — performance will tank if you forget to do this!
+            vision_encoder = replace_bn_with_gn(get_resnet('resnet18'))
+            noise_pred_net = ConditionalUnet1D(
+                input_dim=action_dim,
+                global_cond_dim=(vision_feature_dim + state_dim) * obs_horizon,
+            )
+            self.nets = nn.ModuleDict({
+                'vision_encoder': vision_encoder,
+                'noise_pred_net': noise_pred_net,
+            })
+        elif encoder_type == 'none' and noise_net == 'crossunet':
+            assert short_obs_horizon <= obs_horizon, (
+                f'short_obs_horizon {short_obs_horizon} > obs_horizon {obs_horizon}')
+            self.nets = nn.ModuleDict({'noise_pred_net': CrossUnet1D2(
+                backbone=None, ctx_backbone=None,
+                input_dim=action_dim,
+                cond_steps=short_obs_horizon,
+                context_steps=obs_horizon,
+                cond_dim=state_dim,
+                context_dim=state_dim,
+            )})
+        elif encoder_type == 'none':
+            self.nets = nn.ModuleDict({'noise_pred_net': ConditionalUnet1D(
+                input_dim=action_dim,
+                global_cond_dim=state_dim * obs_horizon,
+            )})
+        else:  # 'vit'
+            assert short_obs_horizon <= obs_horizon, (
+                f'short_obs_horizon {short_obs_horizon} > obs_horizon {obs_horizon}')
+            vit_kwargs = dict(obs_shape=[3, img_size, img_size], cfg=VitEncoderConfig(),
+                              num_channel=3, img_h=img_size, img_w=img_size)
+            noise_pred_net = CrossUnet1D2(
+                backbone=VitEncoder(**vit_kwargs),      # short range: last short_obs_horizon frames
+                ctx_backbone=VitEncoder(**vit_kwargs),  # long range: all obs_horizon frames
+                input_dim=action_dim,
+                cond_steps=short_obs_horizon,
+                context_steps=obs_horizon,
+                cond_dim=state_dim,
+                context_dim=state_dim,
+                augment=augment,
+            )
+            self.nets = nn.ModuleDict({'noise_pred_net': noise_pred_net})
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_diffusion_iters,
@@ -156,11 +291,26 @@ class DiffusionPolicy(nn.Module):
         range_val = max_val - min_val
         return torch.where(range_val == 0, x, (x + 1) / 2 * range_val + min_val)
 
+<<<<<<< HEAD
     def normalize_actions(self, actions):
         return self._normalize(actions, self.action_min, self.action_max)
 
     def unnormalize_actions(self, actions):
         return self._unnormalize(actions, self.action_min, self.action_max)
+=======
+    # Constant action dims (e.g. damping/mass gains that never change) map to 0 and back to
+    # their value. Passing them through raw like _normalize does lets clip_sample clip
+    # them to [-1, 1] during inference (log10 D = 3 would come back as 1).
+    def normalize_actions(self, actions):
+        const = self.action_max == self.action_min
+        return torch.where(const, torch.zeros_like(actions),
+                           self._normalize(actions, self.action_min, self.action_max))
+
+    def unnormalize_actions(self, actions):
+        const = self.action_max == self.action_min
+        return torch.where(const, self.action_min.expand_as(actions),
+                           self._unnormalize(actions, self.action_min, self.action_max))
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
     def normalize_states(self, states):
         return self._normalize(states, self.state_min, self.state_max)
@@ -168,6 +318,7 @@ class DiffusionPolicy(nn.Module):
     def encode_obs(self, conditions):
         """
         conditions: {'rgb': (B, T, C, H, W) in [0, 1], 'state': (B, T, state_dim) raw}
+<<<<<<< HEAD
         Returns flattened observation conditioning (B, T * obs_dim).
         """
         images = conditions['rgb'].float()
@@ -180,6 +331,42 @@ class DiffusionPolicy(nn.Module):
         obs_features = torch.cat([image_features, states], dim=-1)
         return obs_features.flatten(start_dim=1)
 
+=======
+        Returns the noise prediction net's observation conditioning:
+            resnet: flattened features (B, T * obs_dim)
+            none:   flattened normalized states (B, T * state_dim), or {'state': (B, T, state_dim)}
+                    for a CrossUnet1D2; images are ignored
+            vit:    {'rgb': (B, obs_horizon, C, H, W) in [0, 255], 'state': normalized};
+                    CrossUnet1D2 runs the ViTs itself on every call.
+        """
+        # Pad a short history (e.g. the first steps of an eval episode) by repeating the
+        # oldest frame, as the dataset does at episode starts. Every encoder needs exactly
+        # obs_horizon frames.
+        states = self._pad_history(self.normalize_states(conditions['state'].float()), self.obs_horizon)
+        if self.encoder_type == 'none':
+            return {'state': states} if self.noise_net == 'crossunet' else states.flatten(start_dim=1)
+        images = self._pad_history(conditions['rgb'].float(), self.obs_horizon)
+        if self.encoder_type == 'vit':
+            return {'rgb': images * 255.0, 'state': states}  # VitEncoder expects [0, 255]
+        # BxTxCxHxW -> (B T)xCxHxW -> (B T) x d -> BxTxd
+        image_features = self.nets['vision_encoder'](images.flatten(end_dim=1)).reshape(*images.shape[:2], -1)
+        obs_features = torch.cat([image_features, states], dim=-1)
+        return obs_features.flatten(start_dim=1)
+
+    @staticmethod
+    def _pad_history(x, horizon):
+        """(B, T, ...) -> (B, horizon, ...): keep the latest `horizon` steps, repeating the oldest if T < horizon."""
+        x = x[:, -horizon:]
+        if x.shape[1] < horizon:
+            x = torch.cat([x[:, :1].expand(-1, horizon - x.shape[1], *x.shape[2:]), x], dim=1)
+        return x
+
+    def _predict_noise(self, sample, timestep, obs_cond):
+        if self.noise_net == 'crossunet':
+            return self.nets['noise_pred_net'](sample=sample, timestep=timestep, cond=obs_cond)
+        return self.nets['noise_pred_net'](sample=sample, timestep=timestep, global_cond=obs_cond)
+
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     def compute_loss(self, actions, conditions):
         """
         Diffusion (epsilon-prediction) training loss on normalized actions.
@@ -196,7 +383,11 @@ class DiffusionPolicy(nn.Module):
             0, self.noise_scheduler.config.num_train_timesteps, (B,), device=actions.device
         ).long()
         noisy_actions = self.noise_scheduler.add_noise(actions, noise, timesteps)
+<<<<<<< HEAD
         noise_pred = self.nets['noise_pred_net'](noisy_actions, timesteps, global_cond=obs_cond)
+=======
+        noise_pred = self._predict_noise(noisy_actions, timesteps, obs_cond)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         return nn.functional.mse_loss(noise_pred, noise)
 
     @torch.no_grad()
@@ -205,6 +396,7 @@ class DiffusionPolicy(nn.Module):
         Run reverse diffusion and return UNNORMALIZED actions (B, action_horizon, action_dim).
         """
         obs_cond = self.encode_obs(conditions)
+<<<<<<< HEAD
         B = obs_cond.shape[0]
         device = obs_cond.device
 
@@ -212,11 +404,52 @@ class DiffusionPolicy(nn.Module):
         for k in self.noise_scheduler.timesteps:
             noise_pred = self.nets['noise_pred_net'](
                 sample=naction, timestep=k, global_cond=obs_cond)
+=======
+        B = conditions['state'].shape[0]
+        device = conditions['state'].device
+        net = self.nets['noise_pred_net']
+        if self.noise_net == 'crossunet' and not self.training:
+            # The observation tokens are the same at every denoising step: encode them once.
+            # (In train mode each forward draws its own short-range dropout mask.)
+            obs_tokens = net.encode_obs(obs_cond, B)
+            predict_noise = lambda x, k: net(sample=x, timestep=k, encoded_obs=obs_tokens)
+        else:
+            predict_noise = lambda x, k: self._predict_noise(x, k, obs_cond)
+
+        naction = torch.randn((B, self.action_horizon, self.action_dim), device=device)
+        for k in self.noise_scheduler.timesteps:
+            noise_pred = predict_noise(naction, k)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
             naction = self.noise_scheduler.step(
                 model_output=noise_pred, timestep=k, sample=naction).prev_sample
 
         return self.unnormalize_actions(naction)
 
+<<<<<<< HEAD
+=======
+    def decode_impedance(self, actions, log=False):
+        """
+        Split the predicted gains out of an unnormalized action chunk.
+
+        Args:
+            actions: (horizon, action_dim) unnormalized actions from predict_action.
+            log:     return log10 gains (for averaging) instead of the gains.
+        Returns:
+            {field: (horizon, 6)} base-frame diagonal gains per impedance field (e.g.
+            'stiffness' -> K), or {} for a policy without an impedance head.
+        """
+        if torch.is_tensor(actions):
+            actions = actions.detach().cpu().numpy()
+        log_gains = np.asarray(actions)[:, self.impedance_slice]
+        return {field: (log_gains[:, 6 * i:6 * (i + 1)] if log else 10 ** log_gains[:, 6 * i:6 * (i + 1)])
+                for i, field in enumerate(self.impedance_fields)}
+
+    def anchor_pose(self, state):
+        """The pose a live env obs['state'] gives integrate_actions: the one the chunk's
+        deltas were trained relative to (actual pose, or the spring target)."""
+        return np.asarray(state[ANCHOR_STATE_KEYS[self.action_anchor]], dtype=float)
+
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     def integrate_actions(self, actions, curr_pose, curr_gripper_width):
         """
         Convert a predicted action chunk into absolute desired poses + gripper widths,
@@ -229,7 +462,12 @@ class DiffusionPolicy(nn.Module):
         Args:
             actions:            (horizon, action_dim) unnormalized actions from
                                 predict_action; last dim is the gripper (+1=open, -1=closed).
+<<<<<<< HEAD
             curr_pose:          (6,) current pose [tx, ty, tz, rx, ry, rz] (rotvec).
+=======
+            curr_pose:          (6,) pose the deltas start from [tx, ty, tz, rx, ry, rz]
+                                (rotvec); see anchor_pose.
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
             curr_gripper_width: current physical gripper width, used as fallback when
                                 width stats are unavailable.
 

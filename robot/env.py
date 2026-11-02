@@ -1,0 +1,992 @@
+from scipy.spatial.transform import Rotation as R, Slerp
+from collections import namedtuple, deque
+from typing import Literal
+import rtde_control
+import rtde_receive
+import numpy as np
+import threading
+import pathlib
+import gc
+import h5py
+import time
+import cv2
+import os
+
+from robot.net_isup import is_network_up
+from robot.util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
+from robot.camera import CameraProcess
+from robot import fdcc
+from robot import wsg
+
+# Gripper command states (des_gripper_state / gripper_state)
+GRIP_OPEN = 0
+GRIP_CLOSED = 1
+GRIP_MOVING = -1
+
+
+class RobotObs(namedtuple('RobotObs', ('time', 'actual_pose', 'actual_force', 'filtered_force'))):
+    pass
+
+
+class GripperObs(namedtuple('GripperObs', ('time', 'gripper_width', 'gripper_force'))):
+    pass
+
+
+class CameraObs(namedtuple('CameraObs', ('time', 'image'))):
+    pass
+
+
+class Command(namedtuple('Command', ('time', 'des_pose', 'des_gripper', 'adaptive_mode', 'des_zforce', 'controller_state'))):
+    pass
+
+
+# One row per control cycle: everything imp.step saw, what it sent, and the events that
+# changed imp's state -- enough to replay fdcc.Impedance offline (see save_data()).
+class ControlLog(namedtuple('ControlLog', (
+        'time', 'des_pose', 'target', 'v_cmd', 'stepped', 'K', 'D', 'M', 'sel', 'frame_base',
+        'adaptive', 'ev_reset', 'ev_jump', 'ev_clear_hold', 'halted', 'pstop',
+        'xi', 'V', 'V_t', 'ff_gain', 'hold', 'F_c'))):
+    pass
+
+
+# Every speedL call. source: 0 = admittance (_servo_loop), 1 = _ramp_down
+class SpeedLCmd(namedtuple('SpeedLCmd', ('time', 'v', 'accel', 'time_arg', 'source'))):
+    pass
+
+
+SPEEDL_ADMITTANCE, SPEEDL_RAMP_DOWN = 0, 1
+
+
+class Env:
+    """
+    Minimal robot environment wrapper for:
+        - Teleoperation
+        - Robot policy evaluation
+        - Data collection
+
+    Components:
+        - Single RGB camera
+        - UR robot arm
+        - WSG gripper
+    """
+
+    def __init__(
+        self,
+        robot_ip="192.168.0.100",  # could be 101 or 100 depending on your setup
+        gripper_ip="192.168.0.20",
+        network_iface='enx7cc2c6453f68',  # network interface to check for connectivity
+        camera_crop_mode=1,  # crop on the right half of the image to focus on the workspace
+        control_frequency=20,
+        servo_frequency=500,
+        gripper_query_frequency=250,
+        max_position_step=(0.008, 0.008, 0.008),
+        max_orientation_step=0.05,
+        lookahead_time=0.1,
+        servo_gain=500,
+        obs_mode: Literal['latest', 'mean'] = 'latest',
+        dataset_path=None,
+        save_interval=0.1,
+        save_eps=1e-3,
+        gwidth=20,
+        gforce=40,
+        gspeed=50,
+        gpullback=10,
+        metadata={}
+    ):
+        # ============================================================
+        # Internal states
+        # ============================================================
+        self.t0 = None
+        self.open_width = gwidth + 2 * gpullback
+        self.home_pose = URPose(-0.125, 0.545, 0.305, 2.44, 2.44, 0.653)
+        self.gripper_state = GRIP_OPEN
+        self.des_pose, self.des_gripper_state = self.home_pose, self.gripper_state
+        self.des_zforce = 0.
+        self.adaptive_mode = False
+        self.last_step_t = time.perf_counter()
+        self._zero_ft_request = False  # serviced by _control_loop; see request_zero_ft()
+
+        # ============================================================
+        # Control parameters
+        # ============================================================
+        self.g_force = gforce
+        self.g_width = gwidth
+        self.g_speed = gspeed
+        self.g_pullback = gpullback
+
+        # ============================================================
+        # Camera
+        # ============================================================
+        self.camera_crop_mode = camera_crop_mode
+
+        # ============================================================
+        # Robot interfaces
+        # ============================================================
+        self.robot_ip = robot_ip
+        self.gripper_ip = gripper_ip
+        self.ctrl = rtde_control.RTDEControlInterface(robot_ip)
+        self.recv = rtde_receive.RTDEReceiveInterface(robot_ip)
+        self.gripper = wsg.WSG(ip=gripper_ip)
+        self.gripper_query_frequency = gripper_query_frequency
+        self.network_iface = network_iface
+        self.network_query_frequency = 2.0
+        self.network_status = False
+
+        # ============================================================
+        # Servo parameters
+        # ============================================================
+        self.input_frequency = control_frequency
+        self.servo_frequency = servo_frequency
+        self.dt = 1.0 / servo_frequency
+        self.max_position_step = np.array(max_position_step)
+        self.max_orientation_step = max_orientation_step
+        self.lookahead_time = lookahead_time
+        self.servo_gain = servo_gain
+
+        # ============================================================
+        # FDCC admittance over speedL (fdcc.py, numbers in fdcc.toml)
+        # ============================================================
+        self.fdcc_cfg = fdcc.load_config()
+        with open(fdcc.CONFIG_PATH) as fh:
+            self.fdcc_toml = fh.read()       # saved with each episode: what imp was built from
+        self.tcp_offset = np.array(self.ctrl.getTCPOffset(), float)
+        self.imp = fdcc.Impedance(fdcc.ImpedanceParams.from_config(self.fdcc_cfg),
+                                  tcp_offset=self.tcp_offset)
+        if abs(self.imp.p.dt - self.dt) > 1e-9:
+            print(f'WARNING: fdcc.toml rate {1 / self.imp.p.dt:.0f} Hz != servo_frequency {servo_frequency} Hz')
+        abort = np.array(self.fdcc_cfg['limits']['abort_wrench'], float)
+        self.abort_wrench = np.where(abort > 0, abort, np.inf)          # 0 or inf = no limit
+        self.leash_N = np.array(self.fdcc_cfg['teleop']['leash_N'], float)  # [N, Nm], see _leash()
+        self._leashed = None             # the leashed target fed to fdcc (None = restart from the arm)
+        self._leash_held = False
+        rt = self.fdcc_cfg['rtde']
+        self.speedl_time = rt['speedl_time_cycles'] * self.imp.p.dt       # ONE cycle: 8 ms buzzed at 125 Hz
+        self.watchdog_hz = rt['watchdog_hz']
+        self.stop_decel = rt['stop_decel']
+        self.rest_speed = np.array(rt['rest_speed'], float)
+        self.ramp_timeout = rt['ramp_down_timeout_s']
+        self.fdcc_halt = None            # reason string once an abort_wrench trip halts motion; see clear_halt()
+        self.scripted_gains = {'K': self.fdcc_cfg['scripted']['stiffness']}   # see set_gains()
+        self._gain_request = None        # applied by the control loop (imp is not thread-safe)
+        self._reanchor_request = False   # see reanchor()
+        self._feedforward = True         # see set_feedforward()
+        zf = self.fdcc_cfg['zforce']
+        self.zforce_gain, self.zforce_max_speed = zf['gain'], zf['max_speed']
+        self._zf_target = None           # adaptive z-force target, see zforce_target()
+        self.fdcc_target = None          # last target fed to imp (obs 'target_pose')
+        self._was_adaptive = False
+        self._stats_lock = threading.Lock()
+        self._stats = self._new_stats()
+        self._ev = self._new_events()    # imp events since the last control-log row
+        self._check_robot_config()
+
+        print("Initializing environment...")
+        print(f"Robot IP:   {robot_ip}")
+        print(f"Gripper IP: {gripper_ip}")
+        print(f"Servo  {self.home_pose} frequency: {servo_frequency} Hz")
+
+        # ----------------------------
+        # threading
+        # ----------------------------
+        self.stop_flag = False
+        self.threads = []
+        self.obs_mode = obs_mode
+
+        # ----------------------------
+        # observation buffer
+        # ----------------------------
+        self.dataset_path = dataset_path
+        self.save_interval = save_interval  # save thread loop interval in seconds
+        self.robot_obs: list[RobotObs] = []
+        self.gripper_obs: list[GripperObs] = []
+        self.camera_obs: deque[CameraObs] = deque(maxlen=1)   # latest frame only; see _camera_loop
+        self.camera_times: list[float] = []
+        self._cam_file = None            # raw frames streamed to disk; save_data() moves them into rawdata.h5
+        self._cam_shape = None
+        self.commands: list[Command] = []
+        self.control_log: list[ControlLog] = []
+        self.speedl_log: list[SpeedLCmd] = []
+        self.network_log: list[tuple[float, bool]] = []   # (time, link up) at every network poll
+        self.save_eps = save_eps
+        self.image_idx = 0
+        self.metadata = metadata
+        self.camera = None               # opened by reset()
+        # Every cyclic GC pass holds the GIL, stalling all the threads here: log each one
+        # (start, duration, generation, collected) to line up with gaps in robot_obs/time
+        self.gc_log: list[tuple[float, float, int, int]] = []
+        self._gc_start = None
+        gc.callbacks.append(self._gc_callback)
+
+    def _gc_callback(self, phase, info):
+        if phase == 'start':
+            self._gc_start = time.time()
+        elif self._gc_start is not None:
+            t = self._gc_start - getattr(self, 't0', self._gc_start)
+            self.gc_log.append((t, time.time() - self._gc_start, info['generation'], info['collected']))
+            self._gc_start = None
+
+    def wait_for_obs(self):
+        while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
+            time.sleep(0.01)
+
+    def get_obs(self):
+        # Assume obs is populated with at least one entry
+        if self.obs_mode == 'latest':
+            obs = {
+                'image': self.camera_obs[-1].image,
+                'state': {
+                    'actual_pose': self.robot_obs[-1].actual_pose,
+                    'actual_force': self.robot_obs[-1].actual_force,
+                    'filtered_force': self.robot_obs[-1].filtered_force,
+                    'gripper_width': self.gripper_obs[-1].gripper_width,
+                    'gripper_force': self.gripper_obs[-1].gripper_force,
+                    # what the spring pulls toward (z-force z included): leaving force mode
+                    # continues from here (interface.deactivate_adaptive_mode)
+                    'target_pose': self.fdcc_target if self.fdcc_target is not None else self.robot_obs[-1].actual_pose,
+                    # admittance K diagonals now (mid-ramp included), on imp.frame's axes; the
+                    # same as base axes whenever they differ only by isotropic halves, as logged
+                    # 'stiffness' (scripts/rawdata_to_dataset.py base_frame_gains). imp swaps
+                    # in new arrays rather than writing into K, so the copy is consistent.
+                    'stiffness': self.imp.K.copy(),
+                },
+                'network_status': self.network_status
+            }
+            return obs
+
+        elif self.obs_mode == 'mean':
+            raise NotImplementedError("Mean obs mode not implemented yet")
+
+    def step(self, des_pose, des_gripper_state, des_zforce=0., adaptive_mode=False, dualsense=None):
+        """Args:
+            des_pose: URPose
+            des_gripper_state: int (GRIP_OPEN=0, GRIP_CLOSED=1)
+            des_zforce: float (desired z-force in N)
+            adaptive_mode: bool (whether to use adaptive z-force control)
+        """
+        log_cmd = Command(time=time.time() - self.t0,
+                          des_pose=des_pose, des_gripper=des_gripper_state,
+                          adaptive_mode=adaptive_mode, des_zforce=des_zforce,
+                          controller_state=dualsense)
+        self.commands.append(log_cmd)
+
+        if self.adaptive_mode and not adaptive_mode:
+            # Transitioning adaptive -> position
+            self.last_step_t = time.perf_counter()
+            self.last_step_end = des_pose
+        else:
+            self.last_step_t = time.perf_counter()
+            self.last_step_end = self.des_pose
+
+        self.des_pose = des_pose
+        self.des_gripper_state = des_gripper_state
+        self.des_zforce = des_zforce
+        self.adaptive_mode = adaptive_mode
+        return self.get_obs()
+
+    def start(self):
+        if self.dataset_path is not None:
+            prefix = 'episode'
+            ix = episode_index(self.dataset_path, prefix=prefix)
+            self.epi_path = pathlib.Path(self.dataset_path) / f'{prefix}{ix:06d}'
+            self.epi_path.mkdir(parents=True, exist_ok=True)
+            os.makedirs(self.epi_path / 'images', exist_ok=True)
+            # Unbuffered: each frame is one write(), which releases the GIL (an h5py write
+            # would hold it and could stall the 500 Hz control loop on a slow disk).
+            self._cam_file = open(self.epi_path / 'camera_bgr.raw', 'wb', buffering=0)
+
+        self.stop_flag = False
+        self.threads = [
+            threading.Thread(target=self._control_loop, daemon=True),
+            threading.Thread(target=self._camera_loop, daemon=True),
+            threading.Thread(target=self._gripper_loop, daemon=True),
+            threading.Thread(target=self._network_loop, daemon=True),
+        ]
+        if self.dataset_path is not None:
+            self.threads.append(threading.Thread(target=self._logger_loop, daemon=True,))
+
+        self.t0 = time.time()
+        for thread in self.threads:
+            thread.start()
+        self.wait_for_obs()
+
+    def reset(self, home_pose):
+        """
+        Reset environment:
+            1. Open/home the gripper
+            2. Move robot to home pose
+            3. Set gripper to default width
+
+        Args:
+            home_pose: URPose
+        """
+        if home_pose is None:
+            home_pose = self.home_pose
+
+        print('Resetting environment...')
+        if len(self.threads) > 0:
+            self.stop_flag = True
+            for thr in self.threads:
+                thr.join()
+            if self.dataset_path is not None:
+                self.save_data()
+        if self.camera is None:          # a second reset() reuses it: the device is already open
+            # in a child process: a late frame would otherwise stall every thread here (see camera.py)
+            self.camera = CameraProcess(sid="843212070496", crop_mode=self.camera_crop_mode)
+
+        # ============================================================
+        # Home / open gripper
+        # ============================================================
+        if self.gripper.gripstate().value != wsg.GripperState.IDLE.value:
+            self.gripper.stop().wait()
+            while self.gripper.gripstate().value != wsg.GripperState.IDLE.value:
+                time.sleep(.1)
+
+        g = self.gripper.home()
+        g.ack.wait()
+
+        # ============================================================
+        # Move robot home (blocking)
+        # ============================================================
+        # _control_loop stops the RTDE script on exit, which also clears its
+        # watchdog -- otherwise this blocking moveL would trip it (C207A0).
+        if not self.ctrl.isProgramRunning():
+            self.ctrl.reuploadScript()
+            while not self.ctrl.isProgramRunning():
+                time.sleep(0.5)
+        ret = self.ctrl.moveL(home_pose, 0.1, 0.1)
+        self.des_pose = home_pose  # Ensure robot doesn't move after homing
+        self.last_step_t = -1
+
+        # Wait for gripper homing to finish
+        g.finished.wait()
+        g = self.gripper.home()
+        g.wait()
+
+        # ============================================================
+        # Move gripper to default open width
+        # ============================================================
+        g = self.gripper.move(position=self.open_width, speed=self.g_speed)
+        g.finished.wait()
+        self.gripper_state = GRIP_OPEN
+        self.des_gripper_state = GRIP_OPEN   # the command too: start() would act on the last one
+
+        self.gripper.set_pwt(20)
+
+        # ============================================================
+        # Reset observations
+        # ============================================================
+        self.robot_obs: list[RobotObs] = []
+        self.gripper_obs: list[GripperObs] = []
+        self.camera_obs: deque[CameraObs] = deque(maxlen=1)   # latest frame only; see _camera_loop
+        self.camera_times: list[float] = []
+        self._cam_file = None            # raw frames streamed to disk; save_data() moves them into rawdata.h5
+        self._cam_shape = None
+        self.commands: list[Command] = []
+        self.control_log: list[ControlLog] = []
+        self.speedl_log: list[SpeedLCmd] = []
+        self.network_log: list[tuple[float, bool]] = []   # (time, link up) at every network poll
+        self.network_status = False      # until _network_loop polls
+        self.gc_log = []
+        self.fdcc_target = None          # obs 'target_pose' is the arm until the control loop runs
+        self.ctrl.zeroFtSensor()
+        self._force_filtered = np.zeros(6)   # filter_force restarts with the zeroed sensor
+
+        print('payload kg', self.recv.getPayload())
+        print('payload cog', self.recv.getPayloadCog())
+
+        print('Environment reset complete.')
+
+    def close(self):
+        self.stop_flag = True
+        # Bounded joins: a worker can be parked in a no-timeout blocking call
+        # (gripper query .wait(), or ctrl.servoL after a protective stop) and
+        # never re-check stop_flag. Since these are daemon threads, don't wait
+        # on them forever -- that wedges the main thread and forces a ctrl-Z.
+        for thr in self.threads:
+            thr.join(timeout=2.0)
+            if thr.is_alive():
+                print(f'Warning: thread {thr.name} did not exit; leaving it to daemon cleanup.')
+        if self.camera is not None:
+            self.camera.close()
+            self.camera = None
+        if self.dataset_path is not None:
+            self.save_data()
+
+    def init_period(self):
+        self.period_init = time.perf_counter()
+
+    def wait_period(self):
+        """
+        Waits for a time corresponding to `input_frequency`. Expects `init_period()` to be called at the top of the loop.
+        """
+        delta = time.perf_counter() - self.period_init
+        sleep_time = max(0, 1 / self.input_frequency - delta)
+        time.sleep(sleep_time)
+
+    def interpolate(self):
+        t = time.perf_counter() - self.last_step_t
+        perc = min(1, t * self.input_frequency)
+        return interpolate(self.last_step_end, self.des_pose, perc)
+
+    force_alpha = 0.03
+    _force_filtered = np.zeros(6)
+
+    def filter_force(self, force):
+        self._force_filtered = self.force_alpha * np.array(force) + (1 - self.force_alpha) * self._force_filtered
+        return self._force_filtered
+
+    def zforce_target(self, target_z, filtered_force):
+        """
+        Adaptive z-force: integrate the force error into the z TARGET, rate-limited.
+        The old servoL PID returned actual z + kp*err + kd*d(err)/dt: under the admittance a
+        target built from the actual pose moves with the arm, its velocity feeds forward and
+        cancels the damping, and the kd term turned force noise into target jumps -- the arm
+        went wild on Triangle (logs-debug-fdcc/episode000003, 22.9 s).
+        """
+        if self._zf_target is None:
+            self._zf_target = target_z                  # continue from where the target was
+        err = filtered_force.z - self.des_zforce
+        rate = np.clip(self.zforce_gain * err, -self.zforce_max_speed, self.zforce_max_speed)
+        self._zf_target += rate * self.dt
+        return self._zf_target
+    
+    def _set_gripstate(self, gs):
+        self.gripper_state = gs
+
+    def request_zero_ft(self):
+        """Ask the control loop to zero the F/T sensor at a safe point.
+
+        self.ctrl (RTDE control) is not thread-safe, so it must only be touched
+        from _control_loop. Callers on other threads (e.g. an interrupt-sequence
+        .then callback) set this flag instead of calling ctrl.zeroFtSensor()
+        directly, which would race with servoL() and can hang the RTDE handshake.
+        """
+        self._zero_ft_request = True
+
+    # ================================================================
+    # FDCC helpers
+    # ================================================================
+    def _check_robot_config(self):
+        """Warn if the controller's payload / TCP differ from fdcc.toml (an unsaved pendant edit once did)."""
+        r = self.fdcc_cfg['robot']
+        mass, tcp = self.recv.getPayload(), np.array(self.ctrl.getTCPOffset())
+        if abs(mass - r['payload_kg']) > r['payload_tolerance_kg']:
+            print(f'WARNING: payload {mass:.3f} kg, fdcc.toml says {r["payload_kg"]:.3f}')
+        if np.linalg.norm(tcp - np.array(r['tcp_offset'])) > r['tcp_tolerance_m']:
+            print(f'WARNING: TCP offset {np.round(tcp, 4)}, fdcc.toml says {r["tcp_offset"]}')
+
+    def _new_stats(self):
+        return {'n': 0, 't0': None, 't1': None, 'dt_max': 0.0, 'work_max': 0.0, 'slow': 0,
+                'f_max': 0.0, 't_max': 0.0, 'leash': 0, 'e_max': np.zeros(2), 'vsat': 0,
+                'v_max': 0.0, 'ff_min': 1.0, 'last': {}}
+
+    def fdcc_stats(self):
+        """
+        Control-loop diagnostics since the last call (then reset), for printing.
+          hz, dt_max_ms, work_max_ms, slow  : loop rate, worst period, worst compute, cycles > 2 dt
+          F, tau / F_max, tau_max           : raw getActualTCPForce now / window max
+          F_c                               : processed wrench at c (after filter/deadband/clamp)
+          e_mm, e_deg / leash_pct           : error of the target FDCC tracks; % of cycles the leash held it back
+          v_mm_s, v_max_mm_s / vsat_pct     : commanded speed now / max; % of cycles at the speed clamp
+          ff_min                            : lowest feedforward fade (1 = full feedforward)
+          state                             : 'ok', 'PSTOP', or 'HALT: <reason>'
+        """
+        with self._stats_lock:
+            s, self._stats = self._stats, self._new_stats()
+        n, last = max(s['n'], 1), s['last']
+        span = (s['t1'] - s['t0']) if s['n'] > 1 else float('nan')
+        return {'hz': (s['n'] - 1) / span if s['n'] > 1 else float('nan'),
+                'dt_max_ms': 1e3 * s['dt_max'], 'work_max_ms': 1e3 * s['work_max'], 'slow': s['slow'],
+                'F': last.get('F', np.nan), 'tau': last.get('tau', np.nan),
+                'F_max': s['f_max'], 'tau_max': s['t_max'], 'F_c': last.get('F_c', np.nan),
+                'e_mm': last.get('e_mm', np.nan), 'e_deg': last.get('e_deg', np.nan),
+                'e_max_mm': 1e3 * s['e_max'][0], 'e_max_deg': np.degrees(s['e_max'][1]),
+                'leash_pct': 100 * s['leash'] / n, 'v_mm_s': last.get('v_mm_s', np.nan),
+                'v_max_mm_s': 1e3 * s['v_max'], 'vsat_pct': 100 * s['vsat'] / n, 'ff_min': s['ff_min'],
+                'state': last.get('state', '?')}
+
+    def set_gains(self, K=None, D=None, M=None, sel=None, frame=None, ramp_s=None):
+        """
+        Change the admittance gains from the next control cycle (thread-safe; fdcc.Impedance
+        is only touched by _control_loop). Same forms as Impedance.set_gains; None keeps.
+        K, D, M blend over ramp_s (None = fdcc.toml [admittance] gain_ramp_s). A caller that
+        streams gains every command should ramp over one command period: each call restarts
+        the smoothstep from zero slope, so a 0.1 s ramp restarted every 50 ms lags.
+        """
+        self._gain_request = {'K': K, 'D': D, 'M': M, 'sel': sel, 'frame': frame, 'ramp_s': ramp_s}
+
+    def reanchor(self):
+        """
+        Restart the leashed target at the arm's pose on the next cycle (thread-safe).
+        For scripted starts: MotionStep begins at the arm, and walking the stale teleop
+        target back to it at the speed limit was fed forward as a lurch (episode000005, 25.3 s).
+        The 1/input_frequency blend in interpolate() restarts at the arm too: it still ran
+        from the old des_pose, 7.8 mm off in contact, and the leash chased that at the speed
+        limit for a few cycles -- the jerk at a scripted start (logs-debug-fdcc/bug2, 6.0 s).
+        """
+        pose = self.robot_obs[-1].actual_pose if self.robot_obs else URPose(*self.recv.getActualTCPPose())
+        self.last_step_end = self.des_pose = pose
+        self.last_step_t = time.perf_counter()
+        self._reanchor_request = True
+
+    def restart_at_target(self):
+        """
+        Restart des_pose, and the 1/input_frequency interpolate() blend, at the leashed
+        target -- where the spring pulls now -- and return it (thread-safe). A scripted
+        step started from here moves the target on from where it is: no jump, no hold
+        change, and nothing for the leash to walk back from a stale des_pose (what
+        reanchor() snapped to the ARM for, which also dropped any preload in one cycle).
+        """
+        pose = self.fdcc_target
+        if pose is None:
+            pose = self.robot_obs[-1].actual_pose if self.robot_obs else URPose(*self.recv.getActualTCPPose())
+        self.last_step_end = self.des_pose = URPose(*pose)
+        self.last_step_t = time.perf_counter()
+        return self.des_pose
+
+    def set_feedforward(self, on=True):
+        """
+        Off: the target's motion is not fed forward (every cycle's move is a
+        note_target_jump), so the arm follows it through the spring alone (D/K). For the
+        scripted release in contact, where the target walks back to the pressed arm: fed
+        forward, that motion lifted the arm off with it while the spring still pulled down.
+        """
+        self._feedforward = on
+
+    def restore_gains(self):
+        """Back to the fdcc.toml gains and frame."""
+        p = self.imp.p
+        self.set_gains(K=p.K, D=p.D, M=p.M, sel=p.sel, frame=p.frame)
+
+    def _reset_ctrl(self):
+        """Controller from rest; the leashed target restarts from the arm."""
+        self.imp.reset()
+        self._leashed = None
+        self._ev['reset'] = True
+
+    @staticmethod
+    def _new_events():
+        return {'reset': False, 'jump': False, 'clear_hold': False}
+
+    def _speedL(self, v, accel, source):
+        """ctrl.speedL with the call logged (control thread only)."""
+        v = list(v)
+        self.speedl_log.append(SpeedLCmd(time=time.time() - self.t0, v=v, accel=accel,
+                                         time_arg=self.speedl_time, source=source))
+        return self.ctrl.speedL(v, accel, self.speedl_time)
+
+    def _leash(self, actual_pose, des_pose):
+        """
+        Non-dragging leash in NEWTONS: the target chases des_pose (at most the speed limit
+        per cycle) but the spring may not push harder than leash_N ([N, Nm]: norm of
+        K * error per half, in imp's frame, to the target WITH imp's hold offset) -- the
+        only push left in contact once the feedforward fades. A stiff axis gets all of
+        leash_N, the soft axes their own share. It never drags the target after the arm,
+        so pushing the arm by hand does not move the equilibrium. See fdcc.leash_step.
+        """
+        imp = self.imp
+        prev = np.asarray(actual_pose if self._leashed is None else self._leashed, float)
+        self._leashed, held = fdcc.leash_step(prev, des_pose, actual_pose, self.leash_N,
+                                              imp.p.speed * self.dt, weight=imp.K,
+                                              frame=imp.frame, hold=imp.hold)
+        self._leash_held = any(held)
+        return URPose(*self._leashed)
+
+    def clear_halt(self):
+        """Resume after an abort_wrench halt (the arm restarts tracking the current target)."""
+        self.fdcc_halt = None
+
+    def _ramp_down(self, v):
+        """
+        Bring the arm to rest through speedL, feeding the watchdog every cycle.
+        speedStop()/moveL from speed block the host long enough to trip the watchdog.
+        """
+        dt, a = self.imp.p.dt, self.imp.p.accel
+        v = np.array(v, float)
+        t_end = time.perf_counter() + self.ramp_timeout
+        while time.perf_counter() < t_end:
+            t_start = self.ctrl.initPeriod()
+            if self.recv.isProtectiveStopped() or self.recv.isEmergencyStopped():
+                break
+            for sl, am in ((slice(0, 3), a[0]), (slice(3, 6), a[1])):
+                n = np.linalg.norm(v[sl])
+                v[sl] *= max(n - am * dt, 0.0) / n if n > 0 else 0.0
+            if self._speedL(v, a[0], SPEEDL_RAMP_DOWN) is False:
+                break
+            self.ctrl.waitPeriod(t_start)
+            tw = np.array(self.recv.getActualTCPSpeed())
+            if not v.any() and np.linalg.norm(tw[:3]) < self.rest_speed[0] and np.linalg.norm(tw[3:]) < self.rest_speed[1]:
+                break
+        return np.zeros(6)
+
+    def _control_loop(self):
+        imp = self.imp
+        self._reset_ctrl()
+        wd = self.watchdog_hz > 0
+        if wd:
+            self.ctrl.setWatchdog(self.watchdog_hz)     # speedL keeps the last velocity if this thread stalls
+        self._v_last = np.zeros(6)
+        try:
+            self._servo_loop(imp, wd)
+        finally:
+            try:
+                self._ramp_down(self._v_last)
+                self.ctrl.speedStop(self.stop_decel)
+            finally:
+                self.ctrl.stopScript()                  # also clears the watchdog; reset() re-uploads
+
+    def _servo_loop(self, imp, wd):
+        v_last, t_prev, was_stopped = np.zeros(6), None, False
+        self.restore_gains()                           # a previous run may have ended stiff
+        while not self.stop_flag:
+            t_start = self.ctrl.initPeriod()
+            now = time.perf_counter()
+            state = 'ok'
+            if self._zero_ft_request:
+                v_last = self._v_last = self._ramp_down(v_last)   # zero only at rest
+                self.ctrl.zeroFtSensor()
+                self._reset_ctrl()
+                self._zero_ft_request = False
+                t_prev = None                                  # the pause is not a loop stall
+            actual_pose = URPose(*self.recv.getActualTCPPose())
+            if self._reanchor_request:
+                self._reanchor_request = False
+                self._leashed = np.asarray(actual_pose, float)
+                imp.note_target_jump(self._leashed)
+                imp.clear_hold()                # an absolute move: no offset from old gain changes
+                self._ev['jump'] = self._ev['clear_hold'] = True
+            req, self._gain_request = self._gain_request, None
+            if req is not None:
+                # Ramped over gain_ramp_s, and imp keeps the held pose (its hold offset keeps
+                # K xi constant): a bare K step moved the arm (logs-debug-fdcc/episode000004).
+                # The old bumpless rescale moved self._leashed instead, which the leash
+                # walked back to des_pose at the speed limit, fed forward as a jerk.
+                try:
+                    imp.set_gains(**req)
+                except ValueError as ex:
+                    print(f'\nset_gains ignored: {ex}')
+            actual_force = URPose(*self.recv.getActualTCPForce())
+            filtered_force = URPose(*self.filter_force(actual_force))
+            t_obs = time.time() - self.t0
+            self.robot_obs.append(RobotObs(time=t_obs,
+                                  actual_pose=actual_pose, actual_force=actual_force,
+                                  filtered_force=filtered_force))
+
+            des_pose = self.des_pose
+            des_gripper_state = self.des_gripper_state
+            gripper_state = self.gripper_state
+
+            # ----------------------------
+            # gripper logic (non-blocking preferred)
+            # ----------------------------
+            if gripper_state != GRIP_MOVING and gripper_state != des_gripper_state:
+                self.gripper_state = GRIP_MOVING
+                if gripper_state == GRIP_OPEN:
+                    self.gripper.grip(force=self.g_force, width=self.g_width, speed=self.g_speed) \
+                        .finished.then(lambda _: self._set_gripstate(GRIP_CLOSED)) \
+                        .catch(lambda e: (
+                            self._set_gripstate(GRIP_CLOSED),
+                            print(f'Gripper GRIP failed: {e}'),
+                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                            ))
+                else:
+                    cur_width = self.gripper_obs[-1].gripper_width
+                    self.gripper.release(pullback=(self.open_width - cur_width) / 2, speed=self.g_speed) \
+                        .finished.then(lambda _: self._set_gripstate(GRIP_OPEN)) \
+                        .catch(lambda e: (
+                            self._set_gripstate(GRIP_OPEN),
+                            print(f'Gripper RELEASE failed: {e}'),
+                            print(f'Last 5 gripper commands: ', [c.des_gripper for c in self.commands[-5:]])
+                        ))
+
+            # ----------------------------
+            # blend -> admittance target
+            # ----------------------------
+            if self.last_step_t > 0:
+                # Received at least 1 input
+                des_pose = self.interpolate()
+
+            # ----------------------------
+            # adaptive z-force control: into des BEFORE the leash, so the leashed target
+            # is the target imp sees. Replacing z after the leash left the leashed z at the
+            # stick's des z (27 mm above the arm); leaving force mode, the leash walked it
+            # down at the speed limit, fed forward (logs-debug-fdcc/episode000006, 15.9 s).
+            # ----------------------------
+            adaptive = self.adaptive_mode
+            if adaptive:
+                z0 = self._leashed[2] if self._leashed is not None else actual_pose.z
+                des_pose = URPose(*des_pose)._replace(z=self.zforce_target(z0, filtered_force))
+            else:
+                self._zf_target = None
+
+            target = self._leash(actual_pose, des_pose)                         # FDCC: non-dragging leash, in newtons
+            # target = clamp(actual_pose, des_pose, self.max_position_step, self.max_orientation_step)  # old servoL leash: DRAGS the target after the arm
+            if adaptive:
+                self._zf_target = target.z      # no windup while the leash holds it
+            elif self._was_adaptive:
+                imp.note_target_jump(target)    # the mode change is not target velocity
+                self._ev['jump'] = True
+            self._was_adaptive = adaptive
+            self.fdcc_target = target
+
+            # ----------------------------
+            # safety, then admittance -> speedL
+            # ----------------------------
+            W = np.asarray(actual_force, float)
+            f, tq = np.linalg.norm(W[:3]), np.linalg.norm(W[3:])
+            stopped = self.recv.isProtectiveStopped() or self.recv.isEmergencyStopped()
+            if self.fdcc_halt is None and (f > self.abort_wrench[0] or tq > self.abort_wrench[1]):
+                self.fdcc_halt = f'|F| {f:.1f} N, |tau| {tq:.2f} Nm over abort_wrench'
+                print(f'\nFDCC HALT: {self.fdcc_halt} -- env.clear_halt() to resume')
+                v_last = self._ramp_down(v_last)
+            if stopped:
+                was_stopped = True
+                state = 'PSTOP'
+            elif was_stopped:
+                # Cleared on the pendant: the RTDE script died with the stop. Start it again
+                # (a fresh script has no watchdog) and restart from rest.
+                if not self.ctrl.isProgramRunning():
+                    self.ctrl.reuploadScript()
+                if wd:
+                    self.ctrl.setWatchdog(self.watchdog_hz)
+                self._reset_ctrl()
+                was_stopped, state = False, 'resumed after pstop'
+            stepped = not (stopped or self.fdcc_halt is not None)
+            if not stepped:
+                self._reset_ctrl()
+                v_last = np.zeros(6)
+                if not stopped:
+                    state = f'HALT: {self.fdcc_halt}'
+                    if wd:
+                        self.ctrl.kickWatchdog()        # holding still, not stalled
+            else:
+                if not self._feedforward:
+                    imp.note_target_jump(target)    # see set_feedforward()
+                v_last = imp.step(actual_pose, W, target)
+                self._speedL(v_last, imp.p.accel[0], SPEEDL_ADMITTANCE)
+
+            # ----------------------------
+            # replay log. Gains are read after step(): mid-ramp, these are the ones it used.
+            # imp never mutates its gain arrays in place, so no copies.
+            # ----------------------------
+            last, z6 = (imp.last if stepped else {}), np.zeros(6)
+            ev, self._ev = self._ev, self._new_events()
+            self.control_log.append(ControlLog(
+                time=t_obs, des_pose=des_pose, target=target, v_cmd=v_last, stepped=stepped,
+                K=imp.K, D=imp.D, M=imp.M, sel=imp.sel, frame_base=imp.frame == 'base',
+                adaptive=adaptive, ev_reset=ev['reset'], ev_jump=ev['jump'],
+                ev_clear_hold=ev['clear_hold'], halted=self.fdcc_halt is not None, pstop=stopped,
+                xi=last.get('xi', z6), V=last.get('V', z6), V_t=last.get('V_t', z6),
+                ff_gain=last.get('ff_gain', np.zeros(2)), hold=last.get('hold', z6),
+                F_c=last.get('F_c', z6)))
+
+            # ----------------------------
+            # diagnostics (read with fdcc_stats())
+            # ----------------------------
+            xi = imp.last.get('xi', np.zeros(6))
+            e_lin, e_ang = np.linalg.norm(xi[:3]), np.linalg.norm(xi[3:])
+            v_lin = np.linalg.norm(v_last[:3])
+            work = time.perf_counter() - now
+            with self._stats_lock:
+                s = self._stats
+                if s['t0'] is None:
+                    s['t0'] = now
+                s['t1'] = now
+                s['n'] += 1
+                if t_prev is not None:
+                    s['dt_max'] = max(s['dt_max'], now - t_prev)
+                    s['slow'] += (now - t_prev) > 2 * self.dt
+                s['work_max'] = max(s['work_max'], work)
+                s['f_max'], s['t_max'] = max(s['f_max'], f), max(s['t_max'], tq)
+                s['leash'] += self._leash_held
+                s['e_max'] = np.maximum(s['e_max'], [e_lin, e_ang])
+                s['vsat'] += v_lin > 0.999 * imp.p.speed[0]
+                s['v_max'] = max(s['v_max'], v_lin)
+                s['ff_min'] = min(s['ff_min'], float(np.min(imp.g)))
+                s['last'] = {'F': f, 'tau': tq, 'F_c': float(np.linalg.norm(imp.last.get('F_c', np.zeros(6))[:3])),
+                             'e_mm': 1e3 * e_lin, 'e_deg': np.degrees(e_ang), 'v_mm_s': 1e3 * v_lin,
+                             'state': state}
+            t_prev = now
+            self._v_last = v_last
+
+            self.ctrl.waitPeriod(t_start)
+
+    def _camera_loop(self):
+        # Frames go straight to disk instead of piling up in memory (~0.7 MB each at 30 Hz,
+        # >1 GB a minute); only the latest is kept, for get_obs().
+        while not self.stop_flag:
+            image = np.ascontiguousarray(self.camera.get_image())
+            t = time.time() - self.t0
+            if self._cam_file is not None:
+                if self._cam_shape is None:
+                    self._cam_shape = image.shape
+                assert image.shape == self._cam_shape, (image.shape, self._cam_shape)
+                self._cam_file.write(memoryview(image).cast('B'))
+                self.camera_times.append(t)
+            self.camera_obs.append(CameraObs(time=t, image=image.copy()))
+
+    def _gripper_loop(self):
+        while not self.stop_flag:
+            t0 = time.perf_counter()
+            # print('============ SENDING QUERIES ================')
+            force = self.gripper.force()
+            pos = self.gripper.position()
+
+            self.gripper_obs.append(GripperObs(time=time.time() - self.t0,
+                                               gripper_width=pos.value,
+                                               gripper_force=force.value))
+            sleep_dur = max(0, 1.0 / self.gripper_query_frequency - (time.perf_counter() - t0))
+            # print('============ QUERY RESOLVED ================')
+            time.sleep(sleep_dur)
+
+    def _network_loop(self):
+        while not self.stop_flag:
+            t0 = time.perf_counter()
+            status = is_network_up(self.network_iface)
+            self.network_status = status
+            self.network_log.append((time.time() - self.t0, bool(status)))
+            sleep_dur = max(0, 1.0 / self.network_query_frequency - (time.perf_counter() - t0))
+            time.sleep(sleep_dur)
+
+    def _logger_loop(self):
+        image_path = self.epi_path / 'images'
+        time_list = []
+        pose_list = []
+        force_list = []
+        filt_force_list = []
+        gpos_list = []
+        gforce_list = []
+        self.wait_for_obs()  # Ensure we have at least one obs before starting logging
+
+        last_pose = None
+
+        image_idx = 0
+        tinit = time.time()
+        while not self.stop_flag:
+            t0 = time.perf_counter()
+            obs = self.get_obs()
+            
+
+            # Do not log if stationary
+            # cur_pose = np.r_[obs['state']['actual_pose'], obs['state']['gripper_width']]
+            # delta = max(abs(cur_pose - last_pose)) if last_pose is not None else float('inf')
+            # if delta < self.save_eps:
+            #     sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
+            #     time.sleep(sleep_time)
+            #     continue
+            # last_pose = cur_pose
+
+            im_path = pathlib.Path(image_path) / f'{image_idx:06d}.png'
+            cv2.imwrite(im_path, obs['image'])
+            time_list.append(time.time() - tinit)
+            pose_list.append(obs['state']['actual_pose'])
+            force_list.append(obs['state']['actual_force'])
+            filt_force_list.append(obs['state']['filtered_force'])
+            gpos_list.append(obs['state']['gripper_width'])
+            gforce_list.append(obs['state']['gripper_force'])
+            image_idx += 1
+
+            sleep_time = max(0, self.save_interval - (time.perf_counter() - t0))
+            time.sleep(sleep_time)
+
+        # IMPORTANT: logger must exit via stop_flag for data to be saved
+        np.savez_compressed(
+            self.epi_path / 'states.npz',
+            time=np.array(time_list),
+            pose=np.array(pose_list),
+            force=np.array(filt_force_list),
+            force_raw=np.array(force_list),
+            gripper_width=np.array(gpos_list),
+            gripper_force=np.array(gforce_list),
+            metadata=self.metadata,
+            allow_pickle=True
+        )
+
+    def _save_camera(self, f, block=64):
+        """Copy the streamed raw frames into camera_obs/image_bgr, a block at a time, then delete them."""
+        cam_file, self._cam_file = self._cam_file, None
+        if cam_file is None:
+            return
+        cam_file.close()
+        raw_path = pathlib.Path(cam_file.name)
+        shape = self._cam_shape
+        n = len(self.camera_times)
+        if shape is not None:
+            # a camera thread that never exited (close()'s bounded join) may have died mid-write
+            n = min(n, raw_path.stat().st_size // int(np.prod(shape)))
+        f.create_dataset('camera_obs/time', data=self.camera_times[:n])
+        if n == 0:
+            f.create_dataset('camera_obs/image_bgr', shape=(0,), dtype=np.uint8)
+        else:
+            frames = np.memmap(raw_path, dtype=np.uint8, mode='r', shape=(n, *shape))
+            ds = f.create_dataset('camera_obs/image_bgr', shape=frames.shape, dtype=np.uint8,
+                                  chunks=(1, *shape))
+            for i in range(0, n, block):
+                ds[i:i + block] = frames[i:i + block]
+            del frames
+        raw_path.unlink()
+        self._cam_shape = None
+
+    def save_data(self):
+        # Save collected RAW data to HDF5.
+        print(f'Saving data to {self.epi_path}...')
+        path = self.epi_path / 'rawdata.h5'
+        with h5py.File(path, 'w') as f:
+            f.create_dataset('robot_obs/time', data=[obs.time for obs in self.robot_obs])
+            f.create_dataset('robot_obs/actual_pose', data=[obs.actual_pose for obs in self.robot_obs])
+            f.create_dataset('robot_obs/actual_force', data=[obs.actual_force for obs in self.robot_obs])
+            f.create_dataset('robot_obs/filtered_force', data=[obs.filtered_force for obs in self.robot_obs])
+
+            f.create_dataset('gripper_obs/time', data=[obs.time for obs in self.gripper_obs])
+            f.create_dataset('gripper_obs/gripper_width', data=[obs.gripper_width for obs in self.gripper_obs])
+            f.create_dataset('gripper_obs/gripper_force', data=[obs.gripper_force for obs in self.gripper_obs])
+
+            self._save_camera(f)
+
+            f.create_dataset('commands/time', data=[cmd.time for cmd in self.commands])
+            f.create_dataset('commands/des_pose', data=[cmd.des_pose for cmd in self.commands])
+            f.create_dataset('commands/des_gripper', data=[cmd.des_gripper for cmd in self.commands])
+            f.create_dataset('commands/adaptive_mode', data=[cmd.adaptive_mode for cmd in self.commands])
+            f.create_dataset('commands/des_zforce', data=[cmd.des_zforce for cmd in self.commands])
+
+            if self.commands:
+                control = [vars(cmd.controller_state) for cmd in self.commands]
+                f.create_dataset('dualsense/time', data=[cmd.time for cmd in self.commands])
+                for key in control[0].keys():
+                    f.create_dataset(f'dualsense/{key}', data=[item[key] for item in control])
+
+            # FDCC replay: per-cycle controller log, every speedL call, and what imp was built from
+            for group, rows, fields in (('control', self.control_log, ControlLog._fields),
+                                        ('speedl', self.speedl_log, SpeedLCmd._fields)):
+                if rows:
+                    for i, name in enumerate(fields):
+                        f.create_dataset(f'{group}/{name}', data=np.asarray([r[i] for r in rows]))
+
+            # Link state of network_iface (the plugged-in cable), polled at network_query_frequency:
+            # teleop's unplug script starts on it, and it tells a seated plug from a near miss
+            if self.network_log:
+                f.create_dataset('network/time', data=np.asarray([t for t, _ in self.network_log]))
+                f.create_dataset('network/status', data=np.asarray([up for _, up in self.network_log]))
+                f['network'].attrs['iface'] = self.network_iface
+                f['network'].attrs['query_frequency'] = self.network_query_frequency
+
+            if self.gc_log:
+                for i, name in enumerate(('time', 'duration', 'generation', 'collected')):
+                    f.create_dataset(f'gc/{name}', data=np.asarray([r[i] for r in self.gc_log]))
+
+            c = f.create_group('config')
+            c.attrs['fdcc_toml'] = self.fdcc_toml
+            c.create_dataset('tcp_offset', data=self.tcp_offset)
+            c.create_dataset('payload_kg', data=self.recv.getPayload())
+            for key, value in (('servo_frequency', self.servo_frequency),
+                               ('input_frequency', self.input_frequency),
+                               ('speedl_time', self.speedl_time), ('force_alpha', self.force_alpha),
+                               ('leash_N', self.leash_N), ('abort_wrench', self.abort_wrench),
+                               ('zforce_gain', self.zforce_gain),
+                               ('zforce_max_speed', self.zforce_max_speed)):
+                c.attrs[key] = value
+
+            m = f.create_group('metadata')
+            dict2hdf5(m, self.metadata)
+
+        print(f'Data saved to {path}')

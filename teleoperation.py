@@ -1,25 +1,46 @@
 from agent.utils.robot_utils import interrupt
+<<<<<<< HEAD
 import robot_execution
 from env import URPose, GRIP_OPEN, GRIP_CLOSED
 import argparse
 import numpy as np
+=======
+from robot import robot_execution
+from robot.env import URPose, GRIP_OPEN, GRIP_CLOSED
+import argparse
+from robot import fdcc
+import numpy as np
+import time
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 import os
 
 GRIP_WIDTH_MM = 10
 GRIP_FORCE_N = 40
 GRIP_SPEED_MMPS = 50
 GRIP_PULLBACK_MM = 10
+<<<<<<< HEAD
+=======
+STIFF_Z_K = 3000.0     # [N/m] on base z while Cross is toggled on, to push the plug in (the click)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 class Teleoperation(robot_execution.RobotExecution):
     # port_pose = URPose(x=-0.1269, y=0.5979, z=0.0730, rx=1.7296, ry=1.7668, rz=-0.760357)
     # release_pose = URPose(x=-0.0297, y=0.7031, z=0.0813, rx=-2.1029, ry=-2.0230, rz=-0.4256)
 
+<<<<<<< HEAD
     port_pose = URPose(x=-0.1225, y=0.4358, z=0.0489, rx=1.7429, ry=1.5768, rz=-0.7897)
+=======
+    port_pose = URPose(x=-0.1205, y=0.4358, z=0.0489, rx=1.7429, ry=1.5768, rz=-0.7897)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     unplug_pose = URPose(x=-0.1242, y=0.4285, z=0.0053, rx=1.6390, ry=1.6874, rz=-0.7822)
     release_pose1 = URPose(x=0.0120, y=0.7152, z=0.0271, rx=-1.8993, ry=-1.7929, rz=-0.4988)
     release_pose2 = URPose(x=-0.2713, y=0.5808, z=0.0271, rx=-1.8993, ry=-1.7928, rz=-0.4988)
     last_obs = None
+<<<<<<< HEAD
+=======
+    stiff_z = False
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
     @staticmethod
     def add_args(parser):
@@ -43,7 +64,31 @@ class Teleoperation(robot_execution.RobotExecution):
         # print(f'Target port = {self.data["target_port"]}')
         pass
 
+<<<<<<< HEAD
     def get_action(self):
+=======
+    def toggle_stiff_z(self):
+        """
+        Cross: leave force mode (as Triangle does), then base z stiff (STIFF_Z_K), the rest
+        at the fdcc.toml gains; again: back. Ramped, and a force held in the port is kept
+        (fdcc.py step 2a). The leash still caps the spring push at [teleop] leash_N.
+        """
+        self.stiff_z = not self.stiff_z
+        if self.stiff_z:
+            if self.iface.adaptive_mode:    # the z-force loop at 10x K would be 10x faster
+                self.iface.adaptive_mode = False
+                self.iface.deactivate_adaptive_mode()
+            K = fdcc._six(self.env.imp.p.K)
+            K[2] = STIFF_Z_K
+            self.env.set_gains(K=K, frame='base')
+        else:
+            self.env.restore_gains()
+        print(f'\nstiff z {"ON" if self.stiff_z else "off"}')
+
+    def get_action(self):
+        if self.iface.act.get('toggle_stiff_z'):
+            self.toggle_stiff_z()
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         if self.last_obs and self.last_obs['network_status']:
             print('Autodetected plugin!')
             return self.unplug_and_release()
@@ -58,17 +103,31 @@ class Teleoperation(robot_execution.RobotExecution):
         return des_pose, des_gripper, adaptive_mode, des_zforce
 
     def move_to_port(self):
+<<<<<<< HEAD
+=======
+        self.stiff_z = False            # the sequence sets its own gains, then restores
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         seq = interrupt(self)
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
         seq.move_to(self.port_pose)
         return self.get_action()
 
     def unplug_and_release(self):
+<<<<<<< HEAD
         seq = interrupt(self)
         seq.gripper(GRIP_OPEN)
         seq.move_to(self.unplug_pose)
         seq.gripper(GRIP_CLOSED)
         seq.move_relative([0, 0, .02, 0, 0, 0], speed=.05)
+=======
+        self.stiff_z = False
+        seq = interrupt(self)
+        seq.release()               # let go of the push before the fingers let go of the plug
+        seq.gripper(GRIP_OPEN)
+        seq.move_to(self.unplug_pose)
+        seq.gripper(GRIP_CLOSED)
+        seq.move_relative([0, 0, .03, 0, 0, 0], speed=.05)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
         r1, r2 = self.release_pose1, self.release_pose2
         rel = np.array(self.release_pose1)
@@ -80,6 +139,7 @@ class Teleoperation(robot_execution.RobotExecution):
             .then(lambda _: self.stop())
         return self.get_action()
 
+<<<<<<< HEAD
     def runtime_info(self):
         obs = self.last_obs
         st = obs['state']
@@ -87,6 +147,29 @@ class Teleoperation(robot_execution.RobotExecution):
         force = obs['state']['filtered_force']
         # print(f"Pose: {st['actual_pose']}", end='\r')
         print(f'URPose(x={p.x:.4f}, y={p.y:.4f}, z={p.z:.4f}, rx={p.rx:.4f}, ry={p.ry:.4f}, rz={p.rz:.4f})', end='\r')
+=======
+    _info_t = 0.
+
+    def runtime_info(self):
+        """FDCC diagnostics every 0.5 s, one scrolling line per window (see Env.fdcc_stats)."""
+        s = self.env.fdcc_stats()
+        net = self.last_obs['network_status']
+        # print(f'loop {s['hz']:4.0f} Hz  F {s['F']:4.1f} N', end='\r')
+        print(f'Pose {URPose(*self.last_obs['state']['actual_pose'])}', end='\r')
+        return
+
+        now = time.perf_counter()
+        if now - self._info_t < 0.5:
+            return
+        self._info_t = now
+        s = self.env.fdcc_stats()
+        net = self.last_obs['network_status']
+        print(f"loop {s['hz']:4.0f} Hz  dt<={s['dt_max_ms']:4.1f} ms  cpu<={s['work_max_ms']:3.1f} ms  slow {s['slow']:3d} | "
+              f"F {s['F']:4.1f} N (max {s['F_max']:4.1f})  tau {s['tau']:4.2f} Nm  F@c {s['F_c']:4.1f} N | "
+              f"err {s['e_mm']:4.1f} mm {s['e_deg']:4.1f} deg (max {s['e_max_mm']:4.1f} mm)  leash {s['leash_pct']:3.0f}% | "
+              f"v {s['v_mm_s']:4.1f} mm/s (max {s['v_max_mm_s']:4.1f})  at vmax {s['vsat_pct']:3.0f}%  ff {s['ff_min']:.2f} | "
+              f"{s['state']}  net {int(net)}")
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
     def __init__(self, args):
         control_freq = 100

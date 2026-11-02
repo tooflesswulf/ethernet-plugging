@@ -15,6 +15,10 @@ from agent.dataset.sequence import ActionMode, StitchedSequenceDataset
 
 DEVICE = "cuda:0"
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 def to_device(x, device=DEVICE):
     if torch.is_tensor(x):
         return x.to(device)
@@ -28,6 +32,7 @@ def batch_to_device(batch, device="cuda:0"):
     vals = [to_device(getattr(batch, field), device) for field in batch._fields]
     return type(batch)(*vals)
 
+<<<<<<< HEAD
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
           use_wandb=False, log_interval=10, save_interval=10,
@@ -48,6 +53,41 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=128,
+=======
+
+def train(name, dataset_path, ckpt_dir, epochs=100,
+          predict_done=True, end_signal_steps=None,
+          obs_fields=None, pose_target='pose', action_anchor=None, impedance_fields=(),
+          encoder_type='resnet', noise_net=None, obs_horizon=None, short_obs_horizon=1,
+          action_horizon=16, batch_size=128,
+          max_n_episodes=50, init_ckpt=None, lr=1e-4, use_wandb=False, log_interval=10, save_interval=10,
+          device='cuda:0'):
+    action_mode: ActionMode = 'local_delta'
+    if obs_fields is None:
+        obs_fields = ['pose', 'gripper_width']
+        if 'force' in name:
+            obs_fields += ['force']
+    if obs_horizon is None:
+        # vit: CrossUnet1D2 attends over a history of obs_horizon frames (long-range context)
+        obs_horizon = 4 if encoder_type == 'vit' else 1
+    # a state-only policy never looks at images: don't decode any
+    img_cond_steps = 0 if encoder_type == 'none' else obs_horizon
+    action_kwargs = dict(predict_done=predict_done, end_signal_steps=end_signal_steps,
+                         pose_target=pose_target, action_anchor=action_anchor,
+                         impedance_fields=impedance_fields)
+    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                      cond_steps=obs_horizon, img_cond_steps=img_cond_steps,
+                                      horizon_steps=action_horizon, action_mode=action_mode, device=device,
+                                      max_n_episodes=max_n_episodes, **action_kwargs)
+
+    val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
+                                          cond_steps=obs_horizon, img_cond_steps=img_cond_steps,
+                                          horizon_steps=action_horizon, max_n_episodes=1, action_mode=action_mode, device=device,
+                                          **action_kwargs)
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         num_workers=8,
         shuffle=True,
     )
@@ -56,6 +96,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     # Normalization stats from the training set; stored as buffers inside the
     # policy so they're saved in the checkpoint for un-normalizing at eval time.
     norm_stats = compute_norm_stats(dataset)
+<<<<<<< HEAD
     policy = DiffusionPolicy(action_horizon=16, obs_horizon=obs_horizon, norm_stats=norm_stats,
                              state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
                              action_mode=dataset.action_mode,
@@ -63,6 +104,35 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                              obs_fields=obs_fields).to(device)
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
+=======
+    policy = DiffusionPolicy(action_horizon=action_horizon, obs_horizon=obs_horizon, norm_stats=norm_stats,
+                             state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
+                             action_mode=dataset.action_mode,
+                             grip_stats=dataset.grip_stats,
+                             framerate=dataset.framerate,
+                             predict_done=predict_done,
+                             impedance_fields=dataset.impedance_fields,
+                             action_anchor=dataset.action_anchor,
+                             obs_fields=obs_fields,
+                             encoder_type=encoder_type,
+                             noise_net=noise_net,
+                             short_obs_horizon=short_obs_horizon).to(device)
+    if init_ckpt is not None:
+        # Fine-tune: start from the checkpoint's (EMA) weights. Its state_dict also carries its
+        # normalization buffers, which the weights were trained against, so they replace the
+        # stats computed from this dataset above.
+        ckpt = torch.load(init_ckpt, map_location=device, weights_only=False)
+        mismatched = {k: (v, policy.config[k]) for k, v in ckpt['config'].items() if policy.config.get(k) != v}
+        assert not mismatched, f'{init_ckpt} config differs from this run (ckpt, run): {mismatched}'
+        policy.load_state_dict(ckpt['model_state_dict'])
+        for key, data in (('state', dataset.obs), ('action', np.asarray(dataset.actions).reshape(-1, dataset.act_dim))):
+            lo, hi = getattr(policy, f'{key}_min').cpu().numpy(), getattr(policy, f'{key}_max').cpu().numpy()
+            data = np.asarray(data, dtype=np.float32)  # buffers are float32; compare at their precision
+            outside = ((data < lo) | (data > hi)).any(axis=1).mean()
+            print(f'Fine-tuning from {init_ckpt}: {outside:.2%} of {key}s fall outside its normalization range')
+    ema = EMAModel(parameters=policy.parameters(), power=0.75)
+    opt = torch.optim.AdamW(params=policy.parameters(), lr=lr, weight_decay=1e-6)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     lr_scheduler = get_scheduler(
         name='cosine',
         optimizer=opt,
@@ -76,6 +146,10 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     step = 0
     for epoch in pbar:
         epoch_losses = []
+<<<<<<< HEAD
+=======
+        policy.train()
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         for i, batch in enumerate(dataloader):
             batch = batch_to_device(batch, device)
             loss = policy.compute_loss(batch.actions, batch.conditions)
@@ -105,24 +179,53 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
         def binary_correctness(pred, tgt):
             return (torch.sign(pred) == torch.sign(tgt)).float().mean().item()
 
+<<<<<<< HEAD
         val_mses, gripper_correctness, done_correctness = [], [], []
+=======
+        # Per-batch metrics, weighted by batch size when averaged: the last batch can be a
+        # handful of chunks (all from the episode's end), and must not count as a full one.
+        val_mses, pose_mses, gripper_correctness, done_correctness, val_ns = [], [], [], [], []
+        imp_logmses = {f: [] for f in policy.impedance_fields}
+        policy.eval()  # no dropout / augmentation (CrossUnet1D2) during validation
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         for i, batch in enumerate(val_dataloader):
             with torch.no_grad():
                 batch = batch_to_device(batch, device)
                 actions = batch.actions.float()
                 # predict_action returns unnormalized actions, comparable to raw dataset actions
                 naction = policy.predict_action(batch.conditions)
+<<<<<<< HEAD
 
                 val_mses.append(nn.functional.mse_loss(naction, actions).mean().item())
+=======
+                val_ns.append(len(actions))
+
+                val_mses.append(nn.functional.mse_loss(naction, actions).mean().item())
+                pose_mses.append(nn.functional.mse_loss(naction[:, :, :6], actions[:, :, :6]).item())
+                # impedance gains are log10 values, 6 per field
+                imp = policy.impedance_slice
+                for j, f in enumerate(policy.impedance_fields):
+                    sl = slice(imp.start + 6 * j, imp.start + 6 * (j + 1))
+                    imp_logmses[f].append(nn.functional.mse_loss(naction[:, :, sl], actions[:, :, sl]).item())
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
                 # gripper is channel 6; the optional end-of-episode signal is channel 7.
                 gripper_correctness.append(binary_correctness(naction[:, :, 6], actions[:, :, 6]))
                 if policy.predict_done:
                     done_correctness.append(binary_correctness(naction[:, :, 7], actions[:, :, 7]))
 
+<<<<<<< HEAD
         val_log = {"val/mse_loss": np.mean(val_mses),
                    "val/gripper_correctness": np.mean(gripper_correctness), "val/epoch": epoch}
         if done_correctness:
             val_log["val/done_correctness"] = np.mean(done_correctness)
+=======
+        val_mean = lambda v: np.average(v, weights=val_ns)
+        val_log = {"val/mse_loss": val_mean(val_mses), "val/pose_mse": val_mean(pose_mses),
+                   **{f"val/{f}_logmse": val_mean(v) for f, v in imp_logmses.items()},
+                   "val/gripper_correctness": val_mean(gripper_correctness), "val/epoch": epoch}
+        if done_correctness:
+            val_log["val/done_correctness"] = val_mean(done_correctness)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         logger.log(val_log, step=step)
 
     # save the lastest model (with EMA weights applied)
@@ -135,18 +238,70 @@ def parse_args():
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--epochs', type=int, default=150)
+<<<<<<< HEAD
     parser.add_argument('--data_dirs', nargs='+', type=str,  default=['/zfsauton/scratch/yiqiw2/100%/datasets/',])
     parser.add_argument('--ckpt_dir', type=str, default='logs')
     parser.add_argument('--end_signal', action='store_true', default=True)
     parser.add_argument('--end_steps', type=int, default=None)
     return parser.parse_args()
+=======
+    parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets/')
+    parser.add_argument('--ckpt_dir', type=str, default='logs')
+    parser.add_argument('--end_signal', action='store_true', default=True)
+    parser.add_argument('--end_steps', type=int, default=None)
+    parser.add_argument('--max_episodes', type=int, default=50,
+                        help='train on the first N episodes of the dataset')
+    parser.add_argument('--init_ckpt', type=str, default=None,
+                        help='fine-tune: start from this checkpoint (keeps its normalization stats; '
+                             'the run\'s flags must reproduce its config)')
+    parser.add_argument('--lr', type=float, default=1e-4, help='peak learning rate (cosine schedule)')
+    parser.add_argument('--obs_fields', nargs='+', default=None,
+                        help="state observation fields (default: pose gripper_width, + force if 'force' in --name); "
+                             "log_<field> is log10 of a field, e.g. log_stiffness for the current K; "
+                             "target_offset is the spring target relative to the arm")
+    parser.add_argument('--pose_target', type=str, default='pose', choices=['pose', 'target_pose'],
+                        help="pose actions: actual TCP pose, or the impedance controller's spring target")
+    parser.add_argument('--action_anchor', type=str, default=None, choices=['pose', 'target_pose'],
+                        help='pose the delta actions are relative to at the chunk start, and eval integrates '
+                             'from (default: --pose_target, i.e. the cloned trajectory continues itself)')
+    parser.add_argument('--impedance_fields', nargs='*', default=[],
+                        choices=['stiffness', 'damping', 'mass'],
+                        help='impedance gains to predict (log10, base-frame diagonals)')
+    parser.add_argument('--encoder_type', type=str, default='resnet', choices=['resnet', 'vit', 'none'],
+                        help='resnet: ResNet18 + FiLM ConditionalUnet1D; '
+                             'vit: short/long-range ViTs + cross-attention CrossUnet1D2; '
+                             'none: no images, state-only FiLM ConditionalUnet1D')
+    parser.add_argument('--noise_net', type=str, default=None, choices=['unet', 'crossunet'],
+                        help='noise prediction net: ConditionalUnet1D (FiLM) or CrossUnet1D2 (cross-attention); '
+                             'default: crossunet for vit, unet otherwise. Only none takes either.')
+    parser.add_argument('--action_horizon', type=int, default=16, help='actions per predicted chunk')
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--obs_horizon', type=int, default=None,
+                        help='observation history frames (default: 1 for resnet, 4 for vit)')
+    parser.add_argument('--short_obs_horizon', type=int, default=1,
+                        help='vit: most recent frames seen by the short-range ViT')
+    parser.add_argument('--impedance', action='store_true', default=False,
+                        help='shorthand for --pose_target target_pose --impedance_fields stiffness damping mass '
+                             'with pose gripper_width force observations')
+    args = parser.parse_args()
+    if args.impedance:
+        args.pose_target = 'target_pose'
+        args.impedance_fields = args.impedance_fields or ['stiffness', 'damping', 'mass']
+        args.obs_fields = args.obs_fields or ['pose', 'gripper_width', 'force']
+    return args
+
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 if __name__ == '__main__':
     args = parse_args()
     if args.name is None:
         args.name = pathlib.Path(args.ckpt_dir).stem
         print('Name not given. Assuming name for logging and wandb:', args.name)
+<<<<<<< HEAD
     dataset_paths = args.data_dirs
+=======
+    dataset_path = pathlib.Path(args.data_dir)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     ckpt_path = pathlib.Path(args.ckpt_dir) / args.name
 
     # if the ckpt_path already exists, save to a subdirectory with the name of the run (e.g. logs/pretrain-ethernet-unplug-red-topdown)
@@ -160,6 +315,17 @@ if __name__ == '__main__':
             # exit(1)
 
     print('Saving checkpoints to:', ckpt_path)
+<<<<<<< HEAD
     train(name=args.name, dataset_path=dataset_paths, ckpt_dir=ckpt_path,
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
+=======
+    train(name=args.name, dataset_path=dataset_path, ckpt_dir=ckpt_path,
+          predict_done=args.end_signal, end_signal_steps=args.end_steps,
+          obs_fields=args.obs_fields, pose_target=args.pose_target, action_anchor=args.action_anchor,
+          impedance_fields=args.impedance_fields, max_n_episodes=args.max_episodes,
+          encoder_type=args.encoder_type, noise_net=args.noise_net, obs_horizon=args.obs_horizon,
+          short_obs_horizon=args.short_obs_horizon,
+          action_horizon=args.action_horizon, batch_size=args.batch_size,
+          init_ckpt=args.init_ckpt, lr=args.lr,
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)

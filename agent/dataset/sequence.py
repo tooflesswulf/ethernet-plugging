@@ -1,9 +1,15 @@
+<<<<<<< HEAD
 
+=======
+from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
+import torchvision.transforms.functional as F
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 from collections import namedtuple
 from dataclasses import dataclass
 from typing import Literal
 from PIL import Image
 from tqdm import tqdm
+<<<<<<< HEAD
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 from einops import rearrange, repeat
 import numpy as np
@@ -12,10 +18,22 @@ import pathlib
 import os
 # from agent.utils.utils import get_chunk_actions
 
+=======
+from einops import rearrange, repeat
+import numpy as np
+import h5py, pathlib, os, torch
+
+
+IMAGE_SIZE = 128
+# Framerate assumed for datasets/checkpoints that predate the stored `framerate`
+# metadata; everything collected before that was sampled/run at 20Hz.
+DEFAULT_FRAMERATE = 20.0
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
 GripperStats = namedtuple('GripperStats', ['grip_width_mm', 'grip_force_n', 'grip_speed_mmps', 'grip_pullback_mm'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
+<<<<<<< HEAD
 # def get_images(dir_path, total_num_steps=None, img_size=128):
 #     N = len(os.listdir(dir_path)) if total_num_steps is None else min(len(os.listdir(dir_path)), total_num_steps)
 #     images = []
@@ -45,6 +63,40 @@ def get_images(dir_path, total_num_steps=None, img_size=128, num_workers=8):
         )
 
     return np.stack(images)
+=======
+
+def target_offset(target_pose, actual_pose):
+    """
+    Where the impedance spring target sits relative to the arm, in base axes:
+    [t_target - t_actual, rotvec(R_target R_actual^-1)]. (..., 6) poses in, (..., 6) out.
+    Observed as its own field ('target_offset') rather than the absolute target: min-max
+    normalized over the workspace, a few mm between two absolute poses all but vanishes.
+    """
+    target_pose, actual_pose = np.asarray(target_pose, float), np.asarray(actual_pose, float)
+    rot = (R.from_rotvec(target_pose[..., 3:]) * R.from_rotvec(actual_pose[..., 3:]).inv()).as_rotvec()
+    return np.concatenate([target_pose[..., :3] - actual_pose[..., :3], rot], axis=-1)
+
+
+# metadata attr: [min, max] gripper width (mm) of the full data a dataset was built from
+# (scripts/rawdata_to_dataset.py), carried through split_dataset.py / concat_datasets.py.
+# The binary gripper label thresholds at its midpoint, so it means open vs closed even in a
+# dataset trimmed to one phase (an insert-only dataset never opens), and train / val
+# subsets of a dataset label alike.
+GRIP_RANGE_ATTR = 'grip_width_range'
+
+
+def grip_threshold(width_range):
+    """Gripper width (mm) above which the binary gripper action is +1 (open)."""
+    lo, hi = width_range
+    return (float(lo) + float(hi)) / 2
+
+
+# Observation fields computed from stored dataset fields: name -> fn(h5 file, n steps)
+DERIVED_OBS_FIELDS = {
+    'target_offset': lambda f, n: target_offset(f['target_pose'][:n], f['pose'][:n]),
+}
+
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 class StitchedSequenceDataset(torch.utils.data.Dataset):
     """
@@ -62,7 +114,11 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
+<<<<<<< HEAD
         dataset_paths,
+=======
+        dataset_path,
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         horizon_steps=16,
         cond_steps=1,
         img_cond_steps=1,
@@ -71,10 +127,36 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         action_mode: ActionMode = 'local_delta',
         predict_done=True,
         end_signal_steps=None,
+<<<<<<< HEAD
         transform=None,
         img_size=96,
         device="cuda:0",
     ):
+=======
+        pose_target='pose',
+        action_anchor=None,
+        impedance_fields=(),
+        transform=None,
+        device="cuda:0",
+    ):
+        """
+        pose_target:      dataset field the pose actions come from. 'pose' clones the actual
+                          TCP pose (stiff controller); 'target_pose' clones the impedance
+                          controller's spring target.
+        action_anchor:    dataset field the delta action modes are relative to at the chunk
+                          start, and what eval integrates from (DiffusionPolicy.anchor_pose);
+                          None = pose_target. Anchoring a target chunk to the ACTUAL pose made
+                          overlapping chunks disagree by the arm's lag behind the target, and
+                          the realtime ensemble snapped back to the arm at every new chunk (a
+                          20 Hz sawtooth, fed forward as D * v_t). Anchored to the target, each
+                          chunk continues the target the controller already has.
+        obs_fields:       dataset fields of the state observation; 'log_<field>' is log10 of
+                          <field> (e.g. 'log_stiffness', the current K); DERIVED_OBS_FIELDS
+                          (e.g. 'target_offset') are computed from stored fields.
+        impedance_fields: gain fields appended to each action as log10, e.g.
+                          ('stiffness', 'damping', 'mass'); 6 base-frame diagonal values each.
+        """
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         assert img_cond_steps <= cond_steps, 'consider using more cond_steps than img_cond_steps'
         self.horizon_steps = horizon_steps
         self.cond_steps = cond_steps  # states (proprio, etc.)
@@ -82,6 +164,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.device = device
         self.action_mode = action_mode
         self.transform = transform
+<<<<<<< HEAD
         self.img_size = img_size
         self.max_n_episodes = max_n_episodes
         self.g_thr = 18 # (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
@@ -121,6 +204,93 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
         self.obs_dim = self.obs.shape[-1]
         self._precompute_actions()  # precompute all actions for faster sampling during training
+=======
+        self.pose_target = pose_target
+        self.action_anchor = pose_target if action_anchor is None else action_anchor
+        self.impedance_fields = tuple(impedance_fields)
+
+        self.predict_done = predict_done
+        self.end_signal_steps = end_signal_steps if end_signal_steps is not None else horizon_steps
+
+        self.max_n_episodes = max_n_episodes
+        self.dataset_path = pathlib.Path(dataset_path)
+
+        # Load dataset to device
+        with h5py.File(self.dataset_path / 'dataset.h5', 'r') as f:
+            traj_lengths = f['metadata/length'][:max_n_episodes]  # 1-D array
+            total_num_steps = np.sum(traj_lengths)
+
+            # Observations
+            all_obs = []
+            for key in obs_fields:
+                if key.startswith('metadata/'):
+                    # Metadata fields need to be expanded to per-timestep values for easier indexing later (e.g. rng)
+                    meta_vals = np.array(f[key][:max_n_episodes])
+                    vals_rep = [np.repeat(val[None], traj_len, axis=0)
+                                for val, traj_len in zip(meta_vals, traj_lengths)]
+                    all_obs.append(np.concatenate(vals_rep, axis=0))
+                elif key in DERIVED_OBS_FIELDS:
+                    all_obs.append(DERIVED_OBS_FIELDS[key](f, total_num_steps))
+                elif key.startswith('log_'):
+                    all_obs.append(np.log10(f[key[len('log_'):]][:total_num_steps]))
+                else:
+                    all_obs.append(f[key][:total_num_steps])
+            all_obs = np.c_[*all_obs]
+
+            # Actions
+            g_widths = np.array(f['gripper_width'][:total_num_steps])  # (N,)
+            action_poses = np.array(f[pose_target][:total_num_steps])  # (N, 6)
+            anchor_poses = np.array(f[self.action_anchor][:total_num_steps])  # (N, 6)
+            gains = [np.array(f[k][:total_num_steps]) for k in self.impedance_fields]
+            log_gains = np.log10(np.concatenate(gains, axis=1)) if gains else np.zeros((total_num_steps, 0))
+
+            if f['images'].attrs['stored_as'] == 'image':
+                self.h5_image = True
+            elif f['images'].attrs['stored_as'] == 'filepath':
+                self.h5_image = False
+            else:
+                raise ValueError('Invalid image storage format in dataset.')
+
+            # Rate the raw data was resampled at (scripts/rawdata_to_dataset.py --framerate).
+            # It gets baked into the policy so evaluation replays actions at the same rate.
+            if 'framerate' in f['metadata'].attrs:
+                self.framerate = float(f['metadata'].attrs['framerate'])
+            else:
+                print(f'Warning: dataset framerate not found in {self.dataset_path}. '
+                      f'Assuming {DEFAULT_FRAMERATE}Hz.')
+                self.framerate = DEFAULT_FRAMERATE
+
+            if GRIP_RANGE_ATTR in f['metadata'].attrs:
+                grip_range = f['metadata'].attrs[GRIP_RANGE_ATTR]
+            else:
+                # Older datasets: the whole file's range (not just the max_n_episodes loaded,
+                # so a train and a val subset still agree). Wrong for a phase-trimmed dataset.
+                all_widths = f['gripper_width'][:]
+                grip_range = (all_widths.min(), all_widths.max())
+                print(f'Warning: {self.dataset_path} has no metadata/{GRIP_RANGE_ATTR}; gripper '
+                      f'labels threshold at the midpoint of its own widths {tuple(map(float, grip_range))}.')
+            self.grip_threshold = grip_threshold(grip_range)
+
+            # Gripper metadata
+            self.grip_stats = None
+            if 'metadata/grip_width_mm' in f:
+                self.grip_stats = GripperStats(
+                    grip_width_mm=f['metadata/grip_width_mm'][0],
+                    grip_force_n=f['metadata/grip_force_n'][0],
+                    grip_speed_mmps=f['metadata/grip_speed_mmps'][0],
+                    grip_pullback_mm=f['metadata/grip_pullback_mm'][0]
+                )
+            else:
+                print('Warning: Gripper metadata not found in dataset. Gripper stats will be Env defaults.')
+
+        # Store dataset in memory for fast sampling during training
+        self.indices = self.make_indices(traj_lengths, horizon_steps)
+        self.obs = all_obs  # (N, obs_dim)
+        self.h5 = None
+        self._precompute_actions(g_widths, action_poses, anchor_poses, log_gains)
+
+        self.obs_dim = self.obs.shape[1]
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         self.act_dim = self.actions.shape[-1]
 
     def __len__(self):
@@ -142,23 +312,49 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         # Conditioning observations: current and history states + images
         obs_np = np.array([self.obs[max(start - t, ep_start)]
                           for t in reversed(range(self.cond_steps))])  # more recent is at the end, # cond_steps x dim
+<<<<<<< HEAD
         images = torch.stack([self.images[max(start - t, ep_start)]
                              for t in reversed(range(self.img_cond_steps))])  # img_cond_steps x H x W x C
         conditions = {'state': obs, 'rgb': rearrange(images, ' T H W C -> T C H W') / 255.0}
+=======
+        images = np.array([self.getimage(max(start - t, ep_start))
+                           for t in reversed(range(self.img_cond_steps))])
+        conditions = {'state': obs_np, 'rgb': images / 255.0}
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
         batch = DataBatch(self.actions[idx], conditions)
         if self.transform is not None:
             batch = self.transform(batch)
         return batch
 
+<<<<<<< HEAD
     def make_indices(self, traj_lengths, horizon_steps, traj_start = 0):
+=======
+    def getimage(self, idx):
+        if self.h5 is None:
+            self.h5 = h5py.File(self.dataset_path / 'dataset.h5', 'r')
+        im = self.h5['images'][idx]
+        if self.h5_image:
+            img = Image.fromarray(im).resize((IMAGE_SIZE, IMAGE_SIZE))
+        else:
+            im_path = self.dataset_path / im.decode()
+            img = Image.open(im_path).resize((IMAGE_SIZE, IMAGE_SIZE))
+        im_np = np.array(img).transpose(2, 0, 1)  # (C, H, W)
+        return im_np
+
+    def make_indices(self, traj_lengths, horizon_steps):
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         """
         makes indices for sampling from dataset;
         each index maps to a datapoint and its bounds within the same trajectory.
         Returns list[(start_index, traj_start_index, traj_end_index)]
         """
         indices = []
+<<<<<<< HEAD
         
+=======
+        traj_start = 0
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         for traj_length in traj_lengths:
             max_start = traj_start + traj_length - horizon_steps
             traj_end = traj_start + traj_length
@@ -166,7 +362,11 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             traj_start += traj_length
         return np.array(indices)
 
+<<<<<<< HEAD
     def _precompute_actions(self):
+=======
+    def _precompute_actions(self, g_widths, action_poses, anchor_poses, log_gains):
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         actions = []
         for i in tqdm(range(len(self)), desc='precomputing actions'):
             start, ep_start, ep_end = self.indices[i]
@@ -175,12 +375,25 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 # TODO: replication pad if end out of ep_end
                 raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
 
+<<<<<<< HEAD
             g_width = self.g_widths[start:end]
             poses = self.poses[start:end]
 
             g_action = self.gripper_action(g_width, threshold=self.g_thr)
             pose_action = self.pose_action(poses)
             actions.append(np.c_[pose_action, g_action])
+=======
+            g_width = g_widths[start:end]
+
+            g_action = self.gripper_action(g_width, threshold=self.grip_threshold)
+            pose_action = self.pose_action(action_poses[start:end], ref_pose=anchor_poses[start])
+            chunk = np.c_[pose_action, g_action]
+            if self.predict_done:
+                chunk = np.c_[chunk, self.done_action(start, end, ep_end)]
+            # [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field)]
+            chunk = np.c_[chunk, log_gains[start:end]]
+            actions.append(chunk)
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         self.actions = np.array(actions)
         return self.actions
 
@@ -200,6 +413,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         done = abs_t >= (ep_end - self.end_signal_steps)
         return 2 * done.astype(int).reshape(-1, 1) - 1
 
+<<<<<<< HEAD
     def _pose_action_absolute(self, poses):
         # Returns (N, 6): [tx, ty, tz, rx, ry, rz]
         return poses
@@ -215,6 +429,28 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
         delta_xyz = poses[1:, :3] - poses[:1, :3]
         eulers = np.array([ R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:] ])
+=======
+    # The delta modes encode `poses` relative to `ref_pose`, the action_anchor pose at the
+    # chunk start (DiffusionPolicy.integrate_actions integrates from the live one). When
+    # the anchor is the cloned field itself, ref_pose == poses[0].
+
+    def _pose_action_absolute(self, poses, ref_pose):
+        # Returns (N, 6): [tx, ty, tz, rx, ry, rz]
+        return poses
+
+    def _pose_action_local_delta(self, poses, ref_pose):
+        # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
+        transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
+        t0 = Tf.from_components(ref_pose[:3], R.from_rotvec(ref_pose[3:]))
+        deltas = [t0.inv() * t for t in transforms]
+        return np.array([delta.as_exp_coords() for delta in deltas])
+
+    def _pose_action_umi(self, poses, ref_pose):
+        # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
+        poses = np.concatenate([ref_pose[None], poses[1:]])  # first entry is the reference
+        delta_xyz = poses[1:, :3] - poses[:1, :3]
+        eulers = np.array([R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:]])
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
         delta_eulers = eulers[1:] - eulers[:1]
         # wrap to [-pi, pi]
@@ -222,6 +458,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
         return np.concatenate([delta_umi, delta_umi[-1:]])  # poor decision here, pad by 1 by repeating last one.
 
+<<<<<<< HEAD
     def _pose_action_global_delta(self, poses):
         # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
         transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
@@ -311,3 +548,25 @@ if __name__ == '__main__':
 
     for _ in dataset:
         break
+=======
+    def _pose_action_global_delta(self, poses, ref_pose):
+        # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
+        transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
+        t0 = Tf.from_components(ref_pose[:3], R.from_rotvec(ref_pose[3:]))
+        deltas = [t * t0.inv() for t in transforms]
+        return np.array([delta.as_exp_coords() for delta in deltas])
+
+    def pose_action(self, poses, ref_pose=None):
+        if ref_pose is None:
+            ref_pose = poses[0]
+        if self.action_mode == 'absolute':
+            return self._pose_action_absolute(poses, ref_pose)
+        elif self.action_mode == 'local_delta':
+            return self._pose_action_local_delta(poses, ref_pose)
+        elif self.action_mode == 'global_delta':
+            return self._pose_action_global_delta(poses, ref_pose)
+        elif self.action_mode == 'umi':
+            return self._pose_action_umi(poses, ref_pose)
+        else:
+            raise ValueError(f"Invalid action_mode: {self.action_mode}")
+>>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
