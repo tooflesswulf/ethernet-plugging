@@ -6,6 +6,7 @@ import rtde_receive
 import numpy as np
 import threading
 import pathlib
+import gc
 import h5py
 import time
 import cv2
@@ -210,6 +211,19 @@ class Env:
         self.image_idx = 0
         self.metadata = metadata
         self.camera = None               # opened by reset()
+        # Every cyclic GC pass holds the GIL, stalling all the threads here: log each one
+        # (start, duration, generation, collected) to line up with gaps in robot_obs/time
+        self.gc_log: list[tuple[float, float, int, int]] = []
+        self._gc_start = None
+        gc.callbacks.append(self._gc_callback)
+
+    def _gc_callback(self, phase, info):
+        if phase == 'start':
+            self._gc_start = time.time()
+        elif self._gc_start is not None:
+            t = self._gc_start - getattr(self, 't0', self._gc_start)
+            self.gc_log.append((t, time.time() - self._gc_start, info['generation'], info['collected']))
+            self._gc_start = None
 
     def wait_for_obs(self):
         while len(self.camera_obs) == 0 or len(self.robot_obs) == 0 or len(self.gripper_obs) == 0:
@@ -372,6 +386,7 @@ class Env:
         self.speedl_log: list[SpeedLCmd] = []
         self.network_log: list[tuple[float, bool]] = []   # (time, link up) at every network poll
         self.network_status = False      # until _network_loop polls
+        self.gc_log = []
         self.fdcc_target = None          # obs 'target_pose' is the arm until the control loop runs
         self.ctrl.zeroFtSensor()
         self._force_filtered = np.zeros(6)   # filter_force restarts with the zeroed sensor
@@ -954,6 +969,10 @@ class Env:
                 f.create_dataset('network/status', data=np.asarray([up for _, up in self.network_log]))
                 f['network'].attrs['iface'] = self.network_iface
                 f['network'].attrs['query_frequency'] = self.network_query_frequency
+
+            if self.gc_log:
+                for i, name in enumerate(('time', 'duration', 'generation', 'collected')):
+                    f.create_dataset(f'gc/{name}', data=np.asarray([r[i] for r in self.gc_log]))
 
             c = f.create_group('config')
             c.attrs['fdcc_toml'] = self.fdcc_toml
