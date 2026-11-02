@@ -34,7 +34,7 @@ POLICY_PHASES = ('pickup', 'insert')
 
 
 class EvalSplits(EvalRealtimeChunking):
-    PICKUP_FZ_MAX = 5.0     # [N] z-force that ends pickup, as DpadDown (pressing into the box)
+    PICKUP_FZ_MAX = 10.0     # [N] z-force that ends pickup, as DpadDown (pressing into the box)
 
     def __init__(self, pickup_ckpt, insert_ckpt, device='cuda', insert_done=False, **kwargs):
         # The insert policy loads in its worker while the base class loads the pickup one
