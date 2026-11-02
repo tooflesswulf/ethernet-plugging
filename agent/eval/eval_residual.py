@@ -508,6 +508,12 @@ class ResidualEnv:
     def limits(self):
         return dict(self._runner.limits)
 
+    @property
+    def iface(self):
+        """The DualSenseInterface the run loop updates every tick, for a correction that reads
+        the operator's input. Look it up at each decision: a reconnect (rearm) replaces it."""
+        return self._runner.iface
+
     def close(self):
         """Stop the policy workers (and the robot, if run() was never called)."""
         self._runner.shutdown()
