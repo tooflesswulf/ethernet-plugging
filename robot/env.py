@@ -13,7 +13,7 @@ import os
 
 from robot.net_isup import is_network_up
 from robot.util import URPose, clamp, slerp, interpolate, episode_index, dict2hdf5
-from robot.camera import Camera
+from robot.camera import CameraProcess
 from robot import fdcc
 from robot import wsg
 
@@ -316,7 +316,8 @@ class Env:
             if self.dataset_path is not None:
                 self.save_data()
         if self.camera is None:          # a second reset() reuses it: the device is already open
-            self.camera = Camera(sid="843212070496", crop_mode=self.camera_crop_mode)
+            # in a child process: a late frame would otherwise stall every thread here (see camera.py)
+            self.camera = CameraProcess(sid="843212070496", crop_mode=self.camera_crop_mode)
 
         # ============================================================
         # Home / open gripper
