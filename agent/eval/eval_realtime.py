@@ -28,8 +28,7 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         grip = GripperStats(*self.policy.grip_stats)
         # Episode metadata (rawdata.h5 /metadata), e.g. for recording demonstrations: the policy's
         # gripper settings are added, as teleoperation.py records its GRIP_* (training reads them).
-        if env_metadata is not None:
-            env_metadata = {**grip._asdict(), **env_metadata}
+        env_metadata = {**grip._asdict(), **(env_metadata or {})}
 
         # Commands go out at control_freq, independent of the policy's framerate: the buffer
         # spaces each chunk's actions at 1 / framerate and interpolates them in time. At
