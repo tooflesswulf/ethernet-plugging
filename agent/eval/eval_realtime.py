@@ -7,6 +7,7 @@ from robot import robot_execution
 import numpy as np
 import threading
 import argparse
+import gc
 import time
 import os
 
@@ -60,6 +61,13 @@ class EvalRealtimeChunking(robot_execution.RobotExecution):
         if self.wait_circle:
             wait_for_circle(self.env, self.iface, close_gripper=False)
         self.worker.wait_ready()
+        if not gc.get_freeze_count():
+            # The CPU copies of the policies and torch are ~0.5M GC-tracked objects: a full
+            # collection over them took ~120 ms, holding the GIL, so every env thread (the
+            # 500 Hz control loop included) froze. Everything loaded so far lives for the
+            # whole run: move it out of the collector's reach, once.
+            gc.collect()
+            gc.freeze()
         print("Starting real-time chunked evaluation loop...")
         self._t_pred_start = time.time()
         self.obs_history.clear()
