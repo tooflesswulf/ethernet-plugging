@@ -103,7 +103,7 @@ class EvalSplits(EvalRealtimeChunking):
         seq.move_relative([0, 0, .03, 0, 0, 0], speed=.05)
 
         r1, r2 = Teleoperation.release_pose1, Teleoperation.release_pose2
-        box1 = [-0.03,  0.72,  0.08] # Custom drop box
+        box1 = [-0.05,  0.72,  0.08] # Custom drop box
         box2 = [-0.13,  0.60,  0.08]
         rel = np.array(r1)
         lo, hi = np.minimum(box1[:2], box2[:2]), np.maximum(box1[:2], box2[:2])
