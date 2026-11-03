@@ -18,7 +18,9 @@ so the source dataset directories must stay where they are.
 Episodes recorded by agent/eval/eval_splits.py or eval_residual.py (e.g. the insert DAgger
 rollouts of experiments/dagger_insert.py) carry the boundaries in phases.json instead: the
 end of pickup, the start of insert (transport done) and its end, kept if it ended on the
-network. Other episodes without the scripted markers (e.g. DAgger rollouts from
+network; an insert where the policy commanded the gripper open before the network came up
+(the plug seated, the link not up yet) ends just before that command instead. Other
+episodes without the scripted markers (e.g. DAgger rollouts from
 teleoperation_rl.py) are skipped with a warning. --phases insert writes only the insert
 dataset (the pickups of policy rollouts are no demonstrations).
 
@@ -37,6 +39,7 @@ import numpy as np
 
 STITCHED_FIELDS = ['pose', 'force', 'gripper_width', 'gripper_force',
                    'target_pose', 'stiffness', 'damping', 'mass']
+GRIP_OPEN = 0          # robot/env.py: commands/des_gripper
 SCRIPTED_K = 2999.     # fdcc.toml [scripted] stiffness is 3000 N/m; teleop runs at 300
 PHASES = ('pickup', 'insert')
 GRIP_RANGE_ATTR = 'grip_width_range'   # agent/dataset/sequence.py
@@ -54,7 +57,7 @@ def grip_width_range(f: h5py.File) -> np.ndarray:
 class Segments:
     t_down: float           # DpadDown: pickup ends, transport starts
     t_transport_end: float  # scripted gains restored at the port pose
-    t_net: float            # network up: insert ends, unplug starts
+    t_net: float            # network up (or, in phases.json episodes, the first gripper-open command): insert ends
     t_final: float          # last sample of any stream (rawdata_to_dataset's tf)
 
 
@@ -93,15 +96,19 @@ def find_segments(raw_h5: pathlib.Path) -> Segments:
 
 def phases_json_segments(ep_dir: pathlib.Path) -> Segments:
     """find_segments for an episode with phases.json (eval_splits.py), whose times are on the
-    rawdata.h5 clock. Raises ValueError if insert did not end on the network."""
+    rawdata.h5 clock. Raises ValueError if insert did not end on the network. If the policy
+    commanded the gripper open during insert, insert ends at the first such command: the
+    network lags the plug seating, and the policy let go in between."""
     with open(ep_dir / 'phases.json') as f:
         phases = {p['phase']: p for p in json.load(f)['phases']}
     if 'insert' not in phases or phases['insert'].get('end') != 'network':
         raise ValueError(f'insert ended on {phases.get("insert", {}).get("end")!r}, not the network')
+    t0, t1 = float(phases['insert']['t_start']), float(phases['insert']['t_end'])
     with h5py.File(ep_dir / 'rawdata.h5', 'r') as f:
         t_final = max(f['robot_obs/time'][-1], f['gripper_obs/time'][-1], f['camera_obs/time'][-1])
-    return Segments(float(phases['pickup']['t_end']), float(phases['insert']['t_start']),
-                    float(phases['insert']['t_end']), float(t_final))
+        ct, grip = f['commands/time'][:], f['commands/des_gripper'][:]
+    opens = ct[(ct >= t0) & (ct < t1) & (grip == GRIP_OPEN)]
+    return Segments(float(phases['pickup']['t_end']), t0, float(opens[0]) if len(opens) else t1, float(t_final))
 
 
 def phase_windows(seg: Segments, margin: float) -> dict:
