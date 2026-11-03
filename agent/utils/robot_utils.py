@@ -1,28 +1,17 @@
-<<<<<<< HEAD
-=======
 import collections
 import threading
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 import time
 
 import einops
 import numpy as np
 import torch
 
-<<<<<<< HEAD
-from env import URPose, Env, GRIP_CLOSED
-from interface import DualSenseInterface
-from agent.model.policy import DiffusionPolicy
-from agent.utils.utils import resize_image
-from agent.utils.interrupt_sequence import InterruptSequence
-=======
 from robot.env import URPose, Env, GRIP_CLOSED
 from robot.interface import DualSenseInterface
 from agent.model.policy import DiffusionPolicy
 from agent.utils.utils import resize_image
 from agent.dataset.sequence import target_offset
 from robot.interrupt_sequence import InterruptSequence
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 # Maps a dataset.h5 observation field (the names used in policy.obs_fields, see
@@ -36,11 +25,6 @@ OBS_FIELD_GETTERS = {
     'force': lambda s: np.asarray(s['filtered_force'], dtype=np.float32),
     'gripper_width': lambda s: np.asarray([s['gripper_width']], dtype=np.float32),
     'gripper_force': lambda s: np.asarray([s['gripper_force']], dtype=np.float32),
-<<<<<<< HEAD
-}
-
-
-=======
     # the controller's current K (6 diagonals, as dataset 'stiffness'), in log10
     'log_stiffness': lambda s: np.log10(np.asarray(s['stiffness'], dtype=np.float32)),
     # spring target relative to the arm (dataset DERIVED_OBS_FIELDS['target_offset'])
@@ -90,7 +74,6 @@ class ObsHistory:
             self._records.clear()
 
 
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 def build_states(obs_deque, obs_fields):
     states = []
     for obs in obs_deque:
@@ -104,37 +87,24 @@ def build_states(obs_deque, obs_fields):
     return np.stack(states)  # (T, state_dim)
 
 
-<<<<<<< HEAD
-def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda'):
-=======
 def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda', return_gains=False):
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     """
     obs_deque: sequence of env obs dicts (len == policy.obs_horizon), each with
                'image' and 'state'. Images and the proprio state vector are built
                here; the state follows policy.obs_fields so it matches training.
     Returns (des_poses (H, 6) absolute [trans, rotvec], des_widths (H,),
     des_done (H,) end-of-episode score in [0, 1]) ready to execute.
-<<<<<<< HEAD
-=======
     With return_gains, also the predicted impedance as {field: (H, 6) log10 gains}
     ({} for a policy without an impedance head); see apply_gains.
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     """
     img_size = policy.img_size
     images = np.stack([resize_image(o['image'], (img_size, img_size), flip_channel=True) for o in obs_deque])
     states = build_states(obs_deque, policy.obs_fields)  # (T, state_dim)
 
-<<<<<<< HEAD
-    # current absolute pose/width to integrate the (possibly delta) actions from
-    last = obs_deque[-1]['state']
-    curr_pose, curr_gripper_width = np.asarray(last['actual_pose']), last['gripper_width']
-=======
     # current absolute pose/width to integrate the (possibly delta) actions from: the actual
     # pose, or the spring target for policies trained target-anchored (policy.action_anchor)
     last = obs_deque[-1]['state']
     curr_pose, curr_gripper_width = policy.anchor_pose(last), last['gripper_width']
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
     nimages = einops.rearrange(
         torch.from_numpy(images).to(device, dtype=torch.float32), 't h w c -> t c h w')
@@ -148,9 +118,6 @@ def get_actions(policy: DiffusionPolicy, obs_deque, device='cuda', return_gains=
     naction = naction.detach().to('cpu').numpy()[0]
 
     # integrate deltas (per the policy's action_mode) into absolute poses + widths
-<<<<<<< HEAD
-    return policy.integrate_actions(naction, curr_pose, curr_gripper_width)
-=======
     des_poses, des_widths, des_done = policy.integrate_actions(naction, curr_pose, curr_gripper_width)
     if return_gains:
         return des_poses, des_widths, des_done, policy.decode_impedance(naction, log=True)
@@ -176,7 +143,6 @@ def apply_gains(env: Env, log_gains: dict, ramp_s=None):
         return
     env.set_gains(frame='base', ramp_s=ramp_s,
                   **{GAIN_KWARGS[k]: 10 ** np.asarray(v, float) for k, v in log_gains.items()})
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 def interrupt(rexec):
@@ -184,24 +150,17 @@ def interrupt(rexec):
     return InterruptSequence.current(rexec)
 
 
-<<<<<<< HEAD
-=======
 class SquarePressed(RuntimeError):
     """The operator pressed Square while wait_for_circle waited for Circle."""
 
 
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 def wait_for_circle(env: Env, iface: DualSenseInterface, close_gripper=False):
     freq = 250
     print('Waiting the circle...')
     while True:
         flag = iface.update(1 / freq)
         if flag == -1:
-<<<<<<< HEAD
-            raise RuntimeError('Square pressed, exiting.')
-=======
             raise SquarePressed('Square pressed, exiting.')
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
         des_pose = URPose(*iface.target_pose)
         des_gripper = iface.gripper_state

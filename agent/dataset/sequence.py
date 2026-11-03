@@ -1,24 +1,10 @@
-<<<<<<< HEAD
-
-=======
 from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
 import torchvision.transforms.functional as F
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 from collections import namedtuple
 from dataclasses import dataclass
 from typing import Literal
 from PIL import Image
 from tqdm import tqdm
-<<<<<<< HEAD
-from scipy.spatial.transform import Rotation as R, RigidTransform as Tf
-from einops import rearrange, repeat
-import numpy as np
-import torch
-import pathlib
-import os
-# from agent.utils.utils import get_chunk_actions
-
-=======
 from einops import rearrange, repeat
 import numpy as np
 import h5py, pathlib, os, torch
@@ -28,42 +14,10 @@ IMAGE_SIZE = 128
 # Framerate assumed for datasets/checkpoints that predate the stored `framerate`
 # metadata; everything collected before that was sampled/run at 20Hz.
 DEFAULT_FRAMERATE = 20.0
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 DataBatch = namedtuple('DataBatch', ['actions', 'conditions'])
 GripperStats = namedtuple('GripperStats', ['grip_width_mm', 'grip_force_n', 'grip_speed_mmps', 'grip_pullback_mm'])
 ActionMode = Literal['absolute', 'local_delta', 'global_delta', 'umi']
 
-<<<<<<< HEAD
-# def get_images(dir_path, total_num_steps=None, img_size=128):
-#     N = len(os.listdir(dir_path)) if total_num_steps is None else min(len(os.listdir(dir_path)), total_num_steps)
-#     images = []
-#     for i in tqdm(range(N), desc="loading images to RAM"):
-#         img = Image.open(os.path.join(dir_path, f'{i}.png')).resize((img_size, img_size))
-#         images.append(np.array(img))
-#     return np.array(images)
-
-def get_images(dir_path, total_num_steps=None, img_size=128, num_workers=8):
-    N = len(os.listdir(dir_path))
-    if total_num_steps is not None:
-        N = min(N, total_num_steps)
-
-    def load_one(i):
-        path = os.path.join(dir_path, f"{i}.png")
-        with Image.open(path) as img:
-            img = img.resize((img_size, img_size))
-            return np.asarray(img)
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        images = list(
-            tqdm(
-                executor.map(load_one, range(N)),
-                total=N,
-                desc="loading images to RAM",
-            )
-        )
-
-    return np.stack(images)
-=======
 
 def target_offset(target_pose, actual_pose):
     """
@@ -96,7 +50,6 @@ DERIVED_OBS_FIELDS = {
     'target_offset': lambda f, n: target_offset(f['target_pose'][:n], f['pose'][:n]),
 }
 
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 class StitchedSequenceDataset(torch.utils.data.Dataset):
     """
@@ -114,11 +67,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-<<<<<<< HEAD
-        dataset_paths,
-=======
         dataset_path,
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         horizon_steps=16,
         cond_steps=1,
         img_cond_steps=1,
@@ -127,12 +76,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         action_mode: ActionMode = 'local_delta',
         predict_done=True,
         end_signal_steps=None,
-<<<<<<< HEAD
-        transform=None,
-        img_size=96,
-        device="cuda:0",
-    ):
-=======
         pose_target='pose',
         action_anchor=None,
         impedance_fields=(),
@@ -156,7 +99,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         impedance_fields: gain fields appended to each action as log10, e.g.
                           ('stiffness', 'damping', 'mass'); 6 base-frame diagonal values each.
         """
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         assert img_cond_steps <= cond_steps, 'consider using more cond_steps than img_cond_steps'
         self.horizon_steps = horizon_steps
         self.cond_steps = cond_steps  # states (proprio, etc.)
@@ -164,47 +106,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self.device = device
         self.action_mode = action_mode
         self.transform = transform
-<<<<<<< HEAD
-        self.img_size = img_size
-        self.max_n_episodes = max_n_episodes
-        self.g_thr = 18 # (np.amax(self.g_widths) + np.amin(self.g_widths)) / 2  # threshold for binary gripper action
-        self.indices = None; traj_start = 0
-        self.poses, self.g_widths, self.obs, self.images = None, None, None, None
-        for dataset_path in dataset_paths:
-            dataset_path = pathlib.Path(dataset_path)
-
-            # Load dataset to device
-            img_dir = dataset_path / 'images' ; state_path = dataset_path / 'states.npz'
-            dataset = np.load(state_path, allow_pickle=False)  # only np arrays
-            traj_lengths = dataset['traj_length'][:max_n_episodes]  # 1-D array
-            total_num_steps = np.sum(traj_lengths)
-            obs = np.c_[*[dataset[key] for key in obs_fields]]  # Concat along columns, (total_num_steps, obs_dim)
-
-            # Set up indices for sampling
-            indices = self.make_indices(traj_lengths, horizon_steps, traj_start=traj_start)
-            if self.indices is None:
-                self.indices = indices 
-            else:
-                self.indices = np.concatenate([self.indices, indices])
-            traj_start += total_num_steps
-
-            # Extract states and actions up to max_n_episodes
-            poses = dataset['pose'][:total_num_steps]  # (N, 6)
-            g_widths = dataset['gripper_width'][:total_num_steps]  # (N,)
-            obs = torch.from_numpy(obs[:total_num_steps]).float().to(device)  # (N, obs_dim)
-            images = torch.from_numpy(get_images(img_dir, total_num_steps, img_size=img_size)).to(device)  # (N, H, W, C)
-            if self.poses is None:
-                self.poses, self.g_widths, self.obs, self.images = poses, g_widths, obs, images 
-            else:
-                self.poses = np.concatenate([self.poses, poses])
-                self.g_widths = np.concatenate([self.g_widths, g_widths])
-                self.obs = torch.cat([self.obs, obs])
-                self.images = torch.cat([self.images, images]) 
-               
-
-        self.obs_dim = self.obs.shape[-1]
-        self._precompute_actions()  # precompute all actions for faster sampling during training
-=======
         self.pose_target = pose_target
         self.action_anchor = pose_target if action_anchor is None else action_anchor
         self.impedance_fields = tuple(impedance_fields)
@@ -290,7 +191,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         self._precompute_actions(g_widths, action_poses, anchor_poses, log_gains)
 
         self.obs_dim = self.obs.shape[1]
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         self.act_dim = self.actions.shape[-1]
 
     def __len__(self):
@@ -312,24 +212,15 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         # Conditioning observations: current and history states + images
         obs_np = np.array([self.obs[max(start - t, ep_start)]
                           for t in reversed(range(self.cond_steps))])  # more recent is at the end, # cond_steps x dim
-<<<<<<< HEAD
-        images = torch.stack([self.images[max(start - t, ep_start)]
-                             for t in reversed(range(self.img_cond_steps))])  # img_cond_steps x H x W x C
-        conditions = {'state': obs, 'rgb': rearrange(images, ' T H W C -> T C H W') / 255.0}
-=======
         images = np.array([self.getimage(max(start - t, ep_start))
                            for t in reversed(range(self.img_cond_steps))])
         conditions = {'state': obs_np, 'rgb': images / 255.0}
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
         batch = DataBatch(self.actions[idx], conditions)
         if self.transform is not None:
             batch = self.transform(batch)
         return batch
 
-<<<<<<< HEAD
-    def make_indices(self, traj_lengths, horizon_steps, traj_start = 0):
-=======
     def getimage(self, idx):
         if self.h5 is None:
             self.h5 = h5py.File(self.dataset_path / 'dataset.h5', 'r')
@@ -343,18 +234,13 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         return im_np
 
     def make_indices(self, traj_lengths, horizon_steps):
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         """
         makes indices for sampling from dataset;
         each index maps to a datapoint and its bounds within the same trajectory.
         Returns list[(start_index, traj_start_index, traj_end_index)]
         """
         indices = []
-<<<<<<< HEAD
-        
-=======
         traj_start = 0
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         for traj_length in traj_lengths:
             max_start = traj_start + traj_length - horizon_steps
             traj_end = traj_start + traj_length
@@ -362,11 +248,7 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             traj_start += traj_length
         return np.array(indices)
 
-<<<<<<< HEAD
-    def _precompute_actions(self):
-=======
     def _precompute_actions(self, g_widths, action_poses, anchor_poses, log_gains):
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         actions = []
         for i in tqdm(range(len(self)), desc='precomputing actions'):
             start, ep_start, ep_end = self.indices[i]
@@ -375,14 +257,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
                 # TODO: replication pad if end out of ep_end
                 raise RuntimeError(f"Error: end index {end} exceeds episode end {ep_end}.")
 
-<<<<<<< HEAD
-            g_width = self.g_widths[start:end]
-            poses = self.poses[start:end]
-
-            g_action = self.gripper_action(g_width, threshold=self.g_thr)
-            pose_action = self.pose_action(poses)
-            actions.append(np.c_[pose_action, g_action])
-=======
             g_width = g_widths[start:end]
 
             g_action = self.gripper_action(g_width, threshold=self.grip_threshold)
@@ -393,7 +267,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
             # [pose(6), gripper(1), done(1)?, log10 gains(6 per impedance field)]
             chunk = np.c_[chunk, log_gains[start:end]]
             actions.append(chunk)
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         self.actions = np.array(actions)
         return self.actions
 
@@ -413,23 +286,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         done = abs_t >= (ep_end - self.end_signal_steps)
         return 2 * done.astype(int).reshape(-1, 1) - 1
 
-<<<<<<< HEAD
-    def _pose_action_absolute(self, poses):
-        # Returns (N, 6): [tx, ty, tz, rx, ry, rz]
-        return poses
-
-    def _pose_action_local_delta(self, poses):
-        # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
-        transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
-        t0 = transforms[0]
-        deltas = [t0.inv() * t for t in transforms]
-        return np.array([delta.as_exp_coords() for delta in deltas])
-
-    def _pose_action_umi(self, poses):
-        # Returns (N, 6): delta between META timestep and current timetstep given absolute xyz and Euler angle
-        delta_xyz = poses[1:, :3] - poses[:1, :3]
-        eulers = np.array([ R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:] ])
-=======
     # The delta modes encode `poses` relative to `ref_pose`, the action_anchor pose at the
     # chunk start (DiffusionPolicy.integrate_actions integrates from the live one). When
     # the anchor is the cloned field itself, ref_pose == poses[0].
@@ -450,7 +306,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         poses = np.concatenate([ref_pose[None], poses[1:]])  # first entry is the reference
         delta_xyz = poses[1:, :3] - poses[:1, :3]
         eulers = np.array([R.from_rotvec(rxyz).as_euler("xyz") for rxyz in poses[:, 3:]])
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         # delta_rotations = np.array( [ (r2*rotations[0].inv()).as_rotvec() for r2 in rotations[1:] ] )
         delta_eulers = eulers[1:] - eulers[:1]
         # wrap to [-pi, pi]
@@ -458,97 +313,6 @@ class StitchedSequenceDataset(torch.utils.data.Dataset):
         delta_umi = np.concatenate([delta_xyz, delta_euler], -1)
         return np.concatenate([delta_umi, delta_umi[-1:]])  # poor decision here, pad by 1 by repeating last one.
 
-<<<<<<< HEAD
-    def _pose_action_global_delta(self, poses):
-        # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
-        transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
-        t0 = transforms[0]
-        deltas = [t * t0.inv() for t in transforms]
-        return np.array([delta.as_exp_coords() for delta in deltas])
-
-    def pose_action(self, poses):
-        if self.action_mode == 'absolute':
-            return self._pose_action_absolute(poses)
-        elif self.action_mode == 'local_delta':
-            return self._pose_action_local_delta(poses)
-        elif self.action_mode == 'global_delta':
-            return self._pose_action_global_delta(poses)
-        elif self.action_mode == 'umi':
-            return self._pose_action_umi(poses)
-        else:
-            raise ValueError(f"Invalid action_mode: {self.action_mode}")
-
-class FailureDetectDataset(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        dataset_path,
-        label_path,
-        horizon_steps=8,
-        cond_steps=1,
-        force_cond_steps=8,
-        img_cond_steps=1,
-        obs_fields=['pose', 'gripper_width', 'force'],       
-        transform=None,
-        device="cuda:0",
-    ):
-        """
-        Return (obs=(images, ....), label=0/1) where 0 is success, 1 is failled
-        """
-        self.dataset_path = dataset_path
-        df = pd.read_csv(label_path)
-        episode_ids, fail_idx = df.episode.values, df.idx.values
-        self.ep_states = [
-            np.load(os.path.join(dataset_path, f"episode{int(episode_id):06d}", 'states.npz'))
-            for episode_id in episode_ids
-        ]
-        self.ep_lengths = [ len(ep_states['pose']) for ep_states in self.ep_states]
-        self.horizon_steps = horizon_steps
-        self.img_cond_steps = img_cond_steps; self.cond_steps = cond_steps; self.force_cond_steps = force_cond_steps
-        self.make_indices(episode_ids, fail_idx)
-        self.obs_fields = obs_fields
-        self.device = device
-
-    def make_indices(self, episode_ids, fail_idx):
-        self.indices = [] # list of item: [image_dir, state_idx, start, end, fail/success]
-        for i, episode_id in enumerate(episode_ids):
-            image_dir = os.path.join(self.dataset_path, f"episode{int(episode_id):06d}", "images")
-            state_idx = i 
-            ep_fail_idx = fail_idx[i]
-            for j in range(self.ep_lengths[i]-self.horizon_steps):
-                start = max(0, j-self.horizon_steps)
-                label = 0 if ep_fail_idx == -1 else int( j > ep_fail_idx) # if j > ep_fail_idx, 1 else 0
-                self.indices.append([image_dir, state_idx, start, j, label])
-    def get_image(self, image_path):
-        return np.array( Image.open(image_path).resize((IMAGE_SIZE, IMAGE_SIZE)) ) 
-    
-    def __getitem__(self, index):
-        image_dir, state_idx, start, end, label = self.indices[index]
-        image_indices = np.linspace(start, end, self.img_cond_steps, dtype=int) if self.img_cond_steps > 1 else [end]
-        force_indices = np.linspace(start, end, self.force_cond_steps, dtype=int) if self.force_cond_steps > 1 else [end]
-        cond_indices = np.linspace(start, end, self.cond_steps, dtype=int) if self.cond_steps > 1 else [end]
-        np_images = np.array(
-            [ self.get_image(os.path.join(image_dir, f'{i:06d}.png')) for i in image_indices] ) # TxHxWxC
-        data_dict = {'image': torch.from_numpy(np_images).float().to(self.device)}
-        states = self.ep_states[state_idx]
-        for k in self.obs_fields:
-            obs = states[k]; obs_index = cond_indices if 'force' not in k else force_indices
-            obs = np.array([obs[i] for i in obs_index])
-            data_dict[k] = torch.from_numpy(obs).float().to(self.device)
-        return data_dict, label
-    
-    def __len__(self):
-        return len(self.indices)
-
-
-if __name__ == '__main__':
-    task = 'ethernet_unplug'
-    dataset_dir = '/zfsauton/scratch/yiqiw2/100%/datasets'
-    dataset_path = os.path.join(dataset_dir, task)
-    dataset = StitchedSequenceDataset(dataset_path)
-
-    for _ in dataset:
-        break
-=======
     def _pose_action_global_delta(self, poses, ref_pose):
         # Returns (N, 6): [rx, ry, rz, tx, ty, tz] (SE(3) exp coords, NOT the same ordering as absolute)
         transforms = [Tf.from_components(pos[:3], R.from_rotvec(pos[3:])) for pos in poses]
@@ -569,4 +333,3 @@ if __name__ == '__main__':
             return self._pose_action_umi(poses, ref_pose)
         else:
             raise ValueError(f"Invalid action_mode: {self.action_mode}")
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d

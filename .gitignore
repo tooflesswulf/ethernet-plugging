@@ -3,10 +3,7 @@ __pycache__/
 wandb/
 logs*/
 debug*/
-<<<<<<< HEAD
-=======
 outputs/
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 *.mp4
 *.pkl

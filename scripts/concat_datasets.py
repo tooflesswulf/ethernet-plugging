@@ -21,12 +21,9 @@ import h5py
 import numpy as np
 
 STITCHED_FIELDS = ['pose', 'force', 'gripper_width', 'gripper_force']
-<<<<<<< HEAD
-=======
 # Only logged by the impedance (FDCC) env; stitched when every source has them.
 OPTIONAL_STITCHED_FIELDS = ['target_pose', 'stiffness', 'damping', 'mass']
 GRIP_RANGE_ATTR = 'grip_width_range'   # agent/dataset/sequence.py
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 def parse_episode_slice(spec: str) -> slice:
@@ -100,10 +97,7 @@ class SourceInfo:
     images_stored_as: str
     metadata: dict
     framerate: float | None
-<<<<<<< HEAD
-=======
     grip_range: np.ndarray  # [min, max] gripper width of the whole source, not just its range
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
     @property
     def n_episodes(self):
@@ -123,31 +117,15 @@ def inspect_source(dataset_dir: str, ep_slice: slice) -> SourceInfo:
         time_start = int(lengths[:start_ep].sum())
         time_stop = int(lengths[:stop_ep].sum())
 
-<<<<<<< HEAD
-        field_shapes = {name: f[name].shape for name in STITCHED_FIELDS}
-        field_dtypes = {name: f[name].dtype for name in STITCHED_FIELDS}
-=======
         fields = STITCHED_FIELDS + [name for name in OPTIONAL_STITCHED_FIELDS if name in f]
         field_shapes = {name: f[name].shape for name in fields}
         field_dtypes = {name: f[name].dtype for name in fields}
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         field_shapes['images'] = f['images'].shape
         field_dtypes['images'] = f['images'].dtype
         images_stored_as = f['images'].attrs['stored_as']
 
         metadata = read_metadata(f['metadata'], slice(start_ep, stop_ep))
         framerate = f['metadata'].attrs.get('framerate')
-<<<<<<< HEAD
-
-    return SourceInfo(dataset_dir, h5_path, start_ep, stop_ep, time_start, time_stop,
-                       field_shapes, field_dtypes, images_stored_as, metadata, framerate)
-
-
-def check_consistent(sources: list[SourceInfo]):
-    first = sources[0]
-    for s in sources[1:]:
-        for name in STITCHED_FIELDS:
-=======
         if GRIP_RANGE_ATTR in f['metadata'].attrs:
             grip_range = np.asarray(f['metadata'].attrs[GRIP_RANGE_ATTR], dtype=float)
         else:
@@ -173,7 +151,6 @@ def check_consistent(sources: list[SourceInfo], fields: list[str]):
     first = sources[0]
     for s in sources[1:]:
         for name in fields:
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
             if s.field_shapes[name][1:] != first.field_shapes[name][1:]:
                 raise ValueError(
                     f"{name!r} trailing shape mismatch: {s.dataset_dir} has "
@@ -258,22 +235,14 @@ def build_filepath_images(out_f: h5py.File, sources: list[SourceInfo]):
 
 
 def concat_datasets(sources: list[SourceInfo], out_dir: pathlib.Path):
-<<<<<<< HEAD
-    check_consistent(sources)
-=======
     fields = stitched_fields(sources)
     check_consistent(sources, fields)
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with h5py.File(out_dir / 'dataset.h5', 'w') as f:
         f.create_dataset('num_episodes', data=sum(s.n_episodes for s in sources))
 
-<<<<<<< HEAD
-        for name in STITCHED_FIELDS:
-=======
         for name in fields:
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
             build_virtual_dataset(f, name, sources)
 
         if sources[0].images_stored_as == 'image':
@@ -286,12 +255,9 @@ def concat_datasets(sources: list[SourceInfo], out_dir: pathlib.Path):
         write_metadata(meta_group, merge_metadata(intersect_metadata(sources)))
         if sources[0].framerate is not None:
             meta_group.attrs['framerate'] = sources[0].framerate
-<<<<<<< HEAD
-=======
         # gripper label threshold range (agent/dataset/sequence.py): the union of the sources'
         meta_group.attrs[GRIP_RANGE_ATTR] = [min(s.grip_range[0] for s in sources),
                                              max(s.grip_range[1] for s in sources)]
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 if __name__ == '__main__':

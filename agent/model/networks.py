@@ -1,20 +1,14 @@
 from typing import Tuple, Sequence, Dict, Union, Optional, Callable
-<<<<<<< HEAD
-=======
 from einops import rearrange, repeat
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 import numpy as np
 import math
 import torch
 import torch.nn as nn
 import torchvision
-<<<<<<< HEAD
 from agent.finetuning.config.rlpd import VitEncoderConfig
 from agent.model.vit import MinVit
-=======
 
 from agent.model.modules import RandomShiftsAug, ResidualMLP, SpatialEmb
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -553,7 +547,6 @@ class MultiEncoder(nn.Module):
             "logits": logits,
             "embedding": embedding,
         }
-<<<<<<< HEAD
 
 class VitEncoder(nn.Module):
     def __init__(self, obs_shape: tuple[int, int, int], cfg: VitEncoderConfig):
@@ -583,7 +576,6 @@ class VitEncoder(nn.Module):
         return feats
 
 
-=======
 """
 Double Unet with cross-attention
 """
@@ -1309,7 +1301,6 @@ class CrossUnet1D2(nn.Module):
             x = x.permute(0, 2, 1).contiguous()  # "b t h -> b h t"
         return x.to(orig_dtype)
         
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 if __name__ == '__main__':
     from agent.dataset.sequence import FailureDetectDataset
     dataset_path = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/logs-collectfailures/75rl-rtc'
@@ -1330,8 +1321,4 @@ if __name__ == '__main__':
     force = data['force'] # B x T x D
     out = encoder(image, pose, force)
     assert False, f"{out['logits'].shape} {out['embedding'].shape}"
-<<<<<<< HEAD
 
-
-=======
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d

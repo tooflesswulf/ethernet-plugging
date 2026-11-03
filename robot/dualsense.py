@@ -9,12 +9,6 @@ from enum import IntFlag
 import numpy as np
 import threading
 import time
-<<<<<<< HEAD:dualsense.py
-
-from robosuite import make
-from robosuite.utils.log_utils import ROBOSUITE_DEFAULT_LOGGER
-=======
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d:robot/dualsense.py
 
 try:
     import hid
@@ -77,11 +71,7 @@ DUALSENSE_STICK_Neutral = 128
 DUALSENSE_Trigger_Neutral = 0
 
 
-<<<<<<< HEAD:dualsense.py
-def scale_to_control(x, axis_scale=128, min_v=-1.0, max_v=1.0, deadzone=5):
-=======
 def scale_to_control(x, axis_scale=128, min_v=-1.0, max_v=1.0, deadzone=8):
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d:robot/dualsense.py
     """
     Normalize raw HID readings to target range.
 
@@ -219,11 +209,7 @@ class DualSense:
             print(
                 "Failed to open DualSense device. "
                 "Consider killing other processes that may be using the device, "
-<<<<<<< HEAD:dualsense.py
-                f"or try other product ids for SONY DualSense in {[hex(id) for id in macros.DUALSENSE_PRODUCT_ID]}"
-=======
                 f"or try another SONY DualSense product id (tried {hex(self.product_id)})"
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d:robot/dualsense.py
             )
             raise e
 
@@ -291,10 +277,7 @@ class DualSense:
         print_command("Square button", "reset simulation")
         print_command("Circle button", "toggle gripper")
         print_command("Triangle button", "toggle z-force mode")
-<<<<<<< HEAD:dualsense.py
-=======
         print_command("Cross button", "toggle stiff base z (pushing the plug in)")
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d:robot/dualsense.py
         print_command("Square", "quit")
         print("")
 
@@ -468,17 +451,6 @@ class DualSense:
 
     last_triangle = False
     last_circle = False
-<<<<<<< HEAD:dualsense.py
-
-    def input2action(self):
-        act = super().input2action()
-        if act is None:
-            return None
-        act['right_gripper'] = self.state.Circle and not self.last_circle
-        act['toggle_zforce'] = self.state.Triangle and not self.last_triangle
-        self.last_circle = self.state.Circle
-        self.last_triangle = self.state.Triangle
-=======
     last_cross = False
 
     def input2action(self):
@@ -509,7 +481,6 @@ class DualSense:
         self.last_circle = self.state.Circle
         self.last_triangle = self.state.Triangle
         self.last_cross = self.state.Cross
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d:robot/dualsense.py
         return act
 
 

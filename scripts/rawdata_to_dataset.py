@@ -7,11 +7,7 @@ import pathlib
 import h5py
 import os
 
-<<<<<<< HEAD
-from util import dict2hdf5, hdf52dict
-=======
 from robot.util import dict2hdf5, hdf52dict
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 def ewma(x, alpha):
@@ -44,8 +40,6 @@ class EpisodeData:
     gripper_widths: np.ndarray
     gripper_forces: np.ndarray
     meta: dict
-<<<<<<< HEAD
-=======
     # Impedance controller logs (FDCC, env.py ControlLog); None for stiff-controller data.
     # Gains are diagonals in base-frame axes (see base_frame_gains).
     target_poses: np.ndarray | None = None
@@ -66,7 +60,6 @@ def base_frame_gains(gains, frame_base):
     assert not np.any(tool & aniso), 'anisotropic gains on tool axes have no base-frame diagonal'
     assert np.all(gains > 0), 'gains must be positive (they are learned in log space)'
     return gains
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 
 def proc_h5(h5_path, framerate=10.0, alpha=0.03):
@@ -74,8 +67,6 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
         rt = np.array(f['robot_obs/time'])
         actual_pose = np.array(f['robot_obs/actual_pose'])
         actual_force = np.array(f['robot_obs/actual_force'])
-<<<<<<< HEAD
-=======
         # the env's own EWMA of actual_force: exactly the live 'filtered_force' obs at eval
         filtered_force = np.array(f['robot_obs/filtered_force']) if 'robot_obs/filtered_force' in f else None
 
@@ -89,7 +80,6 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
                 'damping': base_frame_gains(np.array(f['control/D']), frame_base),
                 'mass': base_frame_gains(np.array(f['control/M']), frame_base),
             }
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
         gt = np.array(f['gripper_obs/time'])
         gripper_width = np.array(f['gripper_obs/gripper_width'])
@@ -103,11 +93,7 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
         else:
             meta = {}
 
-<<<<<<< HEAD
-    force_smoothed = ewma(actual_force, alpha=alpha)
-=======
     force_smoothed = filtered_force if filtered_force is not None else ewma(actual_force, alpha=alpha)
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
     # sample at the specified framerate
     dt = 1.0 / framerate
@@ -119,10 +105,7 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
     g_widths = []
     forces = []
     g_forces = []
-<<<<<<< HEAD
-=======
     ctrl = {k: [] for k in ('target_poses', 'stiffness', 'damping', 'mass')} if control else None
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     for t in sample_times:
         rt_idx = np.searchsorted(rt, t, side='right') - 1
         gt_idx = np.searchsorted(gt, t, side='right') - 1
@@ -133,13 +116,10 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
         g_widths.append(gripper_width[gt_idx])
         forces.append(force_smoothed[rt_idx])
         g_forces.append(gripper_force[gt_idx])
-<<<<<<< HEAD
-=======
         if control is not None:
             ct_idx = np.searchsorted(control['time'], t, side='right') - 1
             for k in ctrl:
                 ctrl[k].append(control[k][ct_idx])
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
     meta['length'] = len(imgs)
     return EpisodeData(
@@ -148,12 +128,8 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
         forces=forces,
         gripper_widths=g_widths,
         gripper_forces=g_forces,
-<<<<<<< HEAD
-        meta=meta
-=======
         meta=meta,
         **({k: np.array(v) for k, v in ctrl.items()} if ctrl else {}),
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     )
 
 
@@ -162,11 +138,7 @@ if __name__ == '__main__':
     parser.add_argument('--path', type=str,
                         default='/home/albertxu/data/ethernet_plug_v3',
                         help='Base dataset directory')
-<<<<<<< HEAD
-    parser.add_argument('--framerate', type=float, default=10.0, help='Framerate to sample the raw data at')
-=======
     parser.add_argument('--framerate', type=float, default=20.0, help='Framerate to sample the raw data at')
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     parser.add_argument('--alpha', '-a', type=float, default=0.03, help='Smoothing factor for force EWMA')
     parser.add_argument('--h5_images', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to save images in the HDF5 file (can make it very large)')
@@ -202,12 +174,6 @@ if __name__ == '__main__':
         f.create_dataset('num_episodes', data=len(episodes))
         f.create_dataset('pose', data=np.concatenate([ep.poses for ep in episodes], axis=0))
         f.create_dataset('force', data=np.concatenate([ep.forces for ep in episodes], axis=0))
-<<<<<<< HEAD
-        f.create_dataset('gripper_width', data=np.concatenate([ep.gripper_widths for ep in episodes], axis=0))
-        f.create_dataset('gripper_force', data=np.concatenate([ep.gripper_forces for ep in episodes], axis=0))
-        dict2hdf5(f.create_group('metadata'), meta)
-        f['metadata'].attrs['framerate'] = args.framerate
-=======
         gripper_widths = np.concatenate([ep.gripper_widths for ep in episodes], axis=0)
         f.create_dataset('gripper_width', data=gripper_widths)
         f.create_dataset('gripper_force', data=np.concatenate([ep.gripper_forces for ep in episodes], axis=0))
@@ -221,7 +187,6 @@ if __name__ == '__main__':
         # open-to-closed range of the full data; the binary gripper label thresholds at its
         # midpoint, also in datasets split / concatenated from this one (agent/dataset/sequence.py)
         f['metadata'].attrs['grip_width_range'] = [float(gripper_widths.min()), float(gripper_widths.max())]
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
         if args.h5_images:
             img_chunk_shape = (1,) + episodes[0].images[0].shape

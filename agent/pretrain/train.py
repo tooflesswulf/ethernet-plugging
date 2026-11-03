@@ -15,10 +15,7 @@ from agent.dataset.sequence import ActionMode, StitchedSequenceDataset
 
 DEVICE = "cuda:0"
 
-<<<<<<< HEAD
-=======
 
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 def to_device(x, device=DEVICE):
     if torch.is_tensor(x):
         return x.to(device)
@@ -32,28 +29,6 @@ def batch_to_device(batch, device="cuda:0"):
     vals = [to_device(getattr(batch, field), device) for field in batch._fields]
     return type(batch)(*vals)
 
-<<<<<<< HEAD
-def train(name, dataset_path, ckpt_dir, epochs=100,
-          predict_done=True, end_signal_steps=None,
-          use_wandb=False, log_interval=10, save_interval=10,
-          device='cuda:0'):
-    action_mode: ActionMode = 'local_delta'
-    obs_fields = ['pose', 'gripper_width']
-    obs_horizon = 3
-    dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
-                                      cond_steps=obs_horizon, img_cond_steps=obs_horizon,
-                                      predict_done=predict_done, end_signal_steps=end_signal_steps,
-                                      horizon_steps=16, action_mode=action_mode, device=device,
-                                      max_n_episodes=50)
-
-    val_dataset = StitchedSequenceDataset(dataset_path, obs_fields=obs_fields,
-                                          cond_steps=obs_horizon, img_cond_steps=obs_horizon,
-                                          predict_done=predict_done, end_signal_steps=end_signal_steps,
-                                          horizon_steps=16, max_n_episodes=1, action_mode=action_mode, device=device)
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=128,
-=======
 
 def train(name, dataset_path, ckpt_dir, epochs=100,
           predict_done=True, end_signal_steps=None,
@@ -87,7 +62,6 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         num_workers=8,
         shuffle=True,
     )
@@ -96,15 +70,6 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     # Normalization stats from the training set; stored as buffers inside the
     # policy so they're saved in the checkpoint for un-normalizing at eval time.
     norm_stats = compute_norm_stats(dataset)
-<<<<<<< HEAD
-    policy = DiffusionPolicy(action_horizon=16, obs_horizon=obs_horizon, norm_stats=norm_stats,
-                             state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
-                             action_mode=dataset.action_mode,
-                             grip_stats=dataset.grip_stats,
-                             obs_fields=obs_fields).to(device)
-    ema = EMAModel(parameters=policy.parameters(), power=0.75)
-    opt = torch.optim.AdamW(params=policy.parameters(), lr=1e-4, weight_decay=1e-6)
-=======
     policy = DiffusionPolicy(action_horizon=action_horizon, obs_horizon=obs_horizon, norm_stats=norm_stats,
                              state_dim=dataset.obs_dim, action_dim=dataset.act_dim,
                              action_mode=dataset.action_mode,
@@ -132,7 +97,6 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
             print(f'Fine-tuning from {init_ckpt}: {outside:.2%} of {key}s fall outside its normalization range')
     ema = EMAModel(parameters=policy.parameters(), power=0.75)
     opt = torch.optim.AdamW(params=policy.parameters(), lr=lr, weight_decay=1e-6)
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     lr_scheduler = get_scheduler(
         name='cosine',
         optimizer=opt,
@@ -146,10 +110,7 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
     step = 0
     for epoch in pbar:
         epoch_losses = []
-<<<<<<< HEAD
-=======
         policy.train()
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         for i, batch in enumerate(dataloader):
             batch = batch_to_device(batch, device)
             loss = policy.compute_loss(batch.actions, batch.conditions)
@@ -179,25 +140,17 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
         def binary_correctness(pred, tgt):
             return (torch.sign(pred) == torch.sign(tgt)).float().mean().item()
 
-<<<<<<< HEAD
-        val_mses, gripper_correctness, done_correctness = [], [], []
-=======
         # Per-batch metrics, weighted by batch size when averaged: the last batch can be a
         # handful of chunks (all from the episode's end), and must not count as a full one.
         val_mses, pose_mses, gripper_correctness, done_correctness, val_ns = [], [], [], [], []
         imp_logmses = {f: [] for f in policy.impedance_fields}
         policy.eval()  # no dropout / augmentation (CrossUnet1D2) during validation
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         for i, batch in enumerate(val_dataloader):
             with torch.no_grad():
                 batch = batch_to_device(batch, device)
                 actions = batch.actions.float()
                 # predict_action returns unnormalized actions, comparable to raw dataset actions
                 naction = policy.predict_action(batch.conditions)
-<<<<<<< HEAD
-
-                val_mses.append(nn.functional.mse_loss(naction, actions).mean().item())
-=======
                 val_ns.append(len(actions))
 
                 val_mses.append(nn.functional.mse_loss(naction, actions).mean().item())
@@ -207,25 +160,17 @@ def train(name, dataset_path, ckpt_dir, epochs=100,
                 for j, f in enumerate(policy.impedance_fields):
                     sl = slice(imp.start + 6 * j, imp.start + 6 * (j + 1))
                     imp_logmses[f].append(nn.functional.mse_loss(naction[:, :, sl], actions[:, :, sl]).item())
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
                 # gripper is channel 6; the optional end-of-episode signal is channel 7.
                 gripper_correctness.append(binary_correctness(naction[:, :, 6], actions[:, :, 6]))
                 if policy.predict_done:
                     done_correctness.append(binary_correctness(naction[:, :, 7], actions[:, :, 7]))
 
-<<<<<<< HEAD
-        val_log = {"val/mse_loss": np.mean(val_mses),
-                   "val/gripper_correctness": np.mean(gripper_correctness), "val/epoch": epoch}
-        if done_correctness:
-            val_log["val/done_correctness"] = np.mean(done_correctness)
-=======
         val_mean = lambda v: np.average(v, weights=val_ns)
         val_log = {"val/mse_loss": val_mean(val_mses), "val/pose_mse": val_mean(pose_mses),
                    **{f"val/{f}_logmse": val_mean(v) for f, v in imp_logmses.items()},
                    "val/gripper_correctness": val_mean(gripper_correctness), "val/epoch": epoch}
         if done_correctness:
             val_log["val/done_correctness"] = val_mean(done_correctness)
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
         logger.log(val_log, step=step)
 
     # save the lastest model (with EMA weights applied)
@@ -238,13 +183,6 @@ def parse_args():
     parser.add_argument('--use_wandb', action='store_true', default=False)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--epochs', type=int, default=150)
-<<<<<<< HEAD
-    parser.add_argument('--data_dirs', nargs='+', type=str,  default=['/zfsauton/scratch/yiqiw2/100%/datasets/',])
-    parser.add_argument('--ckpt_dir', type=str, default='logs')
-    parser.add_argument('--end_signal', action='store_true', default=True)
-    parser.add_argument('--end_steps', type=int, default=None)
-    return parser.parse_args()
-=======
     parser.add_argument('--data_dir', type=str, default='/zfsauton/scratch/yiqiw2/100%/datasets/')
     parser.add_argument('--ckpt_dir', type=str, default='logs')
     parser.add_argument('--end_signal', action='store_true', default=True)
@@ -290,18 +228,13 @@ def parse_args():
         args.obs_fields = args.obs_fields or ['pose', 'gripper_width', 'force']
     return args
 
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
 
 if __name__ == '__main__':
     args = parse_args()
     if args.name is None:
         args.name = pathlib.Path(args.ckpt_dir).stem
         print('Name not given. Assuming name for logging and wandb:', args.name)
-<<<<<<< HEAD
-    dataset_paths = args.data_dirs
-=======
     dataset_path = pathlib.Path(args.data_dir)
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
     ckpt_path = pathlib.Path(args.ckpt_dir) / args.name
 
     # if the ckpt_path already exists, save to a subdirectory with the name of the run (e.g. logs/pretrain-ethernet-unplug-red-topdown)
@@ -315,10 +248,6 @@ if __name__ == '__main__':
             # exit(1)
 
     print('Saving checkpoints to:', ckpt_path)
-<<<<<<< HEAD
-    train(name=args.name, dataset_path=dataset_paths, ckpt_dir=ckpt_path,
-          predict_done=args.end_signal, end_signal_steps=args.end_steps,
-=======
     train(name=args.name, dataset_path=dataset_path, ckpt_dir=ckpt_path,
           predict_done=args.end_signal, end_signal_steps=args.end_steps,
           obs_fields=args.obs_fields, pose_target=args.pose_target, action_anchor=args.action_anchor,
@@ -327,5 +256,4 @@ if __name__ == '__main__':
           short_obs_horizon=args.short_obs_horizon,
           action_horizon=args.action_horizon, batch_size=args.batch_size,
           init_ckpt=args.init_ckpt, lr=args.lr,
->>>>>>> 80f13d40214f7c5ae29ea7a254702d8f9c27fc6d
           epochs=args.epochs, use_wandb=args.use_wandb, device=args.device)
