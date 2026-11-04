@@ -47,6 +47,8 @@ class EpisodeData:
     stiffness: np.ndarray | None = None
     damping: np.ndarray | None = None
     mass: np.ndarray | None = None
+    # Link state of the plugged-in cable (robot/env.py network_log); None if not logged.
+    network_status: np.ndarray | None = None
 
 
 def base_frame_gains(gains, frame_base):
@@ -61,6 +63,16 @@ def base_frame_gains(gains, frame_base):
     assert not np.any(tool & aniso), 'anisotropic gains on tool axes have no base-frame diagonal'
     assert np.all(gains > 0), 'gains must be positive (they are learned in log space)'
     return gains
+
+
+def sample_network(net_t, net_status, t):
+    """
+    Network link state at times t: the last poll at or before each t (polled at ~2 Hz),
+    False before the first poll (the env's network_status until _network_loop polls).
+    split_dataset.py samples old datasets' rawdata.h5 the same way.
+    """
+    idx = np.searchsorted(net_t, t, side='right') - 1
+    return np.where(idx >= 0, np.asarray(net_status, bool)[np.maximum(idx, 0)], False)
 
 
 def proc_h5(h5_path, framerate=10.0, alpha=0.03):
@@ -81,6 +93,10 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
                 'damping': base_frame_gains(np.array(f['control/D']), frame_base),
                 'mass': base_frame_gains(np.array(f['control/M']), frame_base),
             }
+
+        network = None
+        if 'network' in f:
+            network = (np.array(f['network/time']), np.array(f['network/status']))
 
         gt = np.array(f['gripper_obs/time'])
         gripper_width = np.array(f['gripper_obs/gripper_width'])
@@ -130,6 +146,7 @@ def proc_h5(h5_path, framerate=10.0, alpha=0.03):
         gripper_widths=g_widths,
         gripper_forces=g_forces,
         meta=meta,
+        network_status=sample_network(*network, sample_times) if network is not None else None,
         **({k: np.array(v) for k, v in ctrl.items()} if ctrl else {}),
     )
 
@@ -187,6 +204,8 @@ if __name__ == '__main__':
                            ('damping', 'damping'), ('mass', 'mass')):
             if all(getattr(ep, field) is not None for ep in episodes):
                 f.create_dataset(key, data=np.concatenate([getattr(ep, field) for ep in episodes], axis=0))
+        if all(ep.network_status is not None for ep in episodes):
+            f.create_dataset('network_status', data=np.concatenate([ep.network_status for ep in episodes]))
         dict2hdf5(f.create_group('metadata'), meta)
         f['metadata'].attrs['framerate'] = args.framerate
         # open-to-closed range of the full data; the binary gripper label thresholds at its
