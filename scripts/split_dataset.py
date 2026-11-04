@@ -13,7 +13,8 @@ last MotionStep converges), and the first network_status = True. Frames come fro
 already-processed `<raw>_dataset` (scripts/rawdata_to_dataset.py), whose frame k was
 sampled at t = (k + 1) / framerate on the rawdata.h5 clock -- nothing is resampled and
 no images are rewritten; image paths are stored absolute, as concat_datasets.py does,
-so the source dataset directories must stay where they are.
+so the source dataset directories must stay where they are. A source dataset made before
+rawdata_to_dataset.py stored `network_status` gets it sampled from rawdata.h5 here.
 
 Episodes recorded by agent/eval/eval_splits.py or eval_residual.py (e.g. the insert DAgger
 rollouts of experiments/dagger_insert.py) carry the boundaries in phases.json instead: the
@@ -38,7 +39,7 @@ import h5py
 import numpy as np
 
 STITCHED_FIELDS = ['pose', 'force', 'gripper_width', 'gripper_force',
-                   'target_pose', 'stiffness', 'damping', 'mass']
+                   'target_pose', 'stiffness', 'damping', 'mass', 'network_status']
 GRIP_OPEN = 0          # robot/env.py: commands/des_gripper
 SCRIPTED_K = 2999.     # fdcc.toml [scripted] stiffness is 3000 N/m; teleop runs at 300
 PHASES = ('pickup', 'insert')
@@ -51,6 +52,14 @@ def grip_width_range(f: h5py.File) -> np.ndarray:
         return np.asarray(f['metadata'].attrs[GRIP_RANGE_ATTR], dtype=float)
     w = f['gripper_width'][:]
     return np.array([w.min(), w.max()], dtype=float)
+
+
+def network_status_at(raw_h5: pathlib.Path, t) -> np.ndarray:
+    """Link state at times t, as rawdata_to_dataset.sample_network: last poll, False before any."""
+    with h5py.File(raw_h5, 'r') as f:
+        net_t, net = f['network/time'][:], f['network/status'][:].astype(bool)
+    idx = np.searchsorted(net_t, t, side='right') - 1
+    return np.where(idx >= 0, net[np.maximum(idx, 0)], False)
 
 
 @dataclass
@@ -147,11 +156,16 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
             assert len(lengths) == len(episodes), \
                 f'{ds_dir} has {len(lengths)} episodes, {raw_dir} has {len(episodes)}'
             offsets = np.r_[0, np.cumsum(lengths)]
-            data = {k: f[k][:] for k in STITCHED_FIELDS}
+            data = {k: f[k][:] for k in STITCHED_FIELDS if k in f}
             images = f['images'][:]
             ds_meta = {k: f[f'metadata/{k}'][:] for k in meta['pickup'] if f'metadata/{k}' in f}
             src_range = grip_width_range(f)
             grip_range = np.array([min(grip_range[0], src_range[0]), max(grip_range[1], src_range[1])])
+        missing = [k for k in STITCHED_FIELDS if k not in data and k != 'network_status']
+        assert not missing, f'{ds_dir} has no {missing}'
+        sample_net = 'network_status' not in data   # older dataset: filled per kept episode below
+        if sample_net:
+            data['network_status'] = np.zeros(offsets[-1], bool)
 
         n_kept = {p: 0 for p in phases}
         for i, ep in enumerate(episodes):
@@ -170,6 +184,8 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
                 print(f'  skip {raw_dir.name}/{ep.name}: transport took {transport:.1f} s')
                 continue
             frame_t = (np.arange(lengths[i]) + 1) / framerate      # rawdata_to_dataset sample times
+            if sample_net:
+                data['network_status'][offsets[i]:offsets[i + 1]] = network_status_at(ep / 'rawdata.h5', frame_t)
             for phase, (t0, t1) in phase_windows(seg, margin).items():
                 if phase not in phases:
                     continue
