@@ -5,11 +5,50 @@ the port, without stopping the insertion push.
     python experiments/zforce_regulator.py --insert_ckpt <ckpt> --log_dir <dir>
 """
 from agent.eval.eval_residual import ResidualEnv, ResidualActor, Correction
-import numpy as np
-import argparse
-import json
-import os
+import os, hydra, argparse, json, numpy as np, shutil
 
+from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
+from tensordict import TensorDict
+from torch.utils.data import DataLoader
+from torchrl.data import LazyTensorStorage, ReplayBuffer, TensorDictPrioritizedReplayBuffer, LazyMemmapStorage
+from tqdm import tqdm
+
+from agent.dataset.sequence import GripperStats
+from agent.utils.utils import init_buffer
+from agent.finetuning.config.residual_td3 import ResidualTD3DexmgConfig
+from agent.finetuning.off_policy.common_utils import utils
+from agent.finetuning.off_policy.rl.q_agent import QAgent
+from agent.utils.dtype import to_uint8
+from agent.utils.offline_dataset_to_buffer import parse_offline_dataset, populate_offline_buffer
+from agent.utils.rb_transforms import MultiStepTransform
+from agent.utils.checkpoint import save_replay_buffers, load_replay_buffers
+from agent.utils.utils import add_episode_to_buffer
+
+def prepare_rl_experiment(cfg, dataset_path, lowdim_keys, actor_fields, base_policy, img_h=128, img_w = 128, device='cuda'):
+    rl_scratch_dir = "./../../rl_online_buffer"
+    rl_scratch_dir2 = "./../../rl_offline_buffer"
+    rl_buffer_dir = "./../../rl_dump_buffer"
+    offline_episodes, total_transitions = parse_offline_dataset(dataset_path, lowdim_keys, actor_fields)
+
+    print('Remove all previous content in the directory')
+    [ shutil.rmtree(scratch_dir ) for scratch_dir in [rl_scratch_dir, rl_scratch_dir2]  ]
+    [ os.makedirs(scratch_dir) for scratch_dir in [rl_scratch_dir, rl_scratch_dir2]  ]
+
+    offline_rb, online_rb = init_buffer(total_transitions, rl_scratch_dir2, rl_scratch_dir, cfg)
+    offline_rb, flag = load_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)
+    # added = populate_offline_buffer(
+    #     dataset_path,
+    #     offline_episodes,
+    #     rb=offline_rb,
+    #     policy_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
+    #     base_policy=base_policy.to(device) if cfg.offline_data.use_base_policy_for_base_actions else None,
+    #     img_h=img_h, img_w=img_w,
+    #     device=device,
+    # )
+    print('\nDebug, SKIP POPULATING OFFLINE\n')
+    return offline_rb, online_rb
+    
 
 class ZForceRegulator(ResidualActor):
     def __init__(self, f_floor=5.0, gain=3e-3, max_speed=0.015, horizon=0.4):
@@ -39,40 +78,73 @@ def summarize(ep, f_floor):
     return s
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Insert with a z-force-regulating residual, episode after episode.')
-    ResidualEnv.add_args(parser)
-    parser.add_argument('--episodes', type=int, default=5)
-    parser.add_argument('--f_floor', type=float, default=5.0, help='z-force above which the correction acts (N)')
-    parser.add_argument('--gain', type=float, default=3e-3, help='upward velocity per N over f_floor (m/s/N)')
-    parser.add_argument('--max_speed', type=float, default=0.015,
-                        help='cap on the upward velocity (m/s); pushes faster than this outrace it')
-    parser.add_argument('--horizon', type=float, default=0.4,
-                        help='offset = velocity * horizon: the time the policy takes to absorb an offset (s)')
-    parser.add_argument('--period', type=float, default=0.02, help='decision period (s)')
-    args = parser.parse_args()
-
+def main(args, cfg: ResidualTD3DexmgConfig):
+    
     last_successful = False
     results = []
     with ResidualEnv.from_args(args) as env:
+        insert_policy = env._runner.policies['insert'][-1]
+        # fields for the base policy, use for base actiom computation; fields for online actor
+        obs_fields = insert_policy.obs_fields; actor_fields = args.actor_fields
+       
+        offline_rb, online_rb = prepare_rl_experiment(
+                cfg,
+                dataset_path=args.offline_dataset_path,
+                lowdim_keys=obs_fields,
+                actor_fields=actor_fields,
+                base_policy=insert_policy
+            )
+        # Modify actor_fields to fit env naming convention
+        rename_actor_fields = [ 'filtered_force' if name == 'force' else ('actual_pose' if name == 'pose' else name) for name in actor_fields]
+        actor_fields = rename_actor_fields
+
         for _ in range(args.episodes):
             env.register(ZForceRegulator(args.f_floor, args.gain, args.max_speed, args.horizon), period=args.period)
             env.wait_circle = not last_successful
             ep = env.run()
+
+            insert_episode = None if len(ep.steps) == 0 else ep.steps # a dictionary with 15 keys
             last_successful = ep.success
+            if insert_episode is not None:
+                add_episode_to_buffer(insert_episode, actor_fields, last_successful, online_rb)
+            
             s = summarize(ep, args.f_floor)
             results.append(s)
             print(f'\nepisode {s["episode"]}: {"plugged in" if ep.success else "failed"} ({ep.end})  '
                   + '  '.join(f'{k} {s[k]}' for k in ('fz_max', 'fz_mean_over_floor', 's_over_floor', 'dz_max_mm')
                               if k in s))
-            if args.log_dir is not None:
-                with open(os.path.join(args.log_dir, 'zforce_regulator.json'), 'w') as f:
-                    json.dump({'args': vars(args), 'episodes': results}, f, indent=2, default=float)
-
     n = len(results)
     print(f'\n{sum(r["success"] for r in results)}/{n} plugged in '
           f'({sum(r["aborted"] for r in results)} aborted)')
 
 
-if __name__ == '__main__':
-    main()
+def hydra_entry():
+    # 1. Define your argparse arguments exactly as before
+    parser = argparse.ArgumentParser(description='Insert with a z-force-regulating residual, episode after episode.')
+    ResidualEnv.add_args(parser)
+    parser.add_argument('--episodes', type=int, default=5)
+    parser.add_argument('--f_floor', type=float, default=5.0)
+    parser.add_argument('--gain', type=float, default=3e-3)
+    parser.add_argument('--max_speed', type=float, default=0.015)
+    parser.add_argument('--horizon', type=float, default=0.4)
+    parser.add_argument('--period', type=float, default=0.02)
+    parser.add_argument('--offline_dataset_path', type=str)
+    parser.add_argument('--actor_fields', nargs='+', type=str, default=[ 'pose', 'force'])
+    
+    # 2. Split args: 'args' goes to argparse, 'hydra_overrides' captures everything else
+    args, hydra_overrides = parser.parse_known_args()
+
+    # 3. Manually initialize and run Hydra with the leftover overrides
+    # Note: Replace 'conf' with the actual relative path to your config directory
+    config_dir = '/home/atkesonlab4/Desktop/YiqiProject/100%_Project/ethernet-plugging/agent/finetuning/config'
+    
+    with initialize_config_dir(version_base=None, config_dir=config_dir):
+        # Hydra processes its config overrides here (e.g., agent.actor_lr=1e-5)
+        cfg_conf = compose(config_name="residual_td3_dexmg_config", overrides=hydra_overrides)
+    
+    # 4. Hand off both clean configurations to your main execution function
+    main(args, cfg_conf)
+
+if __name__ == "__main__":
+    # Call the function directly without the @hydra.main decorator
+    hydra_entry()

@@ -26,11 +26,11 @@ import pathlib
 import torch
 import h5py
 
-from agent.utils.utils import gripper_action, find_chunks
-from env import GRIP_OPEN, GRIP_CLOSED
-from agent.rl_finetuning.utils.dtype import to_uint8
+from robot.env import GRIP_OPEN, GRIP_CLOSED
+from agent.utils.dtype import to_uint8
 from agent.model.policy import DiffusionPolicy
-
+from agent.dataset.sequence import target_offset
+from agent.utils.utils import zforce_reward
 @dataclass
 class OfflineEpisode:
     """One parsed episode; `states`/`commands`/`rewards` are aligned per frame."""
@@ -38,7 +38,8 @@ class OfflineEpisode:
     ep_idx: int  # index of the episode in the dataset
     start: int  # offset of the episode's first frame in the stitched arrays
     length: int
-    states: np.ndarray  # (T, state_dim)
+    states: np.ndarray  # (T, state_dim) # for base policy
+    actor_states: np.ndarray # (T, actor_state_dim) for actor and critic
     # The reference command the demonstration recorded, in the same space the base
     # policy's integrated commands live in: absolute pose [tx, ty, tz, rx, ry, rz]
     # plus gripper state (GRIP_OPEN=0 / GRIP_CLOSED=1).
@@ -69,8 +70,9 @@ def _episode_bounds(f: h5py.File, num_episodes: int | None) -> list[tuple[int, i
 def parse_offline_dataset(
     dataset_path: str | pathlib.Path,
     lowdim_keys: list[str],
+    actor_fields: list[str],
     num_episodes: int | None = None,
-    g_thr: float = 18,
+    g_thr: float = 9,
 ) -> tuple[list[OfflineEpisode], int]:
     """Read the per-episode states, reference commands and rewards out of ``dataset.h5``.
 
@@ -93,41 +95,41 @@ def parse_offline_dataset(
     episodes: list[OfflineEpisode] = []
     total_transitions = 0
     with h5py.File(h5_path, 'r') as f:
+        
         for ep_idx, (start, length) in enumerate(_episode_bounds(f, num_episodes)):
             sl = slice(start, start + length)
             fields = []
             for key in lowdim_keys:
-                if key not in f:
+                if key in ['target_offset', 'log_stiffness']:
+                    # pose and force handle differently due to different naming convention in the dataset
+                    value = target_offset(f['target_pose'][sl], f['pose'][sl]).astype(np.float32) if key == 'target_offset' else np.log10(np.asarray(f['stiffness'][sl], dtype=np.float32))
+                elif key not in f:
                     raise KeyError(f"obs field {key!r} is not in {h5_path} (has: {list(f.keys())})")
-                value = np.asarray(f[key][sl])
+                else:
+                    value = np.asarray(f[key][sl])
                 fields.append(value if value.ndim == 2 else value[:, None])
-            state = np.concatenate(fields, -1)
-
-            poses = np.asarray(f['pose'][sl])
-            gripper_widths = np.asarray(f['gripper_width'][sl])
-            g_action = gripper_action(gripper_widths, threshold=g_thr)
-
-            chunks = find_chunks(g_action.flatten())
-            if not (len(chunks) == 5 and chunks[2][-1] == 1):
-                print(f"Skip episode {ep_idx}: expected 5 gripper segments, got {len(chunks)}")
-                continue
-
-            phase1 = chunks[1][1] - 30
-            phase2 = chunks[2][1] + 10
-            reward = np.zeros(length)
-            reward[phase1:phase2] = 1.0
-            reward[phase2:] = 2.0
-
-            # Same encoding integrate_actions produces: +1/-1 open/closed -> 0/1 state
-            g_state = np.where(g_action > 0, GRIP_OPEN, GRIP_CLOSED)
-
+            save_actor_fields = []
+            for key in actor_fields:
+                value = np.asarray(f[key][sl]); save_actor_fields.append(value if value.ndim == 2 else value[:, None])
+            actor_state = np.concatenate(save_actor_fields, -1).astype(np.float32)
+            state = np.concatenate(fields, -1).astype(np.float32)
+            poses = np.asarray(f['pose'][sl]).astype(np.float32)
+            zforce = np.asarray(f['force'][sl]).astype(np.float32)[:, 2]
+            network_status = np.asarray(f['network_status']).astype(np.float32)
+            gripper_widths = np.asarray(f['gripper_width'][sl]).astype(np.float32)
+            g_action = np.where(gripper_widths > g_thr, GRIP_OPEN, GRIP_CLOSED)[:, None]
+            
+            reward = zforce_reward(zforce)
+            reward[-1] = 1.0 # hardcode the last reward to be 1 (successful plugin)
+            
             episodes.append(
                 OfflineEpisode(
                     ep_idx=ep_idx,
                     start=start,
                     length=length,
                     states=state,
-                    commands=np.concatenate([poses, g_state], -1),
+                    actor_states=actor_state,
+                    commands=np.concatenate([poses, g_action], -1), # remove gripper status
                     rewards=reward,
                     gripper_widths=gripper_widths,
                 )
@@ -206,11 +208,12 @@ def populate_offline_buffer(
     h5_path = resolve_dataset_path(dataset_path)
     print("Populating offline buffer from dataset...")
     transitions = 0
-
+    pred_error = []
     with h5py.File(h5_path, 'r') as f:
         for episode in tqdm(episodes, desc="Processing offline dataset"):
             images = _read_episode_images(f, h5_path.parent, episode, img_h, img_w)
             states = torch.tensor(episode.states).float()
+            actor_states = torch.tensor(episode.actor_states).float()
             commands = torch.tensor(episode.commands).float()
             rewards = torch.tensor(episode.rewards).float()
             assert len(images) == len(states) == len(commands) == len(rewards)
@@ -220,8 +223,8 @@ def populate_offline_buffer(
             prev_command: torch.Tensor | None = None
             # Base policy predicts a chunk at a time; integrated once, consumed one per step
             base_commands = None
-
-            for step, (image, state, command, reward) in enumerate(zip(images, states, commands, rewards)):
+            
+            for step, (image, state, actor_state, command, reward) in enumerate(zip(images, states, actor_states, commands, rewards)):
                 # ------------------------------------------------------------------
                 # Build observation and action directly for replay buffer ----------
                 # ------------------------------------------------------------------
@@ -238,7 +241,7 @@ def populate_offline_buffer(
                     # Predict a chunk and integrate it against this frame's recorded pose,
                     # which anchors the deltas the policy emits (command[:6] is that pose)
                     if base_commands is None:
-                        with torch.no_grad():
+                        with torch.inference_mode():
                             chunk = base_policy.predict_action(raw_obs).squeeze(0)
                         des_poses, des_gripper, _ = base_policy.integrate_actions(
                             chunk,
@@ -248,14 +251,18 @@ def populate_offline_buffer(
                         base_commands = torch.from_numpy(
                             np.concatenate([des_poses, des_gripper[:, None]], -1)).float()
                     base_command = base_commands[0]
-
+                    pred_error.append( (base_command - command).abs().mean())
                     base_commands = base_commands[1:] if len(base_commands) > 1 else None
                 else:
                     assert False, f"Not Implemented"
 
                 # Build observation dict directly in target format
-                curr_obs = {"observation.state": state.cpu(), "observation.base_action": base_command.cpu(),
-                            "observation.rgb": image.cpu()}
+                curr_obs = {
+                            # "observation.state": state.cpu(), 
+                            "observation.state": actor_state.cpu(), 
+                            "observation.base_action": base_command.cpu(),
+                            # "observation.rgb": image.cpu()
+                }
 
                 # Convert images to uint8 for memory-efficient storage
                 to_uint8(curr_obs, ["observation.rgb"])
@@ -292,5 +299,5 @@ def populate_offline_buffer(
 
     # Log final statistics
     print(f"Added {transitions} transitions")
-
+    print(f"Prediction error:", np.mean(pred_error))
     return transitions

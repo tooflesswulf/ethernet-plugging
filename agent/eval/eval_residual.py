@@ -302,7 +302,7 @@ class _ResidualSplits(EvalSplits):
                 'base_log_gains': log_gains,
                 'dpose_req': np.asarray(req.dpose, float), 'dpose': self._corr.dpose,
                 'dlog_gains_req': {f: np.asarray(v, float) for f, v in req.dlog_gains.items()},
-                'dlog_gains': self._corr.dlog_gains, 'info': req.info, 'act_s': act_s,
+                'dlog_gains': self._corr.dlog_gains, 'info': req.info, 'act_s': act_s, 'phase': self.phase
             })
             # The callback runs on the control thread: while it runs, no command goes out
             tm = self._timing

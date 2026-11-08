@@ -13,7 +13,7 @@ from einops import rearrange
 from agent.finetuning.config.rlpd import QAgentConfig
 from agent.finetuning.off_policy import common_utils
 from agent.finetuning.off_policy.common_utils import utils
-from agent.finetuning.off_policy.networks.encoder import VitEncoder
+from agent.model.networks import VitEncoder
 from agent.finetuning.off_policy.rl.actor import Actor
 from agent.finetuning.off_policy.rl.critic import Critic
 

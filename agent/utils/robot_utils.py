@@ -178,3 +178,4 @@ def wait_for_circle(env: Env, iface: DualSenseInterface, close_gripper=False):
     time.sleep(0.1)
     env.gripper.wait_idle()
     time.sleep(1)
+

@@ -254,6 +254,7 @@ class DiffusionPolicy(nn.Module):
         # Pad a short history (e.g. the first steps of an eval episode) by repeating the
         # oldest frame, as the dataset does at episode starts. Every encoder needs exactly
         # obs_horizon frames.
+
         states = self._pad_history(self.normalize_states(conditions['state'].float()), self.obs_horizon)
         if self.encoder_type == 'none':
             return {'state': states} if self.noise_net == 'crossunet' else states.flatten(start_dim=1)
