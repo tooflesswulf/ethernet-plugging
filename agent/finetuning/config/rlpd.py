@@ -159,6 +159,11 @@ class RLPDAlgoConfig:
     offline_fraction: float = 0.5  # fraction of minibatch sampled from offline buffer
 
     # ------------------------------------------------------------------
+    # History conditioning ---------------------------------------------
+    # ------------------------------------------------------------------
+    condition_length: int = 8
+    
+    # ------------------------------------------------------------------
     # N-step returns ----------------------------------------------------
     # ------------------------------------------------------------------
     # Horizon used by the MultiStep transform in our replay buffers.

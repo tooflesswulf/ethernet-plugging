@@ -106,6 +106,7 @@ class MultiStepTransform(Transform):
         n_steps,
         gamma,
         *,
+        condition_length=1,
         reward_keys: list[NestedKey] | None = None,
         done_key: NestedKey | None = None,
         done_keys: list[NestedKey] | None = None,
@@ -120,6 +121,7 @@ class MultiStepTransform(Transform):
         self.gamma = gamma
         self._buffer = None
         self._validated = False
+        self.condition_length = condition_length
 
     @property
     def n_steps(self):
@@ -196,21 +198,84 @@ class MultiStepTransform(Transform):
                 mask_key=self.mask_key,
                 n_steps=self.n_steps,
                 gamma=self.gamma,
+                condition_length=self.condition_length
             )
-            # return out[..., : -self.n_steps]
+           
             return out[..., -self.n_steps]
 
         return None
 
+    # def _append_tensordict(self, data):
+    #     if self._buffer is None:
+    #         total_cat = data
+    #         self._buffer = data[..., -self.n_steps :].copy()
+    #     else:
+    #         total_cat = torch.cat([self._buffer, data], -1)
+    #         self._buffer = total_cat[..., -self.n_steps :].copy()
+    #     return total_cat
+
     def _append_tensordict(self, data):
+        buffer_length = max(self.n_steps, self.condition_length)
+
         if self._buffer is None:
             total_cat = data
-            self._buffer = data[..., -self.n_steps :].copy()
+            self._buffer = data[..., -buffer_length:].copy()
         else:
             total_cat = torch.cat([self._buffer, data], -1)
-            self._buffer = total_cat[..., -self.n_steps :].copy()
+            self._buffer = total_cat[..., -buffer_length:].copy()
+
         return total_cat
 
+def _stack_observation_history(tensordict, condition_length, done):
+    """
+    Stack historical observations for both obs and next.obs.
+
+    Input:
+        obs:      [T, ...]
+        next.obs: [T, ...]
+
+    Output:
+        obs:      [T, condition_length, ...]
+        next.obs: [T, condition_length, ...]
+
+    History is reset at episode boundaries.
+    """
+    if condition_length == 1:
+        return tensordict
+
+    T = tensordict.shape[-1]
+
+    for obs_key in ["obs", ("next", "obs")]:
+        obs_td = tensordict.get(obs_key)
+
+        for key in obs_td.keys(include_nested=True, leaves_only=True):
+            value = obs_td.get(key)
+
+            stacked = []
+            episode_start = 0
+
+            for t in range(T):
+                # Reset history after the previous transition terminated.
+                if t > 0 and done[t - 1]:
+                    episode_start = t
+
+                start = max(episode_start, t - condition_length + 1)
+                history = value[start:t + 1]
+
+                # Repeat the earliest available frame for padding.
+                pad_length = condition_length - history.shape[0]
+
+                if pad_length > 0:
+                    padding = history[:1].expand(
+                        pad_length, *history.shape[1:]
+                    )
+                    history = torch.cat([padding, history], dim=0)
+
+                stacked.append(history)
+
+            obs_td.set(key, torch.stack(stacked, dim=0))
+
+    return tensordict
 
 def _multi_step_func(
     tensordict: TensorDictBase,
@@ -221,6 +286,7 @@ def _multi_step_func(
     mask_key,
     n_steps,
     gamma,
+    condition_length
 ):
     # in accordance with common understanding of what n_steps should be
     n_steps = n_steps - 1
@@ -250,6 +316,12 @@ def _multi_step_func(
         mask = None
 
     *batch, T = tensordict.batch_size
+    # Stack historical observations before n-step gathering.
+    tensordict = _stack_observation_history(
+        tensordict,
+        condition_length=condition_length,
+        done=done,
+    )
 
     summed_rewards = []
     for reward_key in reward_keys:

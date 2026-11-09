@@ -1322,3 +1322,60 @@ if __name__ == '__main__':
     out = encoder(image, pose, force)
     assert False, f"{out['logits'].shape} {out['embedding'].shape}"
 
+class TemporalConvEncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim,
+        feature_dim,
+        hidden_dim=128,
+        kernel_size=3,
+        num_layers=3,
+        history_len=16,
+    ):
+        super().__init__()
+
+        layers = []
+        in_channels = input_dim
+
+        for i in range(num_layers):
+            dilation = 2 ** i
+            padding = dilation * (kernel_size - 1) // 2
+
+            layers.extend([
+                nn.Conv1d(
+                    in_channels,
+                    hidden_dim,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    dilation=dilation,
+                ),
+                nn.GroupNorm(8, hidden_dim),
+                nn.GELU(),
+            ])
+
+            in_channels = hidden_dim
+
+        self.temporal_conv = nn.Sequential(*layers)
+
+        # Learnable temporal projection
+        # (hidden_dim, history_len) -> feature_dim
+        self.temporal_projection = nn.Sequential(
+            nn.Flatten(start_dim=1),
+            nn.Linear(hidden_dim * history_len, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, feature_dim),
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, T, input_dim)
+
+        Returns:
+            z: (B, feature_dim)
+        """
+        x = x.transpose(1, 2)  # (B, input_dim, T)
+        x = self.temporal_conv(x)  # (B, hidden_dim, T)
+        z = self.temporal_projection(x)
+
+        return z

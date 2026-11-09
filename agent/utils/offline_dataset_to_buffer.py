@@ -93,7 +93,7 @@ def parse_offline_dataset(
     h5_path = resolve_dataset_path(dataset_path)
 
     episodes: list[OfflineEpisode] = []
-    total_transitions = 0
+    total_transitions = 0; rl_input_dim = {}
     with h5py.File(h5_path, 'r') as f:
         
         for ep_idx, (start, length) in enumerate(_episode_bounds(f, num_episodes)):
@@ -111,6 +111,7 @@ def parse_offline_dataset(
             save_actor_fields = []
             for key in actor_fields:
                 value = np.asarray(f[key][sl]); save_actor_fields.append(value if value.ndim == 2 else value[:, None])
+                
             actor_state = np.concatenate(save_actor_fields, -1).astype(np.float32)
             state = np.concatenate(fields, -1).astype(np.float32)
             poses = np.asarray(f['pose'][sl]).astype(np.float32)
@@ -137,7 +138,8 @@ def parse_offline_dataset(
             total_transitions += length
 
     print('Loaded episode count:', len(episodes), '\tTotal transitions:', total_transitions)
-    return episodes, total_transitions
+    rl_input_dim = {'state': actor_state.shape[1], 'action': poses.shape[1]}
+    return episodes, total_transitions, rl_input_dim
 
 
 def _read_episode_images(
