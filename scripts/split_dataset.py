@@ -15,8 +15,14 @@ sampled at t = (k + 1) / framerate on the rawdata.h5 clock -- nothing is resampl
 no images are rewritten; image paths are stored absolute, as concat_datasets.py does,
 so the source dataset directories must stay where they are.
 
-Episodes without the scripted markers (e.g. DAgger rollouts from teleoperation_rl.py)
-are skipped with a warning.
+Episodes recorded by agent/eval/eval_splits.py or eval_residual.py (e.g. the insert DAgger
+rollouts of experiments/dagger_insert.py) carry the boundaries in phases.json instead: the
+end of pickup, the start of insert (transport done) and its end, kept if it ended on the
+network; an insert where the policy commanded the gripper open before the network came up
+(the plug seated, the link not up yet) ends just before that command instead. Other
+episodes without the scripted markers (e.g. DAgger rollouts from
+teleoperation_rl.py) are skipped with a warning. --phases insert writes only the insert
+dataset (the pickups of policy rollouts are no demonstrations).
 
 Example:
     python scripts/split_dataset.py \\
@@ -27,11 +33,13 @@ Example:
 from dataclasses import dataclass
 import argparse
 import pathlib
+import json
 import h5py
 import numpy as np
 
 STITCHED_FIELDS = ['pose', 'force', 'gripper_width', 'gripper_force',
                    'target_pose', 'stiffness', 'damping', 'mass']
+GRIP_OPEN = 0          # robot/env.py: commands/des_gripper
 SCRIPTED_K = 2999.     # fdcc.toml [scripted] stiffness is 3000 N/m; teleop runs at 300
 PHASES = ('pickup', 'insert')
 GRIP_RANGE_ATTR = 'grip_width_range'   # agent/dataset/sequence.py
@@ -49,7 +57,7 @@ def grip_width_range(f: h5py.File) -> np.ndarray:
 class Segments:
     t_down: float           # DpadDown: pickup ends, transport starts
     t_transport_end: float  # scripted gains restored at the port pose
-    t_net: float            # network up: insert ends, unplug starts
+    t_net: float            # network up (or, in phases.json episodes, the first gripper-open command): insert ends
     t_final: float          # last sample of any stream (rawdata_to_dataset's tf)
 
 
@@ -86,6 +94,23 @@ def find_segments(raw_h5: pathlib.Path) -> Segments:
     return Segments(t_down, float(restores[-1]), t_net, float(t_final))
 
 
+def phases_json_segments(ep_dir: pathlib.Path) -> Segments:
+    """find_segments for an episode with phases.json (eval_splits.py), whose times are on the
+    rawdata.h5 clock. Raises ValueError if insert did not end on the network. If the policy
+    commanded the gripper open during insert, insert ends at the first such command: the
+    network lags the plug seating, and the policy let go in between."""
+    with open(ep_dir / 'phases.json') as f:
+        phases = {p['phase']: p for p in json.load(f)['phases']}
+    if 'insert' not in phases or phases['insert'].get('end') != 'network':
+        raise ValueError(f'insert ended on {phases.get("insert", {}).get("end")!r}, not the network')
+    t0, t1 = float(phases['insert']['t_start']), float(phases['insert']['t_end'])
+    with h5py.File(ep_dir / 'rawdata.h5', 'r') as f:
+        t_final = max(f['robot_obs/time'][-1], f['gripper_obs/time'][-1], f['camera_obs/time'][-1])
+        ct, grip = f['commands/time'][:], f['commands/des_gripper'][:]
+    opens = ct[(ct >= t0) & (ct < t1) & (grip == GRIP_OPEN)]
+    return Segments(float(phases['pickup']['t_end']), t0, float(opens[0]) if len(opens) else t1, float(t_final))
+
+
 def phase_windows(seg: Segments, margin: float) -> dict:
     """Time window [t0, t1) of each phase. `margin` skips the gain ramp after transport."""
     return {'pickup': (0., seg.t_down),
@@ -93,8 +118,8 @@ def phase_windows(seg: Segments, margin: float) -> dict:
 
 
 def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: float,
-          max_transport_s: float, grip_open_mm: float, force: bool):
-    outs = {p: out_prefix.parent / f'{out_prefix.name}-{p}_dataset' for p in PHASES}
+          max_transport_s: float, grip_open_mm: float, force: bool, phases=PHASES, grip_stats=None):
+    outs = {p: out_prefix.parent / f'{out_prefix.name}-{p}_dataset' for p in phases}
     for d in outs.values():
         if (d / 'dataset.h5').exists() and not force:
             raise SystemExit(f'{d / "dataset.h5"} already exists; pass --force to overwrite')
@@ -128,10 +153,10 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
             src_range = grip_width_range(f)
             grip_range = np.array([min(grip_range[0], src_range[0]), max(grip_range[1], src_range[1])])
 
-        n_kept = {p: 0 for p in PHASES}
+        n_kept = {p: 0 for p in phases}
         for i, ep in enumerate(episodes):
             try:
-                seg = find_segments(ep / 'rawdata.h5')
+                seg = phases_json_segments(ep) if (ep / 'phases.json').exists() else find_segments(ep / 'rawdata.h5')
             except ValueError as e:
                 print(f'  skip {raw_dir.name}/{ep.name}: {e}')
                 continue
@@ -146,6 +171,8 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
                 continue
             frame_t = (np.arange(lengths[i]) + 1) / framerate      # rawdata_to_dataset sample times
             for phase, (t0, t1) in phase_windows(seg, margin).items():
+                if phase not in phases:
+                    continue
                 idx = offsets[i] + np.where((frame_t >= t0) & (frame_t < t1))[0]
                 # The cable must be held where a phase hands over to a scripted motion: a
                 # DpadDown before the fingers closed (v2 ep 47, 48) labels 'done' while open;
@@ -163,8 +190,13 @@ def split(sources, out_prefix: pathlib.Path, margin: float, min_transport_s: flo
                 meta[phase]['t_start'].append(t0)
                 meta[phase]['t_end'].append(t1)
                 meta[phase]['id'].append(int(ep.name.removeprefix('episode')))
-                for k in ('grip_width_mm', 'grip_force_n', 'grip_speed_mmps', 'grip_pullback_mm'):
-                    meta[phase][k].append(ds_meta[k][i])
+                for j, k in enumerate(('grip_width_mm', 'grip_force_n', 'grip_speed_mmps', 'grip_pullback_mm')):
+                    if k in ds_meta:
+                        meta[phase][k].append(ds_meta[k][i])
+                    elif grip_stats is not None:
+                        meta[phase][k].append(grip_stats[j])
+                    else:
+                        raise SystemExit(f'{ds_dir} has no metadata/{k} (an eval recording?): pass --grip_stats')
                 source_names[phase].append(raw_dir.name)
                 n_kept[phase] += 1
         print(f'{raw_dir}: kept ' + ', '.join(f'{n}/{len(episodes)} {p}' for p, n in n_kept.items()))
@@ -206,7 +238,13 @@ if __name__ == '__main__':
     parser.add_argument('--max_transport_s', type=float, default=10.0)
     parser.add_argument('--grip_open_mm', type=float, default=20.0,
                         help='gripper width above which the cable counts as not held')
+    parser.add_argument('--phases', nargs='+', choices=PHASES, default=list(PHASES),
+                        help='which datasets to write')
+    parser.add_argument('--grip_stats', type=float, nargs=4, default=None,
+                        metavar=('WIDTH_MM', 'FORCE_N', 'SPEED_MMPS', 'PULLBACK_MM'),
+                        help='gripper settings for episodes that did not record them (eval_splits.py '
+                             'recordings ran with the pickup policy\'s grip_stats)')
     parser.add_argument('--force', action='store_true', help='overwrite existing outputs')
     args = parser.parse_args()
     split(args.source, pathlib.Path(args.output), args.margin,
-          args.min_transport_s, args.max_transport_s, args.grip_open_mm, args.force)
+          args.min_transport_s, args.max_transport_s, args.grip_open_mm, args.force, args.phases, args.grip_stats)
