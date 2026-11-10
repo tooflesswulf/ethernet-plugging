@@ -108,7 +108,7 @@ class Actor(nn.Module):
         policy_input = torch.cat([temp_feat, feat], dim=-1)
        
         mu: torch.Tensor = self.policy(policy_input)
-
+       
         # Scale the mean by action_scale
         # NOTE: std is already in environment action space (more interpretable)
         scaled_mu = mu * self.cfg.action_scale

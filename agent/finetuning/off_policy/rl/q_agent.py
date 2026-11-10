@@ -244,6 +244,12 @@ class QAgent(nn.Module):
                 obs[k] = v.unsqueeze(0)
         return should_unsqueeze
 
+    def maskout_action(self, action):
+        weight = torch.zeros_like(action, device = action.device).float(); weight[:,2] = 1.0
+        # only 2nd dimension valid
+        action *= weight
+        return action
+
     def act(self, obs: dict[str, torch.Tensor], *, eval_mode=False, stddev=0.0, cpu=True) -> torch.Tensor:
         """Take a *raw* (unnormalized) observation and return a *raw* action.
 
@@ -277,6 +283,10 @@ class QAgent(nn.Module):
         action = action.detach()
         if cpu:
             action = action.cpu()
+        # only z-axis is effective as a residual action
+        
+        action = self.maskout_action(action)
+        
         return action
 
     def _act_default(
@@ -301,7 +311,8 @@ class QAgent(nn.Module):
             action = dist.mean
         else:
             action = dist.sample(clip=clip)
-
+        # only z-axis is effective as a residual action
+        action = self.maskout_action(action)
         return action
 
     def update_critic(
@@ -327,7 +338,7 @@ class QAgent(nn.Module):
                 clip=self.cfg.stddev_clip,
                 use_target=True,
             )
-            print('\nDebug Qagent, shape is correct, implementation is not. Residual or not residual? Decide later')
+ 
             if self.residual_actor:
                 next_base_action = next_obs['observation.base_action'][:, -1]
                 # Current step: 'action' from the replay buffer is the executed combined action

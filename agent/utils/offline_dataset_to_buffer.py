@@ -255,6 +255,8 @@ def populate_offline_buffer(
                     base_command = base_commands[0]
                     pred_error.append( (base_command - command).abs().mean())
                     base_commands = base_commands[1:] if len(base_commands) > 1 else None
+                    corr_command = command - base_command; corr_command = corr_command[:-1] # drop gripper action
+                    base_command = base_command[:-1] # drop gripper action
                 else:
                     assert False, f"Not Implemented"
 
@@ -278,7 +280,8 @@ def populate_offline_buffer(
                         {
                             "obs": TensorDict(prev_obs, batch_size=[]),
                             # the executed action is the recorded reference command
-                            "action": prev_command,
+                            # "action": prev_command,
+                            "action": prev_corr_command,
                             "next": TensorDict(
                                 {
                                     "obs": TensorDict(curr_obs, batch_size=[]),
@@ -297,7 +300,7 @@ def populate_offline_buffer(
                     transitions += 1
 
                 # Cache current frame for pairing with the next one ---------------
-                prev_obs, prev_command = curr_obs, command
+                prev_obs, prev_command, prev_corr_command = curr_obs, command, corr_command
 
     # Log final statistics
     print(f"Added {transitions} transitions")

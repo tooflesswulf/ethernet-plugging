@@ -5,7 +5,7 @@ the port, without stopping the insertion push.
     python experiments/zforce_regulator.py --insert_ckpt <ckpt> --log_dir <dir>
 """
 from agent.eval.eval_residual import ResidualEnv, ResidualActor, Correction
-import os, hydra, argparse, json, numpy as np, shutil
+import os, hydra, argparse, json, numpy as np, shutil, torch
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
@@ -40,15 +40,19 @@ def prepare_rl_experiment(cfg, dataset_path, lowdim_keys, actor_fields, base_pol
 
     offline_rb, online_rb = init_buffer(total_transitions, rl_scratch_dir2, rl_scratch_dir, cfg, online_batch_size, offline_batch_size)
     offline_rb, flag = load_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)
-    # added = populate_offline_buffer(
-    #     dataset_path,
-    #     offline_episodes,
-    #     rb=offline_rb,
-    #     policy_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
-    #     base_policy=base_policy.to(device) if cfg.offline_data.use_base_policy_for_base_actions else None,
-    #     img_h=img_h, img_w=img_w,
-    #     device=device,
-    # )
+    if not flag:
+        added = populate_offline_buffer(
+            dataset_path,
+            offline_episodes,
+            rb=offline_rb,
+            policy_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
+            base_policy=base_policy.to(device) if cfg.offline_data.use_base_policy_for_base_actions else None,
+            img_h=img_h, img_w=img_w,
+            device=device,
+        )
+        print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
+        save_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)
+    
     print('\nDebug, SKIP POPULATING OFFLINE\n')
 
     agent = QAgent(
@@ -56,38 +60,44 @@ def prepare_rl_experiment(cfg, dataset_path, lowdim_keys, actor_fields, base_pol
         prop_dim=rl_input_dim['state'],
         action_dim=rl_input_dim['action'],
         cfg=cfg.agent,
-        residual_actor=False,  # Enable residual actor mode
+        residual_actor=True,  # Enable residual actor mode
     ).float().to(device)
     print('\nDebug, SKIP INIT STATS FOR AGENT\n')
-    # norm_stats = _compute_dataset_norm_stats(online_rb=online_rb, offline_rb=offline_rb if cfg.algo.offline_fraction > 0.0 else None, action_dim=rl_input_dim['action'])
-    # # From here on the agent owns normalization: act()/update() take raw measurements
-    # # and these stats ride along in the checkpoint as buffers.
-    # agent.set_norm_stats(
-    #     norm_stats,
-    #     min_action_range=cfg.offline_data.min_action_range,
-    #     min_state_std=cfg.offline_data.min_state_std,
-    # )
+    norm_stats = _compute_dataset_norm_stats(online_rb=online_rb, offline_rb=offline_rb if cfg.algo.offline_fraction > 0.0 else None, action_dim=rl_input_dim['action'])
+    # From here on the agent owns normalization: act()/update() take raw measurements
+    # and these stats ride along in the checkpoint as buffers.
+    agent.set_norm_stats(
+        norm_stats,
+        min_action_range=cfg.offline_data.min_action_range,
+        min_state_std=cfg.offline_data.min_state_std,
+    )
     return offline_rb, online_rb, agent, online_batch_size, offline_batch_size
     
 
 class ZForceRegulator(ResidualActor):
-    def __init__(self, f_floor=5.0, gain=3e-3, max_speed=0.015, horizon=0.4, neural_actor=None):
+    def __init__(self, f_floor=5.0, gain=3e-3, max_speed=0.015, horizon=0.4, neural_actor=None, global_step=None, cfg=None):
         self.f_floor = f_floor      # [N] no correction below this
         self.gain = gain            # [m/s per N] upward velocity per N over f_floor
-        self.max_speed = max_speed  # [m/s] fastest upward velocity: slower than an insertion push
+        self.max_speed = max_speed  # [m/s] fastest upward velocity: slower than an insertion push 
         self.horizon = horizon      # [s] the time over which the policy absorbs an offset
-        self.neural_actor= neural_actor # neural network
-
+        # neural network and its parameters 
+        self.neural_actor= neural_actor 
+        self.global_step = global_step; self.cfg = cfg
     def act(self, step):
         if self.neural_actor is None:
             fz = float(step.state['filtered_force'][2])
             v = min(self.gain * max(0., fz - self.f_floor), self.max_speed)
             return Correction(dpose=np.r_[0., 0., v * self.horizon, 0., 0., 0.], info={'fz': fz, 'v': v})
         else:
+            # Modify residualactor: get a list of step instead of step
             # concatenate a window of state and force 
-            # return corrections 
+            # return corrections, only on z-axis 
             pass
-    
+            with torch.no_grad():
+                obs = None
+                stddev = utils.schedule(self.cfg.algo.stddev_schedule, self.global_step)
+                residual_action = self.neural_actor.act(obs, eval_mode=False, stddev=stddev, cpu=False)
+            return Correction(dpose=np.r_[0., 0., residual_action[2], 0., 0., 0.], info={'fz': fz, 'v': v})
 
 def summarize(ep, f_floor):
     """Per-episode numbers: outcome, and how the z-force, the offset and the target behaved."""
@@ -140,21 +150,15 @@ def main(args, cfg: ResidualTD3DexmgConfig):
         actor_fields = rename_actor_fields
 
         ################ RL-warmup: fill the replay buffer with some episodes, train the critic
-        warmup_episodes = 1 # hardcoded right now
+        warmup_episodes = 2 # hardcoded right now
         _, total_warmup_steps = deploy(warmup_episodes, env, args, actor_fields, online_rb); global_step += total_warmup_steps
         # critic_warmup(total_warmup_steps) # warmup for the same number of steps
-        global_step = _train_agent( agent, total_warmup_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=True)
-        assert False
+        _train_agent( agent, total_warmup_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=True); global_step += total_warmup_steps
         ################ RL-training: alternating between collect 1 episode, train for certain steps
-        train_episodes = 150 # hardcoded right now 
+        train_episodes = 2 # hardcoded right now 
         for ep_id in range(train_episodes):
             ep_success, train_steps = deploy(1, env, args, actor_fields, online_rb)
-            # rl_train(train_steps)
-
-
-        
-            
-          
+            _train_agent( agent, train_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=False); global_step += train_steps
 
 
 def hydra_entry():

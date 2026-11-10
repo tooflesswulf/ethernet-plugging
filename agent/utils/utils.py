@@ -156,8 +156,11 @@ def _compute_dataset_norm_stats(
             continue
 
         actions = _read_buffer_field(rb, ("action",), num_entries).reshape(num_entries, -1)
-        states = _read_buffer_field(rb, ("obs", "observation.state"), num_entries).reshape(num_entries, -1)
-
+        states = _read_buffer_field(rb, ("obs", "observation.state"), num_entries) 
+        if states.dim() == 3:
+            # states: Txstacked_lengthxd
+            states = states[:,-1] # get reid of redundant conditioning for norm stats
+        states = states.reshape(num_entries, -1)
         # Offline actions may still carry the trailing "done" dimension
         actions = actions[:, :action_dim]
 
@@ -289,8 +292,8 @@ def add_episode_to_buffer(
     """
     obs_keys_set = ['observation.base_action', 'observation.rgb', 'observation.state']
     images, states, base_poses, des_poses = ep['image'], ep['state'], ep['base_pose'], ep['dpose_req']
-    
-    actions = base_poses + des_poses
+    # action is a residual
+    actions = des_poses #  base_poses + des_poses
     zforces = states['filtered_force'][:,2]; rewards = zforce_reward(zforces); dones = [False] * len(images)
     states = np.concatenate([states[k] for k in obs_fields], -1); 
     T = len(states)

@@ -34,6 +34,8 @@ POLICY_PHASES = ('pickup', 'insert')
 
 
 class EvalSplits(EvalRealtimeChunking):
+    PICKUP_FZ_MAX = 10  # N
+
     def __init__(self, pickup_ckpt, insert_ckpt, device='cuda', insert_done=False, **kwargs):
         # The insert policy loads in its worker while the base class loads the pickup one
         # and homes the robot.
@@ -122,6 +124,8 @@ class EvalSplits(EvalRealtimeChunking):
         buttons = self.iface.dualsense.state
         if self.phase == 'pickup' and buttons.DpadDown:
             return self.start_transport('DpadDown')
+        if self.phase == 'pickup' and self.env.get_obs()['state']['filtered_force'][2] > self.PICKUP_FZ_MAX:
+            return self.start_transport(f'fz > {self.PICKUP_FZ_MAX:g} N')
         if self.phase == 'insert':
             if self.env.network_status:
                 return self.start_unplug('network')
