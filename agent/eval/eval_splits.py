@@ -34,7 +34,7 @@ POLICY_PHASES = ('pickup', 'insert')
 
 
 class EvalSplits(EvalRealtimeChunking):
-    PICKUP_FZ_MAX = 10  # N
+    PICKUP_FZ_MAX = 10.0     # [N] z-force that ends pickup, as DpadDown (pressing into the box)
 
     def __init__(self, pickup_ckpt, insert_ckpt, device='cuda', insert_done=False, **kwargs):
         # The insert policy loads in its worker while the base class loads the pickup one
@@ -103,8 +103,8 @@ class EvalSplits(EvalRealtimeChunking):
         seq.move_relative([0, 0, .03, 0, 0, 0], speed=.05)
 
         r1, r2 = Teleoperation.release_pose1, Teleoperation.release_pose2
-        box1 = [-0.07,  0.72,  0.08] # Custom drop box
-        box2 = [-0.19,  0.57,  0.08]
+        box1 = [-0.05,  0.72,  0.08] # Custom drop box
+        box2 = [-0.13,  0.60,  0.08]
         rel = np.array(r1)
         lo, hi = np.minimum(box1[:2], box2[:2]), np.maximum(box1[:2], box2[:2])
         rel[:2] = np.random.uniform(lo, hi)
