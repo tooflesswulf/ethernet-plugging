@@ -83,8 +83,10 @@ class ZForceRegulator(ResidualActor):
         # neural network and its parameters 
         self.neural_actor= neural_actor 
         self.global_step = global_step; self.cfg = cfg
-    def act(self, step):
+
+    def act(self, steps):
         if self.neural_actor is None:
+            step = steps[-1] if isinstance(steps, list) else steps
             fz = float(step.state['filtered_force'][2])
             v = min(self.gain * max(0., fz - self.f_floor), self.max_speed)
             return Correction(dpose=np.r_[0., 0., v * self.horizon, 0., 0., 0.], info={'fz': fz, 'v': v})
@@ -130,9 +132,8 @@ def deploy(episodes, env, args, actor_fields, online_rb, collect_data=True):
     return successes, total_transitions
     
 def main(args, cfg: ResidualTD3DexmgConfig):
-    
     global_step = 0
-    with ResidualEnv.from_args(args) as env:
+    with ResidualEnv.from_args(args, actor_horizon=cfg.algo.condition_length) as env:
         insert_policy = env._runner.policies['insert'][-1]
         ################# Prepare experiment: replay buffer, neural actor
         # fields for the base policy, use for base actiom computation; fields for online actor
@@ -173,7 +174,7 @@ def hydra_entry():
     parser.add_argument('--period', type=float, default=0.02)
     parser.add_argument('--offline_dataset_path', type=str)
     parser.add_argument('--actor_fields', nargs='+', type=str, default=[ 'pose', 'force'])
-    
+
     # 2. Split args: 'args' goes to argparse, 'hydra_overrides' captures everything else
     args, hydra_overrides = parser.parse_known_args()
 
@@ -184,7 +185,7 @@ def hydra_entry():
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         # Hydra processes its config overrides here (e.g., agent.actor_lr=1e-5)
         cfg_conf = compose(config_name="residual_td3_dexmg_config", overrides=hydra_overrides)
-    
+
     # 4. Hand off both clean configurations to your main execution function
     main(args, cfg_conf)
 

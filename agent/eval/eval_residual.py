@@ -47,6 +47,7 @@ from robot import robot_execution, interface, fdcc
 from scipy.spatial.transform import Rotation as R
 from dataclasses import dataclass, field
 import numpy as np
+import collections
 import threading
 import argparse
 import pickle
@@ -101,13 +102,13 @@ class Correction:
 
 
 class ResidualActor:
-    """Optional base for a correction callback: register(actor) calls actor(step) = act(step)."""
+    """Optional base for a correction callback: register(actor) calls actor(steps) = act(steps)."""
 
-    def act(self, step: InsertStep) -> Correction:
+    def act(self, steps: InsertStep | list[InsertStep]) -> Correction:
         raise NotImplementedError
 
-    def __call__(self, step):
-        return self.act(step)
+    def __call__(self, steps):
+        return self.act(steps)
 
 
 @dataclass
@@ -180,11 +181,12 @@ class _ResidualSplits(EvalSplits):
     """EvalSplits with the insert correction, re-armed for another episode by rearm()."""
 
     def __init__(self, pickup_ckpt, insert_ckpt, insert_timeout=None, limits=None, insert_grip_closed=False,
-                 **kwargs):
+                 actor_horizon=1, **kwargs):
         self.correction, self.period, self.images = None, 0.05, False
         self.insert_timeout = insert_timeout
         self.insert_grip_closed = insert_grip_closed
         self.limits = limits
+        self.actor_horizon = actor_horizon
         self.index = 0
         self._dpose = np.zeros(6)                   # correction applied to the last command
         super().__init__(pickup_ckpt, insert_ckpt, **kwargs)     # homes the robot, starts env
@@ -198,6 +200,7 @@ class _ResidualSplits(EvalSplits):
         self._t_insert = None
         self._end = None
         self._steps, self._ticks = [], []
+        self._hist = collections.deque(maxlen=self.actor_horizon)
 
     def rearm(self):
         """From where end_episode left the robot (homed, Env stopped) to the state __init__
@@ -288,9 +291,13 @@ class _ResidualSplits(EvalSplits):
                               image=obs['image'] if self.images else None,
                               base_pose=base_pose, base_width=float(des_width), base_done=float(done),
                               base_log_gains=log_gains, prev=self._corr)
+
+            self._hist.append(step)
+            steps = step if self.actor_horizon == 1 else \
+                [self._hist[0]] * (self.actor_horizon - len(self._hist)) + list(self._hist)
             t_act = time.perf_counter()
             try:
-                req = (self.correction(step) if self.correction else None) or Correction()
+                req = (self.correction(steps) if self.correction else None) or Correction()
                 act_s = time.perf_counter() - t_act
                 self._corr = self.clamp(req)
             except Exception as e:
@@ -469,20 +476,21 @@ class ResidualEnv:
                  wait_circle=True, max_dpos=0.01, max_drot=0.1, max_dlog_gain=0.5,
                  max_dpos_rate=0.05, max_drot_rate=0.5, insert_done=False, control_freq=100.0,
                  weight_decay=0.5, taper=0.15, lpf_hz=3.0, done_threshold=0.5, device='cuda',
-                 insert_grip_closed=False):
+                 insert_grip_closed=False, actor_horizon=1):
         if log_dir is not None:
             os.makedirs(log_dir, exist_ok=True)
         self._runner = _ResidualSplits(
             pickup_ckpt, insert_ckpt, insert_timeout=insert_timeout, insert_grip_closed=insert_grip_closed,
             limits=dict(max_dpos=max_dpos, max_drot=max_drot, max_dlog_gain=max_dlog_gain,
                         max_dpos_rate=max_dpos_rate, max_drot_rate=max_drot_rate),
+            actor_horizon=actor_horizon,
             insert_done=insert_done, log_dir=log_dir, control_freq=control_freq, weight_decay=weight_decay,
             taper=taper, lpf_hz=lpf_hz, done_threshold=done_threshold, device=device)
         self.wait_circle = wait_circle
 
     def register(self, correction, period=0.05, images=False):
         """
-        Correct insert from the next run() on: correction(step: InsertStep) -> Correction
+        Correct insert from the next run() on: correction(steps: InsertStep|list[InsertStep]) -> Correction
         (None = no correction), called on the control thread every `period` s of insert
         (None = every control tick), so it must be quick (~1 ms: numpy, or a small net on
         the CPU). images: pass camera frames in InsertStep / Episode (~1 MB each).
@@ -549,7 +557,8 @@ class ResidualEnv:
         parser.add_argument('--max_drot', type=float, default=0.1, help='bound on the rotation offset (rad)')
         parser.add_argument('--max_dlog_gain', type=float, default=0.5, help='bound on each log10 gain offset')
         parser.add_argument('--max_dpos_rate', type=float, default=0.05, help='slew limit on the pose offset (m/s)')
-        parser.add_argument('--max_drot_rate', type=float, default=0.5, help='slew limit on the rotation offset (rad/s)')
+        parser.add_argument('--max_drot_rate', type=float, default=0.5,
+                            help='slew limit on the rotation offset (rad/s)')
         parser.add_argument('--insert_done', action='store_true', default=False,
                             help='also end insert on the insert policy\'s done score, not only on the network')
         parser.add_argument('--device', type=str, default='cuda')
