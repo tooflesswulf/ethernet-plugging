@@ -1,13 +1,14 @@
-import torch
-from tqdm import tqdm 
+import torch, numpy as np
+from tqdm import tqdm  
 from agent.finetuning.off_policy.common_utils import utils
 
 def _train_agent(
         agent, train_steps, global_step, online_rb, offline_rb, cfg,  online_batch_size, offline_batch_size, warmup=False, device='cuda'
     ):
         """Run critic-only updates for warmup phase."""
+        actor_update_cadence = cfg.algo.num_updates_per_iteration // cfg.algo.actor_updates_per_iteration
         stddev = utils.schedule(cfg.algo.stddev_schedule, global_step)
-
+        collect_metrics = {}
         for i in tqdm( range(train_steps) ):
             # Sample mixed online/offline batch
             # Sample batches from replay buffers
@@ -21,17 +22,12 @@ def _train_agent(
             else:
                 # Online-only training
                 batch = online_batch
-
-            # Only update critic during warmup (update_actor=False)
-            if warmup:
-                pass
-                metrics = agent.update(batch, stddev=0.0, update_actor=False, )
-                print('Critic metrics', metrics)
-                print()
-            else:
-                metrics = agent.update(batch, stddev=stddev, update_actor=True )
-                print('All metrics', metrics)
-                print('\t\tHard Code with Online Batch ONLY!!!!!')
+            
+            # Update actor on the last iteration of each update cycle
+            std = 0.0 if warmup else stddev
+            update_actor = (not warmup) and (i + 1) % actor_update_cadence == 0
+            metrics = agent.update(batch, stddev=std, update_actor=update_actor)
+                
             # Update priorities for prioritized experience replay
             if cfg.algo.sampling_strategy == "prioritized_replay" and "_td_errors" in metrics:
                 # Update priorities in the batch for priority updates
@@ -55,5 +51,13 @@ def _train_agent(
                     # Online-only training - update only online buffer
                     online_rb.update_tensordict_priority(batch)
 
-            # Progress logging
-            pass
+            # logging
+            for k,v in metrics.items():
+                if k not in collect_metrics:
+                    collect_metrics[k] = []
+                collect_metrics[k].append(v)
+        # averaging metrics 
+        for k, v_list in collect_metrics.items():
+            v_arr = np.array(v_list)
+            collect_metrics[k] = np.mean(v_arr)
+        return collect_metrics
