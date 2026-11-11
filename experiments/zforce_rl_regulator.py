@@ -25,35 +25,26 @@ from agent.utils.rb_transforms import MultiStepTransform
 from agent.utils.checkpoint import save_replay_buffers, load_replay_buffers
 from agent.utils.utils import add_episode_to_buffer, _compute_dataset_norm_stats
 
+RL_SCR_DIR = "./../../rl_online_buffer"
+RL_SCR_DIR2 = "./../../rl_offline_buffer"
+RL_BUF_DIR = "./../../rl_dump_buffer"
+
 def prepare_rl_experiment(cfg, dataset_path, lowdim_keys, actor_fields, base_policy, img_h=128, img_w = 128, device='cuda'):
-    rl_scratch_dir = "./../../rl_online_buffer"
-    rl_scratch_dir2 = "./../../rl_offline_buffer"
-    rl_buffer_dir = "./../../rl_dump_buffer"
+    print('Not using offline data at all!')
     offline_episodes, total_transitions, rl_input_dim = parse_offline_dataset(dataset_path, lowdim_keys, actor_fields)
 
     print('Remove all previous content in the directory')
-    [ shutil.rmtree(scratch_dir ) for scratch_dir in [rl_scratch_dir, rl_scratch_dir2]  ]
-    [ os.makedirs(scratch_dir) for scratch_dir in [rl_scratch_dir, rl_scratch_dir2]  ]
+    [ shutil.rmtree(scratch_dir ) for scratch_dir in [RL_SCR_DIR, RL_SCR_DIR2]  ]
+    [ os.makedirs(scratch_dir) for scratch_dir in [RL_SCR_DIR, RL_SCR_DIR2]  ]
     print('Debug with SMAL ONLINE BATCH SIZE')
     online_batch_size = 2 #  int(cfg.algo.batch_size * (1 - cfg.algo.offline_fraction))
     offline_batch_size = 2 #  int(cfg.algo.batch_size * cfg.algo.offline_fraction)
 
-    offline_rb, online_rb = init_buffer(total_transitions, rl_scratch_dir2, rl_scratch_dir, cfg, online_batch_size, offline_batch_size)
-    offline_rb, flag = load_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)
-    if not flag:
-        added = populate_offline_buffer(
-            dataset_path,
-            offline_episodes,
-            rb=offline_rb,
-            policy_base_actions=cfg.offline_data.use_base_policy_for_base_actions,
-            base_policy=base_policy.to(device) if cfg.offline_data.use_base_policy_for_base_actions else None,
-            img_h=img_h, img_w=img_w,
-            device=device,
-        )
-        print(f"Added {added} offline transitions to buffer (size={len(offline_rb)})")
-        save_replay_buffers(offline_rb, 'offline_rb', rl_buffer_dir)
-    
-    print('\nDebug, SKIP POPULATING OFFLINE\n')
+    offline_rb, online_rb = init_buffer(total_transitions, RL_SCR_DIR2, RL_SCR_DIR, cfg, online_batch_size, offline_batch_size)
+
+    return offline_rb, online_rb, rl_input_dim, online_batch_size, offline_batch_size 
+
+def prepare_neural_actor(cfg, rl_input_dim, offline_rb, online_rb, device='cuda'):
 
     agent = QAgent(
         condition_length = cfg.algo.condition_length,
@@ -62,25 +53,22 @@ def prepare_rl_experiment(cfg, dataset_path, lowdim_keys, actor_fields, base_pol
         cfg=cfg.agent,
         residual_actor=True,  # Enable residual actor mode
     ).float().to(device)
-    print('\nDebug, SKIP INIT STATS FOR AGENT\n')
+   
     norm_stats = _compute_dataset_norm_stats(online_rb=online_rb, offline_rb=offline_rb if cfg.algo.offline_fraction > 0.0 else None, action_dim=rl_input_dim['action'])
     # From here on the agent owns normalization: act()/update() take raw measurements
     # and these stats ride along in the checkpoint as buffers.
-    agent.set_norm_stats(
-        norm_stats,
-        min_action_range=cfg.offline_data.min_action_range,
-        min_state_std=cfg.offline_data.min_state_std,
-    )
-    return offline_rb, online_rb, agent, online_batch_size, offline_batch_size
+    agent.set_norm_stats( norm_stats,  min_action_range=cfg.offline_data.min_action_range,min_state_std=cfg.offline_data.min_state_std,)
+    return agent
     
 
 class ZForceRegulator(ResidualActor):
-    def __init__(self, f_floor=5.0, gain=3e-3, max_speed=0.015, horizon=0.4, neural_actor=None, global_step=None, cfg=None):
+    def __init__(self, f_floor=5.0, gain=3e-3, max_speed=0.015, horizon=0.4,  global_step=None, cfg=None, random=False, neural_actor=None):
         self.f_floor = f_floor      # [N] no correction below this
         self.gain = gain            # [m/s per N] upward velocity per N over f_floor
         self.max_speed = max_speed  # [m/s] fastest upward velocity: slower than an insertion push 
         self.horizon = horizon      # [s] the time over which the policy absorbs an offset
         # neural network and its parameters 
+        self.random = random
         self.neural_actor= neural_actor 
         self.global_step = global_step; self.cfg = cfg
 
@@ -115,11 +103,11 @@ def summarize(ep, f_floor):
                  dz_max_mm=round(1000 * float(dz.max()), 1))
     return s
 
-def deploy(episodes, env, args, actor_fields, online_rb, collect_data=True):
+def deploy(episodes, env, args, actor_fields, online_rb, collect_data=True, global_step = None, cfg=None, random=False, neural_actor=None):
     """Deploy the actor for some episodes for evaluation or data collection."""
     successes, total_transitions, last_successful = [], 0, False
     for _ in range(episodes):
-        env.register(ZForceRegulator(args.f_floor, args.gain, args.max_speed, args.horizon), period=args.period)
+        env.register(ZForceRegulator(args.f_floor, args.gain, args.max_speed, args.horizon, global_step=global_step, cfg=cfg, random=random, neural_actor=neural_actor), period=args.period)
         env.wait_circle = not last_successful; ep = env.run()
 
         insert_episode = None if len(ep.steps) == 0 else ep.steps # a dictionary with 15 keys
@@ -133,13 +121,13 @@ def deploy(episodes, env, args, actor_fields, online_rb, collect_data=True):
     
 def main(args, cfg: ResidualTD3DexmgConfig):
     global_step = 0
+    warmup_episodes = 30 # hardcoded right now
     with ResidualEnv.from_args(args, actor_horizon=cfg.algo.condition_length) as env:
         insert_policy = env._runner.policies['insert'][-1]
-        ################# Prepare experiment: replay buffer, neural actor
+        ################# Prepare experiment: replay buffer
         # fields for the base policy, use for base actiom computation; fields for online actor
         obs_fields = insert_policy.obs_fields; actor_fields = args.actor_fields
-        online_batch_size = int(cfg.algo.batch_size * (1 - cfg.algo.offline_fraction)); offline_batch_size = int(cfg.algo.batch_size * cfg.algo.offline_fraction)
-        offline_rb, online_rb, agent, online_batch_size, offline_batch_size = prepare_rl_experiment(
+        offline_rb, online_rb, rl_input_dim, online_batch_size, offline_batch_size = prepare_rl_experiment(
                 cfg,
                 dataset_path=args.offline_dataset_path,
                 lowdim_keys=obs_fields,
@@ -150,16 +138,28 @@ def main(args, cfg: ResidualTD3DexmgConfig):
         rename_actor_fields = [ 'filtered_force' if name == 'force' else ('actual_pose' if name == 'pose' else name) for name in actor_fields]
         actor_fields = rename_actor_fields
 
-        ################ RL-warmup: fill the replay buffer with some episodes, train the critic
-        warmup_episodes = 2 # hardcoded right now
-        _, total_warmup_steps = deploy(warmup_episodes, env, args, actor_fields, online_rb); global_step += total_warmup_steps
+        ################ RL-warmup: 
+        # 1. fill the offline replay buffer with episodes from zforce regulator
+        offline_rb, flag = load_replay_buffers(offline_rb, 'offline_rb', RL_BUF_DIR)
+        if not flag:
+            _, total_warmup_steps1 = deploy(warmup_episodes, env, args, actor_fields, offline_rb)
+            save_replay_buffers(offline_rb, 'offline_rb', RL_BUF_DIR)
+        assert False
+        # 2. fill the online replay buffer with episodes from random regular
+        online_rb, flag = load_replay_buffers(online_rb, 'online_rb', RL_BUF_DIR)
+        if not flag:
+            _, total_warmup_steps2 = deploy(warmup_episodes, env, args, actor_fields, online_rb, cfg=cfg, random=True)
+            save_replay_buffers(online_rb, 'online_rb', RL_BUF_DIR)
+        # 3. initialize neural actor with stats from both replay buffer
+        agent = prepare_neural_actor(cfg, rl_input_dim,  offline_rb, online_rb)
+        
         # critic_warmup(total_warmup_steps) # warmup for the same number of steps
-        _train_agent( agent, total_warmup_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=True); global_step += total_warmup_steps
+        # _train_agent( agent, total_warmup_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=True); global_step += total_warmup_steps
         ################ RL-training: alternating between collect 1 episode, train for certain steps
         train_episodes = 2 # hardcoded right now 
-        for ep_id in range(train_episodes):
-            ep_success, train_steps = deploy(1, env, args, actor_fields, online_rb)
-            _train_agent( agent, train_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=False); global_step += train_steps
+        # for ep_id in range(train_episodes):
+        #     ep_success, train_steps = deploy(1, env, args, actor_fields, online_rb)
+        #     _train_agent( agent, train_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=False); global_step += train_steps
 
 
 def hydra_entry():
