@@ -6,14 +6,14 @@ def _train_agent(
         agent, train_steps, global_step, online_rb, offline_rb, cfg,  online_batch_size, offline_batch_size, warmup=False, device='cuda'
     ):
         """Run critic-only updates for warmup phase."""
+        agent.train()
         actor_update_cadence = cfg.algo.num_updates_per_iteration // cfg.algo.actor_updates_per_iteration
         stddev = utils.schedule(cfg.algo.stddev_schedule, global_step)
         collect_metrics = {}
         for i in tqdm( range(train_steps) ):
             # Sample mixed online/offline batch
             # Sample batches from replay buffers
-            online_batch = online_rb.sample(online_batch_size)
-            online_batch = online_batch.to(device, non_blocking=True)
+            online_batch = online_rb.sample(online_batch_size); online_batch = online_batch.to(device, non_blocking=True)
 
             if cfg.algo.offline_fraction > 0.0:
                 # Mixed online/offline training
@@ -56,8 +56,10 @@ def _train_agent(
                 if k not in collect_metrics:
                     collect_metrics[k] = []
                 collect_metrics[k].append(v)
+        
         # averaging metrics 
         for k, v_list in collect_metrics.items():
             v_arr = np.array(v_list)
             collect_metrics[k] = np.mean(v_arr)
+        collect_metrics['train/stddev'] = stddev
         return collect_metrics

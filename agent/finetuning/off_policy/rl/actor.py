@@ -37,7 +37,8 @@ class Actor(nn.Module):
         self.prop_dim = prop_dim
         self.residual_actor = residual_actor
         self.cfg = cfg
-
+        self.valid_dim = cfg.valid_dim
+        self.valid_mask = torch.zeros((action_dim)); self.valid_mask[:self.valid_dim] = 1.0
         # temporal compressor (o_{t-w}, ..., o_t) -> emb0
         layers = [TemporalConvEncoder(input_dim=prop_dim, feature_dim=cfg.feature_dim, history_len=condition_length )]
         if cfg.use_layer_norm:
@@ -107,7 +108,7 @@ class Actor(nn.Module):
         temp_feat = self.temp_compress(states); feat = self.compress(cur_input)
         policy_input = torch.cat([temp_feat, feat], dim=-1)
        
-        mu: torch.Tensor = self.policy(policy_input)
+        mu: torch.Tensor = self.policy(policy_input); valid_mask = self.valid_mask.to(mu.device).float().unsqueeze(0)
        
         # Scale the mean by action_scale
         # NOTE: std is already in environment action space (more interpretable)
@@ -115,5 +116,5 @@ class Actor(nn.Module):
 
         # Create distribution with scaled mean but environment-scale std
         action_dist = utils.TruncatedNormal(scaled_mu, std)
-
+        action_dist.loc *= valid_mask; action_dist.scale *= valid_mask
         return action_dist  # noqa: RET504

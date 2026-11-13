@@ -37,8 +37,8 @@ def prepare_rl_experiment(cfg, dataset_path, lowdim_keys, actor_fields, base_pol
     [ shutil.rmtree(scratch_dir ) for scratch_dir in [RL_SCR_DIR, RL_SCR_DIR2]  ]
     [ os.makedirs(scratch_dir) for scratch_dir in [RL_SCR_DIR, RL_SCR_DIR2]  ]
     print('Debug with SMAL ONLINE BATCH SIZE')
-    online_batch_size = 2 #  int(cfg.algo.batch_size * (1 - cfg.algo.offline_fraction))
-    offline_batch_size = 2 #  int(cfg.algo.batch_size * cfg.algo.offline_fraction)
+    online_batch_size = int(cfg.algo.batch_size * (1 - cfg.algo.offline_fraction))
+    offline_batch_size = int(cfg.algo.batch_size * cfg.algo.offline_fraction)
 
     offline_rb, online_rb = init_buffer(total_transitions, RL_SCR_DIR2, RL_SCR_DIR, cfg, online_batch_size, offline_batch_size)
 
@@ -62,19 +62,20 @@ def prepare_neural_actor(cfg, rl_input_dim, offline_rb, online_rb, device='cuda'
     
 
 class ZForceRegulator(ResidualActor):
-    def __init__(self, f_floor=5.0, gain=3e-3, max_speed=0.015, horizon=0.4,  global_step=None, cfg=None, warmup=False, neural_actor=None):
+    def __init__(self, f_floor=5.0, gain=3e-3, max_speed=0.015, horizon=0.4,  global_step=None, cfg=None, warmup=False, neural_actor=None, actor_fields=None, eval_mode=False):
         self.f_floor = f_floor      # [N] no correction below this
         self.gain = gain            # [m/s per N] upward velocity per N over f_floor
         self.max_speed = max_speed  # [m/s] fastest upward velocity: slower than an insertion push 
         self.horizon = horizon      # [s] the time over which the policy absorbs an offset
         # neural network and its parameters 
-        self.warmup = warmup
-        self.neural_actor= neural_actor 
+        self.warmup = warmup; self.eval_mode = eval_mode; neural_actor.eval()
+        self.neural_actor=neural_actor;  self.actor_fields = actor_fields
         self.global_step = global_step; self.cfg = cfg
         if warmup:
             assert cfg is not None, 'Requires cfg to provide noise scale.'
 
     def act(self, steps):
+       
         if self.neural_actor is None:
             step = steps[-1] if isinstance(steps, list) else steps
             fz = float(step.state['filtered_force'][2])
@@ -86,15 +87,23 @@ class ZForceRegulator(ResidualActor):
                 corr[random_axis] += noise; x_corr, y_corr, z_corr = corr
             return Correction(dpose=np.r_[x_corr, y_corr, z_corr, 0., 0., 0.], info={'fz': fz, 'v': v})
         else:
-            # Modify residualactor: get a list of step instead of step
-            # concatenate a window of state and force 
-            # return corrections, only on z-axis 
-            pass
+            history_len = len(steps); condition_length = self.neural_actor.condition_length
+            fzs= np.array( [step.state['filtered_force'][2] for step in steps]); v = min(self.gain * max(0., fz - self.f_floor), self.max_speed)
+          
+            # no correction if insufficient history or no contact is made
+            if condition_length > history_len or np.min(fzs) < 1.0:
+                return Correction(dpose=np.r_[0, 0, 0, 0., 0., 0.], info={'fz': fzs[-1], 'v': v})
+            steps = steps[-condition_length:]
+            state_dict = { k: np.array([step.state[k] for step in steps]) for k in self.actor_fields }
+            states = np.concatenate([state_dict[k] for k in self.actor_fields], -1); base_actions = np.array([step.state['actual_pose'] for step in steps])
+            obs_dict = {
+                "observation.state": torch.from_numpy(states).float().to(self.neural_actor.cfg.device).unsqueeze(0),
+                "observation.base_action": torch.from_numpy(base_actions).float().to(self.neural_actor.cfg.device).unsqueeze(0),
+            }
             with torch.no_grad():
-                obs = None
-                stddev = utils.schedule(self.cfg.algo.stddev_schedule, self.global_step)
-                residual_action = self.neural_actor.act(obs, eval_mode=False, stddev=stddev, cpu=False)
-            return Correction(dpose=np.r_[0., 0., residual_action[2], 0., 0., 0.], info={'fz': fz, 'v': v})
+                stddev = utils.schedule(self.cfg.algo.stddev_schedule, self.global_step) 
+                residual_action = self.neural_actor.act(obs_dict, eval_mode=self.eval_mode, stddev=stddev, cpu=True).squeeze(0).numpy()
+            return Correction(dpose=np.r_[residual_action[0], residual_action[1], residual_action[2], 0., 0., 0.], info={'fz': fz, 'v': v})
 
 def summarize(ep, f_floor):
     """Per-episode numbers: outcome, and how the z-force, the offset and the target behaved."""
@@ -110,11 +119,11 @@ def summarize(ep, f_floor):
                  dz_max_mm=round(1000 * float(dz.max()), 1))
     return s
 
-def deploy(episodes, env, args, actor_fields, online_rb, collect_data=True, global_step = None, cfg=None, warmup=False, neural_actor=None):
+def deploy(episodes, env, args, actor_fields, online_rb, collect_data=True, global_step = None, cfg=None, warmup=False, neural_actor=None, eval_mode=False):
     """Deploy the actor for some episodes for evaluation or data collection."""
     successes, total_transitions, last_successful = [], 0, False
     for _ in range(episodes):
-        env.register(ZForceRegulator(args.f_floor, args.gain, args.max_speed, args.horizon, global_step=global_step, cfg=cfg, warmup=warmup, neural_actor=neural_actor), period=args.period)
+        env.register(ZForceRegulator(args.f_floor, args.gain, args.max_speed, args.horizon, global_step=global_step, cfg=cfg, warmup=warmup, neural_actor=neural_actor, actor_fields=actor_fields, eval_mode=eval_mode), period=args.period)
         env.wait_circle = not last_successful; ep = env.run()
 
         insert_episode = None if len(ep.steps) == 0 else ep.steps # a dictionary with 15 keys
@@ -128,8 +137,9 @@ def deploy(episodes, env, args, actor_fields, online_rb, collect_data=True, glob
     
 def main(args, cfg: ResidualTD3DexmgConfig):
     global_step = 0
-    train_episodes = 2 # hardcoded right now 
-    warmup_episodes = 3 # hardcoded right now
+    eval_interval, eval_episodes, train_log_interval = 10, 10, 10
+    train_episodes = 60 # hardcoded right now 
+    warmup_episodes = 30 # hardcoded right now
     with ResidualEnv.from_args(args, actor_horizon=cfg.algo.condition_length) as env:
         insert_policy = env._runner.policies['insert'][-1]
         ################# Prepare experiment: replay buffer
@@ -151,13 +161,13 @@ def main(args, cfg: ResidualTD3DexmgConfig):
         offline_rb, flag = load_replay_buffers(offline_rb, 'offline_rb', RL_BUF_DIR)
         if not flag:
             deploy(warmup_episodes, env, args, actor_fields, offline_rb)
-            # save_replay_buffers(offline_rb, 'offline_rb', RL_BUF_DIR)
+            save_replay_buffers(offline_rb, 'offline_rb', RL_BUF_DIR)
        
         # 2. fill the online replay buffer with episodes from zforce regular with noise (warmup=True)
         online_rb, flag = load_replay_buffers(online_rb, 'warmup_rb', RL_BUF_DIR)
         if not flag:
             deploy(warmup_episodes, env, args, actor_fields, online_rb, cfg=cfg, warmup=True)
-            # save_replay_buffers(online_rb, 'warmup_rb', RL_BUF_DIR)
+            save_replay_buffers(online_rb, 'warmup_rb', RL_BUF_DIR)
         # 3. initialize neural actor with stats from both replay buffer
         agent = prepare_neural_actor(cfg, rl_input_dim,  offline_rb, online_rb)
         
@@ -169,12 +179,19 @@ def main(args, cfg: ResidualTD3DexmgConfig):
             wandb.log( metrics, step=0)
         
         ################ RL-training: alternating between collect 1 episode, train for certain steps
-        # for ep_id in range(1, train_episodes + 1):
-        #     ep_success, train_steps = deploy(1, env, args, actor_fields, online_rb)
-        #     metrics = _train_agent( agent, train_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=False); global_step += train_steps
-        #     if args.use_wandb:
-        #         wandb.log(metrics, step = ep_id)
-
+        train_ep_success = []
+        for ep_id in range(1, train_episodes + 1):
+            ep_success, train_steps = deploy(1, env, args, actor_fields, online_rb, neural_actor=agent, cfg=cfg, global_step=global_step); train_ep_success.append(ep_success)
+            metrics = _train_agent( agent, train_steps, global_step, online_rb, offline_rb, cfg, online_batch_size, offline_batch_size, warmup=False); global_step += train_steps
+            if args.use_wandb:
+                metrics['train/running success rate'] = np.mean(train_ep_success[-train_log_interval:])
+                wandb.log(metrics, step = ep_id)
+            if (ep_id + 1) % eval_interval == 0:
+                ep_successes, total_transitions = deploy(eval_episodes, env, args, actor_fields, online_rb, neural_actor=agent, cfg=cfg, global_step=global_step, eval_mode = True)
+                success_rate = np.mean(ep_successes)
+                print('Evaluation success rate:', round(success_rate * 100, 2), 'from', len(ep_successes), 'episodes.')
+                if args.use_wandb:
+                    wandb.log({"eval/success rate": success_rate, 'eval/episodes': eval_episodes, 'eval/avg episode len': total_transitions/eval_episodes}, step = ep_id)
 
 def hydra_entry():
     # 1. Define your argparse arguments exactly as before

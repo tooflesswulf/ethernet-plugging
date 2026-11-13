@@ -244,12 +244,6 @@ class QAgent(nn.Module):
                 obs[k] = v.unsqueeze(0)
         return should_unsqueeze
 
-    def maskout_action(self, action):
-        weight = torch.zeros_like(action, device = action.device).float(); weight[:,2] = 1.0
-        # only 2nd dimension valid
-        action *= weight
-        return action
-
     def act(self, obs: dict[str, torch.Tensor], *, eval_mode=False, stddev=0.0, cpu=True) -> torch.Tensor:
         """Take a *raw* (unnormalized) observation and return a *raw* action.
 
@@ -264,7 +258,7 @@ class QAgent(nn.Module):
         obs = copy.copy(obs)
         obs = to_torch(obs, device=self.cfg.device)
         obs = self._normalize_obs(obs)
-        unsqueezed = self._maybe_unsqueeze_(obs)
+        # unsqueezed = self._maybe_unsqueeze_(obs) # staled, no image
 
         action = self._act_default(
             obs=obs,
@@ -274,19 +268,16 @@ class QAgent(nn.Module):
             use_target=False,
         )
 
-        if unsqueezed:
-            action = action.squeeze(0)
+        # if unsqueezed:
+        #     action = action.squeeze(0)
 
         # Networks work in [-1, 1]; the caller (env) works in raw units
-        action = self.unscale_action_delta(action) if self.residual_actor else self.unscale_action(action)
+        action = self.unscale_action(action) # all action saved in data buffer are already deltas. self.unscale_action_delta(action) if self.residual_actor else self.unscale_action(action)
 
         action = action.detach()
         if cpu:
             action = action.cpu()
-        # only z-axis is effective as a residual action
-        
-        action = self.maskout_action(action)
-        
+    
         return action
 
     def _act_default(
@@ -311,8 +302,6 @@ class QAgent(nn.Module):
             action = dist.mean
         else:
             action = dist.sample(clip=clip)
-        # only z-axis is effective as a residual action
-        action = self.maskout_action(action)
         return action
 
     def update_critic(

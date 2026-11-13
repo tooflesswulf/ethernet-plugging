@@ -91,6 +91,7 @@ class ActorConfig:
     num_layers: int = 2
     # Layer normalization control
     use_layer_norm: bool = True
+    valid_dim: int = 3
 
 
 @dataclass
@@ -213,7 +214,7 @@ class RLPDAlgoConfig:
     # ------------------------------------------------------------------
     stddev_max: float = 0.1
     stddev_min: float = 0.1
-    stddev_step: int = 300_000
+    stddev_step: int = 50_000
 
     stddev_schedule: str = field(init=False)
 
