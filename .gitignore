@@ -9,3 +9,4 @@ outputs/
 *.pkl
 .DS_Store
 .ipynb_checkpoints/
+debug.bin
