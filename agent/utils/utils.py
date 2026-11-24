@@ -284,7 +284,8 @@ def add_episode_to_buffer(
         ep,
         obs_fields,
         is_success,
-        rb
+        rb,
+        thr
 ):
     """Helper function to create transitions and add them to the replay buffer.
 
@@ -309,8 +310,16 @@ def add_episode_to_buffer(
     next_obs_list = obs_list[1:]
     obs_list = obs_list[:-1]; action_list = action_list[:-1]
     # reward/done belongs to next step: 1:T
-    reward_list = reward_list[1:] #
-    rewards[-1] = float(is_success)
+    reward_list = np.array(reward_list)
+    
+    # if less than plugin threshold, means sufficiently deep
+    indices = np.where(base_poses[:, 2] < thr)[0]
+    if is_success and len(indices) > 0:
+        reward_list[indices[0]:] = 1.0
+    elif is_success:
+        # hardcoded last 10 to have rewards
+        rewards[-10:] = 1.0
+    reward_list = reward_list[1:] 
     done_list =  dones[1:]; done_list[-1] = True
 
     for (obs, next_obs, action, reward, done) in zip( obs_list, next_obs_list, action_list, reward_list, done_list ):
