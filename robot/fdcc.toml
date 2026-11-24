@@ -61,6 +61,16 @@ stop_decel = 1.0                        # speedStop(a) -- only ever called once 
 ramp_down_timeout_s = 0.5
 rest_speed = [0.0005, 0.005]            # "at rest" for ramp-down [m/s, rad/s]
 
+[auto_unlock]
+# Clear a PROTECTIVE stop from software (Dashboard Server) when the arm was not pushing hard
+# just before it: those are mostly C207A0 watchdog stops from host lag. Never e-stops,
+# safeguard stops or faults. Every stop is logged (rawdata.h5 /pstop) either way.
+max_force_N = 120.0                     # peak raw |F| over window_s before the stop; 0 = off (pendant only)
+window_s = 0.5
+max_unlocks = 3                         # more than this many unlocks within rate_window_s: leave it to the pendant
+rate_window_s = 10.0
+retry_s = 10.0                          # keep trying unlockProtectiveStop (1 s apart) this long
+
 [teleop]
 leash_N = [40.0, 2.5]                   # [N, Nm] the most the spring may push: |K * error| per half, in imp's frame, hold included.
                                         # 40 N = 133 mm at K 300, 13 mm on a 3000 N/m axis; the old 30 mm leash capped insertion at ~9 N

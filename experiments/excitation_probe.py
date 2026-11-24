@@ -24,12 +24,17 @@ The first trial of a session is the fdcc.toml gains (the demos' controller), unl
 --no-nominal. Amplitudes shrink with stiffness so |K * offset| stays within --budget:
 in contact the wiggle explores force, not geometry.
 
-Feedforward fade is OFF during sessions (imp.p.ff_release = 0, restored after): with it
-the target's motion is fed forward only until the contact resists, a nonlinear gate on
-top of the gains under test. Off, every trial is M dV + D (V - V_t) = F + K xi, about the
-moving target. The leash (fdcc.toml [teleop] leash_N) still caps the spring push, and a
-trial aborts above --abort_force / --abort_torque (target snapped to the arm, gains
-restored, then back to the anchor and on to the next trial).
+Feedforward is OFF during sessions (env.set_feedforward(False), restored after): every
+trial is M dV + D V = F + K xi, the target moving only the spring's rest point. Fed
+forward, D V_t pushed on regardless of contact: returning to an anchor preloaded 30 mm
+into a rigid surface, 1000 N s/m * 35 mm/s was 35 N against an F_c clamped at 25 N, and
+the arm drove in to 260 N and protective stops (excitation-probe/episode000005, 131 s).
+The wrench clamp is raised to --wrench_clamp for the session (above the abort limits, so
+the controller sees what the abort sees). The leash (fdcc.toml [teleop] leash_N) still
+caps the spring push, and a trial aborts above --abort_force / --abort_torque, or on a
+protective stop: target snapped to the arm, gains restored, then (once any stop is
+cleared) min-jerk back to the anchor, preload and all, and on to the next trial. Without
+the feedforward that return is the spring alone: 300 N/m * 30 mm = 9 N at the toml gains.
 
 Logged: everything rawdata.h5 has (control/K, D, target, hold, xi, F_c, ...), plus
 probe.json in the episode directory: per session the anchor and config, per trial the
@@ -166,6 +171,7 @@ class ProbeSession:
         self.state = 'prep'                 # prep -> trial <-> return -> done
         self.t_state = time.perf_counter()
         self.ret_from = None
+        self._pstops = self.env.pstop_count
         self.stop_reason = None
         self.done = False
         self.t_start = self.clock()
@@ -224,6 +230,10 @@ class ProbeSession:
             tr = self.trials[self.k]
             W = np.asarray(st['filtered_force'], float)
             f, tq = np.linalg.norm(W[:3]), np.linalg.norm(W[3:])
+            if self.env.pstop_count != self._pstops:
+                self._pstops = self.env.pstop_count
+                self._abort_to_anchor('protective stop')
+                return self.tick()
             if f > self.cfg.abort_force or tq > self.cfg.abort_torque:
                 self._abort_to_anchor(f'|F| {f:.1f} N |tau| {tq:.2f} Nm')
                 return self.tick()
@@ -243,6 +253,10 @@ class ProbeSession:
                 pose = compose(self.anchor, tr.offsets[i])
 
         elif self.state == 'return':
+            self._pstops = self.env.pstop_count
+            if self.env.pstopped:           # hold at the arm; the return starts over once cleared
+                self.ret_from = np.asarray(st['actual_pose'], float)
+                self.t_state, el = now, 0.0
             frac = min_jerk(el / self.cfg.return_s)
             pose = interpolate(URPose(*self.ret_from), URPose(*self.anchor), frac)
             if el >= self.cfg.return_s + self.cfg.rest_s:
@@ -269,7 +283,7 @@ class ExcitationProbe(Teleoperation):
         self.session = None
         self.sessions = []                  # records of finished sessions
         self._last_dpad = (False, False)
-        self._ff_release = None
+        self._saved = None                  # (feedforward, wrench clamp) to restore after a session
         super().__init__(args)
 
     def args2metadata(self, args):
@@ -327,17 +341,20 @@ class ExcitationProbe(Teleoperation):
             self.env.restore_gains()
         anchor = self.env.restart_at_target()
         imp = self.env.imp
-        self._ff_release = np.array(imp.p.ff_release, float)
-        imp.p.ff_release = np.zeros(2)      # fade off: the gate's check is release > 0
-        self.env.set_feedforward(True)
+        self._saved = (self.env._feedforward, np.array(imp.p.clamp, float))
+        self.env.set_feedforward(False)
+        imp.p.clamp = np.array(self.args.wrench_clamp, float)   # one swap; the control loop reads it each step
         self.session = ProbeSession(self, anchor, self.args, self.rng)
         print(f'\nprobe: session {len(self.sessions) + 1} at {URPose(*anchor)}')
 
     def _end_session(self):
         s = self.session
         self.env.restore_gains()
-        if self._ff_release is not None:
-            self.env.imp.p.ff_release = self._ff_release
+        if self._saved is not None:
+            ff, clamp = self._saved
+            self.env.set_feedforward(ff)
+            self.env.imp.p.clamp = clamp
+            self._saved = None
         self.iface.targ_pose = np.array(s.last_pose, float)   # teleop resumes where the probe left it
         self.sessions.append(s.record())
         self.session = None
@@ -404,7 +421,10 @@ def main():
     g.add_argument('--ramp_s', type=float, default=0.5, help='min-jerk to and from the bias')
     g.add_argument('--hold_s', type=float, default=1.0, help='still at the bias after the wiggle')
     g.add_argument('--rest_s', type=float, default=0.3)
-    g.add_argument('--return_s', type=float, default=1.5, help='min-jerk back to the anchor after an abort')
+    g.add_argument('--return_s', type=float, default=1.5,
+                   help='min-jerk back to the anchor after an abort (after a protective stop: once cleared)')
+    g.add_argument('--wrench_clamp', type=float, nargs=2, default=[60., 6.],
+                   help='[N, Nm] fdcc input clamp during sessions (fdcc.toml has 25 / 2); keep it above --abort_*')
     g.add_argument('--abort_force', type=float, default=35.0, help='[N], filtered')
     g.add_argument('--abort_torque', type=float, default=3.0, help='[Nm], filtered, about the flange')
     args = parser.parse_args()

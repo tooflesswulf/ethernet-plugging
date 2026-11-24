@@ -3,6 +3,7 @@ from collections import namedtuple, deque
 from typing import Literal
 import rtde_control
 import rtde_receive
+import dashboard_client
 import numpy as np
 import threading
 import pathlib
@@ -165,6 +166,17 @@ class Env:
         self.stop_decel = rt['stop_decel']
         self.rest_speed = np.array(rt['rest_speed'], float)
         self.ramp_timeout = rt['ramp_down_timeout_s']
+        au = self.fdcc_cfg.get('auto_unlock', {})
+        self.auto_unlock_N = au.get('max_force_N', 0.0)    # 0 = off; see _on_pstop()
+        self.auto_unlock_window = au.get('window_s', 0.5)
+        self.auto_unlock_max = au.get('max_unlocks', 3)
+        self.auto_unlock_rate_window = au.get('rate_window_s', 10.0)
+        self.auto_unlock_retry_s = au.get('retry_s', 10.0)
+        self._dash = None                # dashboard_client.DashboardClient, connected on first use
+        self._unlock_times = deque()     # perf_counter of each auto-unlock attempt, for max_unlocks
+        self.pstopped = False            # protective / emergency stop, as the control loop last saw it
+        self.pstop_count = 0             # rising edges of pstopped
+        self.pstop_log: list[tuple] = []   # (time, peak |F|, peak |tau|, safety mode, unlocked, note)
         self.fdcc_halt = None            # reason string once an abort_wrench trip halts motion; see clear_halt()
         self.scripted_gains = {'K': self.fdcc_cfg['scripted']['stiffness']}   # see set_gains()
         self._gain_request = None        # applied by the control loop (imp is not thread-safe)
@@ -387,6 +399,7 @@ class Env:
         self.network_log: list[tuple[float, bool]] = []   # (time, link up) at every network poll
         self.network_status = False      # until _network_loop polls
         self.gc_log = []
+        self.pstop_log = []
         self.fdcc_target = None          # obs 'target_pose' is the arm until the control loop runs
         self.ctrl.zeroFtSensor()
         self._force_filtered = np.zeros(6)   # filter_force restarts with the zeroed sensor
@@ -596,6 +609,64 @@ class Env:
         """Resume after an abort_wrench halt (the arm restarts tracking the current target)."""
         self.fdcc_halt = None
 
+    def _on_pstop(self, t, f_peak, tq_peak):
+        """
+        A stop just started (control thread). Log it, and if it is a protective stop that the
+        arm was not pushing into ([auto_unlock] max_force_N), clear it from a worker thread:
+        the Dashboard calls block for up to seconds. The control loop's was_stopped branch
+        restarts the script and the controller once the stop is gone, as after the pendant.
+        """
+        protective = self.recv.isProtectiveStopped() and not self.recv.isEmergencyStopped()
+        mode = int(self.recv.getSafetyMode())
+        now = time.perf_counter()
+        while self._unlock_times and now - self._unlock_times[0] > self.auto_unlock_rate_window:
+            self._unlock_times.popleft()
+        if not protective:
+            note = 'not a protective stop'
+        elif not self.auto_unlock_N > 0:
+            note = 'auto_unlock off'
+        elif f_peak >= self.auto_unlock_N:
+            note = f'|F| {f_peak:.0f} N >= {self.auto_unlock_N:.0f} N'
+        elif len(self._unlock_times) >= self.auto_unlock_max:
+            note = f'over {self.auto_unlock_max} unlocks in {self.auto_unlock_rate_window:.0f} s'
+        else:
+            note = None
+        print(f'\nPSTOP at {t:.1f} s: peak |F| {f_peak:.1f} N |tau| {tq_peak:.2f} Nm, safety mode {mode}'
+              + (f' -- clear it on the pendant ({note})' if note else ' -- auto-unlocking'))
+        if note is not None:
+            self.pstop_log.append((t, f_peak, tq_peak, mode, False, note))
+            return
+        self._unlock_times.append(now)
+        threading.Thread(target=self._auto_unlock, args=(t, f_peak, tq_peak, mode),
+                         name='auto_unlock', daemon=True).start()
+
+    def _auto_unlock(self, t, f_peak, tq_peak, mode):
+        ok, note = False, 'gave up'
+        try:
+            if self._dash is None:
+                dash = dashboard_client.DashboardClient(self.robot_ip)
+                dash.connect()
+                self._dash = dash
+                if not dash.isInRemoteControl():
+                    print('\nauto-unlock: robot is in LOCAL control; the Dashboard may refuse to unlock')
+            t_end = time.perf_counter() + self.auto_unlock_retry_s
+            while not self.stop_flag and time.perf_counter() < t_end:
+                time.sleep(1.0)
+                if not self.recv.isProtectiveStopped():
+                    note = 'cleared elsewhere'
+                    break
+                try:
+                    self._dash.closeSafetyPopup()
+                    self._dash.unlockProtectiveStop()
+                    ok, note = True, 'unlocked'
+                    break
+                except Exception as ex:         # 'Unlock protective stop failure: ...', e.g. too soon: try again
+                    note = str(ex)
+        except Exception as ex:
+            note = f'dashboard: {ex}'
+        print(f'\nauto-unlock: {note}' + ('' if ok or note == 'cleared elsewhere' else ' -- clear it on the pendant'))
+        self.pstop_log.append((t, f_peak, tq_peak, mode, ok, note))
+
     def _ramp_down(self, v):
         """
         Bring the arm to rest through speedL, feeding the watchdog every cycle.
@@ -637,6 +708,7 @@ class Env:
 
     def _servo_loop(self, imp, wd):
         v_last, t_prev, was_stopped = np.zeros(6), None, False
+        recent = deque(maxlen=max(int(self.auto_unlock_window / self.dt), 1))   # (|F|, |tau|) before a stop
         self.restore_gains()                           # a previous run may have ended stiff
         while not self.stop_flag:
             t_start = self.ctrl.initPeriod()
@@ -734,7 +806,12 @@ class Env:
             # ----------------------------
             W = np.asarray(actual_force, float)
             f, tq = np.linalg.norm(W[:3]), np.linalg.norm(W[3:])
+            recent.append((f, tq))
             stopped = self.recv.isProtectiveStopped() or self.recv.isEmergencyStopped()
+            if stopped and not was_stopped:
+                self.pstop_count += 1
+                self._on_pstop(t_obs, *np.max(recent, axis=0))
+            self.pstopped = stopped
             if self.fdcc_halt is None and (f > self.abort_wrench[0] or tq > self.abort_wrench[1]):
                 self.fdcc_halt = f'|F| {f:.1f} N, |tau| {tq:.2f} Nm over abort_wrench'
                 print(f'\nFDCC HALT: {self.fdcc_halt} -- env.clear_halt() to resume')
@@ -969,6 +1046,14 @@ class Env:
                 f.create_dataset('network/status', data=np.asarray([up for _, up in self.network_log]))
                 f['network'].attrs['iface'] = self.network_iface
                 f['network'].attrs['query_frequency'] = self.network_query_frequency
+
+            # Every protective / emergency stop: the wrench before it, UR safety mode, and
+            # whether _on_pstop cleared it (note says why not)
+            if self.pstop_log:
+                rows = list(self.pstop_log)
+                for i, name in enumerate(('time', 'f_peak', 'tau_peak', 'safety_mode', 'unlocked')):
+                    f.create_dataset(f'pstop/{name}', data=np.asarray([r[i] for r in rows]))
+                f.create_dataset('pstop/note', data=[r[5] for r in rows], dtype=h5py.string_dtype())
 
             if self.gc_log:
                 for i, name in enumerate(('time', 'duration', 'generation', 'collected')):
